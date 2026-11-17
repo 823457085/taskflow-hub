@@ -1,0 +1,16 @@
+{
+  "name": "taskflow-ai-hub",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "preview:start": "node scripts/preview-service.mjs start",
+    "preview:refresh": "node scripts/preview-service.mjs refresh",
+    "preview:stop": "node scripts/preview-service.mjs stop",
+    "preview:status": "node scripts/preview-service.mjs status",
+    "dev:ui": "npm --prefix preview-app run dev",
+    "dev:api": "npm --prefix platform-server start",
+    "build": "npm --prefix preview-app run build",
+    "build:preview": "npm --prefix preview-app run build:single -- --outDir dist-single",
+    "test": "node --test scripts/preview-http.test.mjs scripts/workspace-navigation.test.mjs scripts/workspace-permissions.test.mjs scripts/client-adapter-storage.test.mjs scripts/task-availability.test.mjs scripts/read-together.test.mjs scripts/jira-reference.test.mjs scripts/source-reference.test.mjs scripts/local-bridge-handoff.test.mjs scripts/local-task-workflow.test.mjs scripts/ui-polish.test.mjs && npm --prefix platform-server test && npm --prefix local-bridge test"
+  }
+}

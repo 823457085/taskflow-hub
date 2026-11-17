@@ -1,0 +1,87 @@
+.tf-connections {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+}
+.tf-connections > * { min-width: 0; }
+.tf-connections .ant-typography,
+.tf-connections .ant-divider {
+  margin-bottom: 0;
+}
+.tf-connections .ant-typography h4,
+.tf-connections h4.ant-typography,
+.tf-connections h5.ant-typography {
+  margin: 0;
+}
+.tf-connections-summary .ant-card-body {
+  padding-block: 12px;
+}
+.tf-connection-catalog .ant-card-body { display: grid; gap: 12px; }
+.tf-connections-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--tf-control-radius, 7px);
+  color: var(--tf-secondary);
+  background: var(--tf-raised);
+  border: 1px solid var(--tf-border);
+}
+.tf-connections-shield {
+  color: var(--tf-accent);
+  flex: 0 0 auto;
+}
+.tf-connection-form-wrap,
+.tf-connection-resource-form,
+.tf-connection-account {
+  width: 100%;
+  max-width: 640px;
+}
+.tf-connection-input-mode { margin-bottom: var(--tf-space-5, 24px); }
+.tf-connection-form-wrap .ant-divider {
+  margin: 0 0 var(--tf-space-5, 24px);
+}
+.tf-connection-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 var(--tf-space-4, 16px);
+}
+.tf-connection-form-grid > *,
+.tf-connection-result,
+.tf-connection-table {
+  min-width: 0;
+}
+.tf-connection-table .ant-table-cell {
+  overflow-wrap: anywhere;
+}
+.tf-connection-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--tf-space-5, 24px);
+}
+.tf-connection-result > * { min-width: 0; }
+.tf-connection-result > .ant-divider {
+  margin: 0;
+}
+.tf-connection-source {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.tf-break-anywhere { overflow-wrap: anywhere; }
+.tf-mono { font-family: var(--font-mono, ui-monospace); }
+@media (max-width: 639px) {
+  .tf-connection-form-grid { grid-template-columns: minmax(0, 1fr); }
+  .tf-connections .ant-card-head { padding-block: var(--tf-space-4, 16px); }
+  .tf-connections .ant-card-head-wrapper { flex-wrap: wrap; gap: var(--tf-space-3, 12px); }
+  .tf-connections .ant-card-head-title { white-space: normal; }
+  .tf-connections .ant-card-extra { margin-inline-start: 0; }
+}

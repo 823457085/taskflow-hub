@@ -1,0 +1,727 @@
+.tf-local-integration {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.tf-local-integration > *,
+.tf-local-clients-section,
+.tf-local-client-grid > * {
+  min-width: 0;
+}
+
+/* 12-Column Asymmetric Bento Command Deck */
+.tf-local-hero-deck {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.tf-local-bridge-card.ant-card {
+  height: 100%;
+}
+
+.tf-local-side-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.tf-local-card-title-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tf-card-icon-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-accent-soft);
+  color: var(--tf-accent);
+  border: 1px solid color-mix(in srgb, var(--tf-accent) 24%, var(--tf-border));
+}
+
+/* Engine Readiness Matrix */
+.tf-engine-readiness {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+}
+
+.tf-engine-readiness-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--tf-muted);
+}
+
+.tf-engine-pill-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tf-engine-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-surface);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.tf-engine-pill > i {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 999px;
+  background: var(--tf-muted);
+}
+
+.tf-engine-pill.is-ready > i {
+  background: var(--tf-success);
+  box-shadow: 0 0 0 3px var(--tf-success-bg);
+}
+
+.tf-engine-pill > strong {
+  font-weight: 600;
+  color: var(--tf-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tf-engine-pill > small {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--tf-muted);
+  white-space: nowrap;
+}
+
+.tf-engine-pill.is-ready > small {
+  color: var(--tf-success);
+  font-weight: 500;
+}
+
+.tf-local-bridge-fields {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, 1.85fr);
+  gap: 14px;
+}
+
+.tf-local-bridge-fields .ant-form-item {
+  margin-bottom: 14px;
+}
+
+.tf-local-doctor-strip {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--tf-divider);
+}
+
+/* Right Column: 2x2 Telemetry KPI Matrix */
+.tf-local-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tf-local-kpi-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 3px;
+  min-height: 76px;
+  padding: 11px 14px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-card-radius, 10px);
+  background: var(--tf-surface);
+  box-shadow: var(--tf-shadow-card);
+}
+
+.tf-local-kpi-tile.is-connected {
+  border-color: color-mix(in srgb, var(--tf-success) 38%, var(--tf-border));
+}
+
+.tf-local-kpi-tile > span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tf-secondary);
+}
+
+.tf-local-kpi-tile > strong {
+  font-family: var(--font-mono);
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 26px;
+  letter-spacing: -0.025em;
+  font-variant-numeric: tabular-nums;
+  color: var(--tf-text);
+}
+
+.tf-local-kpi-tile.is-connected > strong {
+  color: var(--tf-success);
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+
+.tf-local-kpi-tile > small {
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--tf-muted);
+}
+
+/* Right Column: Zero-Copy Workflow Card */
+.tf-local-workflow-card.ant-card {
+  flex: 1;
+}
+
+.tf-local-workflow-steps {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.tf-workflow-step-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.tf-workflow-step-item > em {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  margin-top: 1px;
+  border-radius: 6px;
+  background: var(--tf-raised);
+  border: 1px solid var(--tf-border);
+  color: var(--tf-accent);
+  font: 600 11px/1 var(--font-mono);
+  font-style: normal;
+}
+
+.tf-workflow-step-item strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--tf-text);
+}
+
+.tf-workflow-step-item > div > strong {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.tf-workflow-step-item p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--tf-secondary);
+}
+
+.tf-workflow-step-item code,
+.tf-inline-pill {
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--tf-border);
+  background: var(--tf-raised);
+  color: var(--tf-text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.tf-inline-pill {
+  border-color: color-mix(in srgb, var(--tf-accent) 32%, var(--tf-border));
+  background: var(--tf-accent-soft);
+  color: var(--tf-accent);
+  font-family: var(--font-sans);
+  font-weight: 600;
+}
+
+/* Project Local Repository Binding Card */
+.tf-repo-quick-picker {
+  padding: 12px 14px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+}
+
+.tf-field-caption {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--tf-secondary);
+}
+
+.tf-workspace-bind-grid {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.1fr) minmax(240px, 2fr) minmax(160px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.tf-workspace-bind-grid .ant-form-item {
+  margin-bottom: 0;
+}
+
+.tf-workspace-bind-submit {
+  display: flex;
+  align-items: flex-end;
+}
+
+.tf-bound-workspaces {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--tf-divider);
+}
+
+.tf-bound-workspaces-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.tf-bound-workspaces-head .ant-typography-secondary {
+  font-size: 12px;
+}
+
+.tf-bound-workspaces-list {
+  display: grid;
+  gap: 8px;
+}
+
+.tf-bound-workspace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+  transition: border-color 160ms ease, background-color 160ms ease;
+}
+
+.tf-bound-workspace-row:hover {
+  border-color: color-mix(in srgb, var(--tf-accent) 42%, var(--tf-border));
+}
+
+.tf-bound-workspace-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tf-bound-repo-path {
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--tf-border);
+  background: var(--tf-surface);
+  color: var(--tf-text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.tf-bound-target-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  color: var(--tf-muted);
+  font-size: 11.5px;
+  line-height: 18px;
+}
+
+/* CLI / IDE Client Cards */
+.tf-local-clients-section {
+  display: grid;
+  gap: 10px;
+}
+
+.tf-local-section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+}
+
+.tf-local-section-heading h2.ant-typography {
+  margin: 0 0 2px;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.4;
+}
+
+.tf-local-section-heading .ant-typography {
+  font-size: 12px;
+}
+
+.tf-local-protocol.ant-tag {
+  margin: 0;
+  font-size: 11px;
+  border-radius: 999px;
+  padding-inline: 8px;
+}
+
+.tf-local-client-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tf-local-client-card.ant-card .ant-card-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  height: 100%;
+  padding: 14px 16px;
+}
+
+.tf-local-client-card {
+  transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.tf-local-client-card:hover,
+.tf-local-client-card:focus-within {
+  border-color: color-mix(in srgb, var(--tf-accent) 45%, var(--tf-border));
+}
+
+.tf-local-client-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tf-local-client-identity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.tf-local-client-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--tf-control-radius, 7px);
+  background: var(--tf-raised);
+  color: var(--tf-secondary);
+  border: 1px solid var(--tf-border);
+}
+
+.tf-local-client-identity h3.ant-typography {
+  font-size: 13.5px;
+  line-height: 1.35;
+  margin: 0 0 1px;
+}
+
+.tf-local-client-type {
+  font-size: 11.5px;
+}
+
+.tf-client-config-chip {
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--tf-border);
+  background: var(--tf-raised);
+  color: var(--tf-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.tf-local-client-description.ant-typography {
+  margin: 10px 0 12px;
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tf-local-client-action.ant-btn {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.tf-local-integration .ant-typography {
+  overflow-wrap: anywhere;
+}
+
+/* Capabilities Collapse & Tags */
+.tf-local-help .ant-collapse-header-text {
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.tf-local-capabilities {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.tf-capability-group {
+  padding: 14px 16px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+}
+
+.tf-local-capabilities .ant-typography {
+  margin: 6px 0 12px;
+  font-size: 12.5px;
+}
+
+.tf-mcp-tool-tag.ant-tag {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-color: var(--tf-border);
+  background: var(--tf-surface);
+  color: var(--tf-text);
+}
+
+.tf-mcp-tool-tag.is-write.ant-tag {
+  border-color: color-mix(in srgb, var(--tf-accent) 30%, var(--tf-border));
+  background: var(--tf-accent-soft);
+  color: var(--tf-accent);
+}
+
+.tf-local-capabilities-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--tf-divider);
+}
+
+.tf-local-capabilities-footer .ant-typography {
+  font-size: 12px;
+  margin: 0;
+}
+
+/* Setup Guide Drawer */
+.tf-local-setup {
+  display: grid;
+  gap: 20px;
+  min-width: 0;
+}
+
+.tf-local-setup .ant-segmented {
+  width: 100%;
+}
+
+.tf-local-setup .ant-steps {
+  margin-block: 4px;
+}
+
+.tf-local-custom-selection {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+  min-width: 0;
+}
+
+.tf-local-custom-selection > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tf-local-custom-selection .ant-btn {
+  flex: none;
+}
+
+.tf-local-guide-section,
+.tf-local-guide-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: 10px;
+}
+
+.tf-local-guide-section {
+  gap: 16px;
+}
+
+.tf-local-guide-lead h3.ant-typography {
+  margin: 0 0 6px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.tf-local-guide-section .ant-typography {
+  margin-bottom: 0;
+}
+
+.tf-local-guide-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-raised);
+}
+
+.tf-local-command {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+  background: var(--tf-surface);
+  min-width: 0;
+}
+
+.tf-local-command pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--tf-text);
+}
+
+.tf-local-command .ant-btn {
+  flex: 0 0 auto;
+}
+
+.tf-local-device-review,
+.tf-local-device-review > *,
+.tf-local-devices-table,
+.tf-local-devices-card,
+.tf-local-devices-card .ant-card-body {
+  min-width: 0;
+}
+
+.tf-local-device-review .ant-descriptions-item-content,
+.tf-local-devices-table .ant-table-cell {
+  overflow-wrap: anywhere;
+}
+
+.tf-local-code-input {
+  width: 100%;
+  max-width: 320px;
+  font-family: var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+.tf-local-devices-card .ant-card-head-wrapper {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.tf-local-devices-card .ant-card-head-title {
+  white-space: normal;
+}
+
+.tf-local-device-secondary {
+  font-size: 12px;
+}
+
+.tf-local-device-note.ant-typography {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.tf-local-device-mobile-item.ant-list-item {
+  display: block;
+  padding: 18px 0;
+}
+
+.tf-local-device-mobile-item.ant-list-item:first-child {
+  padding-top: 0;
+}
+
+.tf-local-device-mobile-item.ant-list-item:last-child {
+  padding-bottom: 0;
+}
+
+.tf-local-device-mobile-item .ant-tag {
+  margin-inline-end: 0;
+}
+
+@media (max-width: 1180px) {
+  .tf-local-hero-deck {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tf-workspace-bind-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .tf-local-bridge-fields,
+  .tf-workspace-bind-grid,
+  .tf-engine-pill-grid,
+  .tf-local-client-grid,
+  .tf-local-capabilities {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .tf-local-section-heading {
+    align-items: flex-start;
+  }
+  .tf-local-protocol {
+    display: none;
+  }
+}
+
+@media (max-width: 639px) {
+  .tf-local-command {
+    flex-wrap: wrap;
+  }
+  .tf-local-command pre {
+    flex-basis: 100%;
+  }
+  .tf-local-command .ant-btn {
+    margin-inline-start: auto;
+  }
+}

@@ -1,0 +1,35 @@
+.tf-custom-adapters, .tf-custom-adapters .ant-card-body { min-width: 0; }
+.tf-custom-adapters .ant-card-head { padding-block: 20px; }
+.tf-custom-adapters .ant-card-head-wrapper { gap: 16px; flex-wrap: wrap; }
+.tf-custom-adapters .ant-card-head-title { white-space: normal; }
+.tf-custom-adapters-title h2.ant-typography { margin: 0 0 4px; font-size: 16px; line-height: 1.5; }
+.tf-custom-adapters-title .ant-typography { font-size: 12px; }
+.tf-custom-adapters .ant-card-extra { margin-inline-start: 0; }
+.tf-custom-adapters-list { list-style: none; margin: 0; padding: 0; }
+.tf-custom-adapters-list > li { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-width: 0; padding: 14px 0; border-bottom: 1px solid var(--tf-divider); }
+.tf-custom-adapters-list > li:first-child { padding-top: 0; }
+.tf-custom-adapters-list > li:last-child { border-bottom: 0; padding-bottom: 0; }
+.tf-custom-adapter-identity { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tf-custom-adapter-identity > div { display: grid; gap: 4px; min-width: 0; }
+.tf-custom-adapter-identity .ant-typography { overflow-wrap: anywhere; }
+.tf-custom-adapter-identity .ant-typography-secondary { font-size: 12px; }
+.tf-custom-adapter-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 38px; width: 38px; height: 38px; border-radius: var(--tf-control-radius, 8px); background: var(--tf-accent-soft); color: var(--tf-accent); border: 1px solid color-mix(in srgb, var(--tf-accent) 24%, var(--tf-border)); }
+.tf-custom-adapter-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex: none; flex-wrap: wrap; }
+.tf-custom-adapters-note.ant-typography { margin: 20px 0 0; font-size: 12px; }
+.tf-custom-adapters .ant-empty { margin-block: 8px 20px; }
+.tf-custom-adapter-modal .ant-form > .ant-btn { margin-bottom: 16px; }
+.tf-custom-adapter-modal textarea { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; }
+@media (max-width: 767px) {
+  .tf-custom-adapters .ant-card-head { padding: 16px; }
+  .tf-custom-adapters .ant-card-head-wrapper { flex-direction: column; align-items: stretch; }
+  .tf-custom-adapters .ant-card-body { padding: 16px; }
+  .tf-custom-adapters-list > li { align-items: stretch; flex-direction: column; gap: 12px; }
+  .tf-custom-adapter-actions { justify-content: flex-start; }
+}
+@media (max-width: 479px) {
+  .tf-custom-adapter-toolbar.ant-space { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .tf-custom-adapter-toolbar .ant-btn { width: 100%; min-width: 0; padding-inline: 8px; font-size: 12px; }
+  .tf-custom-adapter-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .tf-custom-adapter-actions .ant-btn { min-width: 0; padding-inline: 4px; }
+  .tf-custom-adapter-actions .ant-btn-icon { display: none; }
+}

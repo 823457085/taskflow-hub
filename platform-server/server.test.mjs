@@ -1,0 +1,85 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createPlatform, runtimeOptions } from './server.mjs';
+const password = 'local-only-test-passphrase';
+test('runtime binding ignores inherited workspace PORT and HOST', () => {
+  assert.deepEqual(runtimeOptions({ PORT: '5288', HOST: '0.0.0.0' }), { port: 5187, host: '127.0.0.1' });
+  assert.deepEqual(runtimeOptions({ PORT: '5288', TASKFLOW_PORT: '5190', TASKFLOW_HOST: '127.0.0.2' }), { port: 5190, host: '127.0.0.2' });
+  assert.throws(() => runtimeOptions({ TASKFLOW_PORT: '0' }), /TASKFLOW_PORT/);
+});
+test('HTTP authentication, role boundaries, tracked work and persistence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'taskflow-test-'));
+  const dbPath = join(dir, 'platform.sqlite');
+  const logs = []; let platform;
+  async function start() {
+    platform = createPlatform({ dbPath, logger: { error: (...args) => logs.push(args.join(' ')) } });
+    await new Promise(resolve => platform.server.listen(0, '127.0.0.1', resolve));
+    return `http://127.0.0.1:${platform.server.address().port}`;
+  }
+  let base = await start();
+  const call = async (path, method = 'GET', body, token, extraHeaders = {}) => {
+    const response = await fetch(base + path, { method, headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extraHeaders }, body: body ? JSON.stringify(body) : undefined });
+    return { status: response.status, headers: response.headers, body: response.status === 204 ? undefined : await response.json() };
+  };
+  try {
+    assert.equal((await call('/health')).body.status, 'ok');
+    assert.equal((await call('/api/tasks')).status, 401);
+    assert.equal((await call('/api/setup', 'POST', { username: 'admin', password: 'short' })).status, 400);
+    assert.equal((await call('/api/setup', 'POST', { username: 'admin', password })).status, 201);
+    assert.equal((await call('/api/setup', 'POST', { username: 'second', password })).status, 409);
+    assert.equal((await call('/api/login', 'POST', { username: 'admin', password: 'wrong-password' })).status, 401);
+    const login = await call('/api/login', 'POST', { username: 'admin', password });
+    assert.equal(login.status, 200); const adminToken = login.body.token;
+    assert.match(login.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
+    assert.equal((await call('/api/me', 'GET', undefined, undefined, { Cookie: login.headers.get('set-cookie').split(';')[0] })).body.user.role, 'ADMIN');
+    assert.equal((await call('/api/users', 'POST', { username: 'developer', password, role: 'DEV' }, adminToken)).status, 201);
+    assert.equal((await call('/api/users', 'POST', { username: 'quality', password, role: 'QA' }, adminToken)).status, 201);
+    const dev = (await call('/api/login', 'POST', { username: 'developer', password })).body;
+    const qa = (await call('/api/login', 'POST', { username: 'quality', password })).body;
+    assert.equal((await call('/api/users', 'POST', { username: 'fakeadmin', password, role: 'ADMIN' }, dev.token, { 'X-Role': 'ADMIN' })).status, 403);
+    assert.equal((await call('/api/audit', 'GET', undefined, dev.token)).status, 403);
+    assert.equal((await call('/api/tasks', 'POST', { jiraKey: 'invalid', title: 'test' }, adminToken)).status, 400);
+    const created = await call('/api/tasks', 'POST', { jiraKey: 'TEST-1', title: 'Local tracked task' }, dev.token);
+    assert.equal(created.status, 201); const task = created.body.task;
+    assert.equal(task.jiraStatus, 'unverified');
+    assert.equal((await call('/api/tasks', 'POST', { jiraKey: 'TEST-1', title: 'Duplicate' }, dev.token)).status, 409);
+    const progress = { tool: 'codex-cli', deviceId: 'test-device', progress: 50, summary: 'Implemented local checks', branch: 'feature/TEST-1', actorId: 'forged-actor' };
+    assert.equal((await call(`/api/tasks/${task.id}/progress`, 'POST', progress, qa.token)).status, 403);
+    assert.equal((await call(`/api/tasks/${task.id}/progress`, 'POST', { ...progress, progress: 101 }, dev.token)).status, 400);
+    const reported = await call(`/api/tasks/${task.id}/progress`, 'POST', progress, dev.token);
+    assert.equal(reported.status, 201); assert.equal(reported.body.progress.actorId, dev.user.id); assert.equal(reported.body.progress.source, 'self_reported');
+    const context = await call(`/api/tasks/${task.id}/context`, 'GET', undefined, qa.token);
+    assert.equal(context.body.task.progress, 50); assert.equal(context.body.integrationStatus, 'UNCONFIGURED'); assert.deepEqual(context.body.assets, []);
+    assert.equal((await call('/api/reviews', 'POST', { taskId: task.id, stage: 'RELEASE' }, dev.token)).status, 403);
+    assert.equal((await call('/api/reviews', 'POST', { taskId: task.id, stage: 'TEST_CASE' }, dev.token)).status, 403);
+    const review = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW' }, dev.token);
+    assert.equal(review.status, 201); assert.equal(review.body.job.status, 'AWAITING_CONFIGURATION');
+    assert.equal(review.body.job.persona, 'ai-reviewer'); assert.equal(review.body.job.executor, 'UNCONFIGURED'); assert.ok(review.body.job.skills.includes('cross-repo-contract-diff'));
+    const retry = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW' }, dev.token);
+    assert.equal(retry.status, 200); assert.equal(retry.body.job.id, review.body.job.id);
+    assert.equal((await call('/api/reviews', 'POST', { taskId: 'missing', stage: 'TEST_CASE' }, qa.token)).status, 404);
+    const manifest = { id: 'contract-audit', name: 'Contract audit', version: '1.0.0', stages: ['CODE_REVIEW'], command: 'must-not-be-stored' };
+    assert.equal((await call('/api/plugins', 'POST', manifest, dev.token)).status, 403);
+    assert.equal((await call('/api/plugins', 'POST', { ...manifest, id: '../bad' }, adminToken)).status, 400);
+    const plugin = await call('/api/plugins', 'POST', manifest, adminToken);
+    assert.equal(plugin.status, 201); assert.equal(plugin.body.plugin.status, 'REGISTERED_NOT_EXECUTABLE'); assert.equal(plugin.body.plugin.command, undefined);
+    const connectors = await call('/api/connectors', 'GET', undefined, adminToken);
+    assert.equal(connectors.body.connectors.length, 5); assert.ok(connectors.body.connectors.every(c => c.status === 'UNCONFIGURED'));
+    assert.equal((await call('/api/tasks', 'POST', { jiraKey: 'TEST-2', title: 'cross origin' }, adminToken, { Origin: 'https://untrusted.invalid' })).status, 403);
+    assert.equal((await call('/api/tasks', 'POST', { jiraKey: 'TEST-2', title: 'x'.repeat(200_000) }, adminToken)).status, 413);
+    const audit = await call('/api/audit', 'GET', undefined, adminToken); const serializedAudit = JSON.stringify(audit.body);
+    assert.ok(!serializedAudit.includes(password)); assert.ok(!serializedAudit.includes(adminToken)); assert.ok(audit.body.audit.some(a => a.action === 'PROGRESS_REPORT' && a.actorId === dev.user.id));
+    assert.notEqual(platform.db.prepare('SELECT * FROM users WHERE username=?').get('admin').hash, password);
+    assert.ok(platform.db.prepare('SELECT token_hash FROM sessions').all().every(s => s.token_hash !== adminToken));
+    assert.equal(statSync(dbPath).mode & 0o777, 0o600);
+    assert.equal((await call('/api/logout', 'POST', undefined, dev.token)).status, 204); assert.equal((await call('/api/me', 'GET', undefined, dev.token)).status, 401);
+    await platform.close(); base = await start();
+    assert.equal((await call('/api/tasks', 'GET', undefined, adminToken)).body.tasks[0].progress, 50);
+    assert.equal((await call('/api/jobs', 'GET', undefined, adminToken)).body.jobs.length, 1);
+    assert.equal((await call('/api/plugins', 'GET', undefined, adminToken)).body.plugins.length, 1);
+    assert.equal(logs.length, 0);
+  } finally { await platform.close(); rmSync(dir, { recursive: true, force: true }); }
+});

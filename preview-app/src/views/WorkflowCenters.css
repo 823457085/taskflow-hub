@@ -1,0 +1,30 @@
+.tf-workflow-center { min-width: 0; }
+.tf-workflow-center .ant-card-head-wrapper { flex-wrap: wrap; gap: var(--tf-space-3, 12px); }
+.tf-workflow-center .ant-card-head-title { min-width: 0; white-space: normal; }
+.tf-workflow-center .ant-card-extra { max-width: 100%; }
+.tf-workflow-heading { margin: 0; font-size: inherit; font-weight: inherit; line-height: 1.5; }
+.tf-workflow-secondary { font-size: 12px; }
+.tf-workflow-toolbar { display: flex; flex-wrap: wrap; gap: var(--tf-space-3, 12px); margin-bottom: var(--tf-space-4, 16px); }
+.tf-workflow-toolbar > .ant-input-affix-wrapper { flex: 1 1 260px; max-width: 480px; }
+.tf-workflow-toolbar > .ant-select { flex: 0 1 200px; min-width: 160px; }
+.tf-workflow-title-cell { display: flex; flex-direction: column; gap: var(--tf-space-2, 8px); min-width: 0; }
+.tf-workflow-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; overflow-wrap: anywhere; }
+.tf-workflow-title-link.ant-btn { height: auto; padding: 0; justify-content: flex-start; text-align: left; white-space: normal; line-height: 1.65; }
+.tf-workflow-title-link.ant-btn > span { white-space: normal; overflow-wrap: anywhere; }
+.tf-workflow-ellipsis { width: 100%; max-width: 100%; }
+.tf-workflow-hash { display: block; width: 96px; max-width: 100%; }
+.tf-workflow-source { display: inline-flex; align-items: center; gap: var(--tf-space-1, 4px); }
+.tf-workflow-center .ant-table-wrapper, .tf-workflow-center .ant-card-body { min-width: 0; }
+.tf-workflow-center .ant-table-cell { overflow-wrap: anywhere; }
+.tf-workflow-task-picker .ant-select { width: 100%; }
+.tf-workflow-mobile-list .ant-list-item { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--tf-space-3, 12px); padding-block: var(--tf-space-4, 16px); min-width: 0; }
+.tf-workflow-mobile-list .ant-list-item:first-child { padding-top: 0; }
+.tf-workflow-mobile-list .ant-list-item:last-child { padding-bottom: 0; }
+.tf-workflow-mobile-pagination { display: flex; justify-content: flex-end; flex-wrap: wrap; margin-top: var(--tf-space-5, 24px); }
+@media (max-width: 767px) {
+  .tf-workflow-center .ant-card-head { padding-block: var(--tf-space-4, 16px); }
+  .tf-workflow-center .ant-card-head-wrapper { align-items: flex-start; flex-direction: column; }
+  .tf-workflow-center .ant-card-extra { margin-inline-start: 0; }
+  .tf-workflow-toolbar > .ant-input-affix-wrapper { flex-basis: 100%; max-width: none; }
+  .tf-workflow-toolbar > .ant-select { flex: 1 1 100%; }
+}
