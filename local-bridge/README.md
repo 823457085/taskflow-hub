@@ -122,7 +122,7 @@ node local-bridge/rd.mjs doctor --adapter /明确位置/my-workbench.json --proj
 node local-bridge/rd.mjs export-mcp --adapter /明确位置/my-workbench.json
 ```
 
-`--adapter` 与 `--client` 互斥。安装器沿用冲突拒绝、0600 备份、原子写入和并发检查，并逐层拒绝配置目录的符号链接。导出只含本机路径，不读取会话内容。`doctor` 在原三种检查外追加此适配器配置检查，仍直接用固定桥接服务验证九个工具与认证；不会执行适配器指定的软件。成功后需在对应客户端重载并实际调用 `task_list`，配置匹配不等于客户端已加载或 AI 已执行。
+`--adapter` 与 `--client` 互斥。安装器沿用冲突拒绝、0600 备份、原子写入和并发检查，并逐层拒绝配置目录的符号链接。导出只含本机路径，不读取会话内容。`doctor` 在原三种检查外追加此适配器配置检查，仍直接用固定桥接服务验证十一个工具与认证；不会执行适配器指定的软件。成功后需在对应客户端重载并实际调用 `task_list`，配置匹配不等于客户端已加载或 AI 已执行。
 
 当前 Delivery Workspace 的原生自定义插件协议只支持声明式记录/Jira/会话引用，不支持注册 MCP。不能把此描述文件当成已安装的工作台原生插件。Codex 引擎可通过其 MCP 配置继续对接；Claude 等引擎是否加载配置需单独验证。原生插件菜单、工作台后台同步或新增宿主 MCP 注册 API 需要单独升级宿主扩展能力，本安装器不会修改或重启宿主工作台。
 
@@ -171,6 +171,8 @@ MCP 启动后，stdout 仅输出 JSON-RPC；`--print-config` 是单独的配置�
 | `assets` | `taskId` | 读取资产版本 |
 | `reviews` | `taskId` | 读取任务评审列表 |
 | `review_context` | `jobId` | 读取评审输入快照与报告 |
+| `knowledge_search` | `projectId`, 可选 `q`、`tag`、`limit` | 检索项目团队知识库，返回摘要 |
+| `knowledge_doc` | `docId` | 读取知识库文档全文 |
 | `task_claim` | `taskId`, `expectedVersion` | 按当前任务版本认领 |
 | `progress_report` | `taskId`, `tool`, `progress`, `summary`, 可选 `branch` | 上报一次明确进度 |
 | `heartbeat` | `taskId`, `tool`, `status` | 上报一次设备心跳 |

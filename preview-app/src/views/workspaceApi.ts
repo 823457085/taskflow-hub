@@ -71,11 +71,23 @@ export interface HostBridgeStatus {
   status: 'ACTIVE' | 'EXPIRED' | 'REVOKED' | 'DISCONNECTED' | 'UNSUPPORTED' | 'INVALID' | 'OTHER_USER';
   device: HostBridgeDevice | null; suggestedProjectIds: string[];
 }
-export type LocalAiRunner = 'local' | 'workbench';
+export type LocalAiRunner = 'local' | 'workbench' | 'bridge';
 export type LocalAiEngineId = 'codex' | 'antigravity' | 'cursor' | 'claude';
 export interface LocalAutomationEngine { id: LocalAiEngineId; label: string; tool: string; available: boolean }
+export interface BridgeDevice {
+  id: string; deviceName: string; tool: string; projectIds: string[];
+  lastSeenAt: string | null; expiresAt: string; online: boolean;
+}
+export interface TeamAgent {
+  id: string; deviceName: string; tool: string; owner: { id: string; username: string };
+  lastSeenAt: string | null; online: boolean; teamDispatch: boolean; mine: boolean; dispatchable: boolean;
+}
 export interface LocalAutomationCapabilities {
   supported: boolean;
+  deployment?: 'local' | 'server';
+  runners?: LocalAiRunner[];
+  bridgeModes?: ('read' | 'develop' | 'review')[];
+  devices?: BridgeDevice[];
   engines: LocalAutomationEngine[];
   apps: { cursor: boolean; terminal: boolean; finder: boolean; workbenchUrl: string };
 }
@@ -99,6 +111,7 @@ export interface LocalAiRun {
   id: string; taskId: string; projectId: string; jobId: string | null; actorId: string;
   mode: 'read' | 'develop' | 'review'; engine: LocalAiEngineId; tool: string; repoPath: string | null;
   runner?: LocalAiRunner; workbenchUrl?: string;
+  deviceId?: string; deviceName?: string | null; deviceOwner?: { id: string; username: string } | null; bridgePhase?: 'QUEUED' | 'CLAIMED' | 'EXECUTING' | null; cancelRequested?: boolean;
   status: 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED'; exitCode: number | null;
   output: string; draft: LocalAiRunDraft | null; error: string | null;
   startedAt: string; finishedAt: string | null; updatedAt: string;
@@ -151,6 +164,8 @@ export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) { super(message); this.status = status; }
 }
+export const hubApiUrl = (): string => location.port === '5186' ? 'http://127.0.0.1:5187' : location.origin;
+export const hubHostLabel = (): string => location.host;
 export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...args)) {
   const inFlightGets = new Map<string, Promise<unknown>>();
   return async function apiClient<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {

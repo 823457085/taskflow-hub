@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { App, Alert, Button, Card, Collapse, Drawer, Flex, Form, Grid, Input, Segmented, Select, Space, Steps, Tag, Typography } from 'antd';
 import { Activity, ArrowLeft, ArrowRight, Check, Copy, Cpu, ExternalLink, FileCode2, FolderGit2, FolderOpen, LayoutDashboard, MousePointer2, RefreshCw, ShieldCheck, Sparkles, Terminal, Trash2, Zap } from 'lucide-react';
-import { api, ApiError, HostBridgeStatus, LocalAutomationCapabilities, LocalGitRepo, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
+import { api, ApiError, HostBridgeStatus, hubApiUrl, LocalAutomationCapabilities, LocalGitRepo, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
 import { LocalDeviceList, LocalDevicePairing } from './LocalDevicePairing';
+import { TeamAgentsCard } from './TeamAgents';
+import { bridgeInstallCommand } from './bridgeInstall';
 import { CustomClientAdapters } from './CustomClientAdapters';
 import type { ClientAdapterManifest } from '../../../shared/local-client-adapter.mjs';
 import { navigateWorkspace } from './workspaceNavigation';
@@ -19,7 +21,7 @@ const CLIENTS = [
   { key: 'claude', name: 'Claude Code', tool: 'claude-code', file: '.mcp.json', node: 'mcpServers.taskflow', description: '在本地开发会话中直连项目任务、材料版本与评审快照。', icon: Cpu },
   { key: 'cursor', name: 'Cursor', tool: 'cursor', file: '.cursor/mcp.json', node: 'mcpServers.taskflow', description: '在 IDE 对话中直接调用任务检索、认领与评审工具链。', icon: MousePointer2 },
 ];
-const READ_TOOLS = ['task_list', 'context', 'assets', 'reviews', 'review_context'];
+const READ_TOOLS = ['task_list', 'context', 'assets', 'reviews', 'review_context', 'knowledge_search', 'knowledge_doc'];
 const WRITE_TOOLS = ['task_claim', 'progress_report', 'heartbeat', 'report_submit'];
 const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 const absoluteProjectPath = (value: string) => value.startsWith('/') && !/[\r\n\x00]/.test(value);
@@ -258,8 +260,9 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const changeStep = (next: number) => { if (step === 2 && next !== 2) clearPaths(); setStep(next); clearCopy(); };
   const closeGuide = () => { if (handoffPort !== undefined) clearHandoffRoute(handoffPort); seenHandoff.current = ''; setHandoffPort(undefined); clearPaths(); setCopied(''); setGuideOpen(false); };
   const selectClient = (key: string) => { clearPaths(); setClient(key); setCustomAdapter(null); setStep(0); setCopied(''); };
-  const pairCommand = `node local-bridge/rd.mjs connect --url http://127.0.0.1:5187 --web-url http://127.0.0.1:5186 --name ${shellQuote(customAdapter?.name || '我的开发电脑')} --tool ${activeClient.tool}`;
-  const backupLogin = `node local-bridge/rd.mjs login --url http://127.0.0.1:5187 --username ${shellQuote(user.username)}`;
+  const serverMode = capabilities?.deployment === 'server';
+  const pairCommand = `node local-bridge/rd.mjs ${serverMode ? 'pair' : 'connect'} --url ${hubApiUrl()} --web-url ${location.origin} --name ${shellQuote(customAdapter?.name || '我的开发电脑')} --tool ${activeClient.tool}`;
+  const backupLogin = `node local-bridge/rd.mjs login --url ${hubApiUrl()} --username ${shellQuote(user.username)}`;
   const pathsReady = absoluteProjectPath(projectPath) && (!customAdapter || (absoluteProjectPath(adapterPath) && /\.json$/i.test(adapterPath)));
   const adapterOption = customAdapter ? `--adapter ${shellQuote(adapterPath)}` : `--client ${activeClient.key}`;
   const installCommand = pathsReady ? `node local-bridge/rd.mjs install-mcp ${adapterOption} --project ${shellQuote(projectPath)}` : '';
@@ -285,7 +288,36 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
 
   return <div className="tf-local-integration">
     <div className="tf-local-hero-deck">
-      {hostBridge?.supported !== false && (
+      {serverMode && (
+        <Card
+          className="tf-local-bridge-card"
+          title={<div className="tf-local-card-title-row">
+            <span className="tf-card-icon-badge"><Zap size={16} /></span>
+            <span>我的本机 Bridge（服务器派发、本机执行）</span>
+            {capabilities?.devices?.some(device => device.online)
+              ? <StatusBadge variant="green" pulse>在线 {capabilities.devices.filter(device => device.online).length} 台</StatusBadge>
+              : <StatusBadge variant="blue">未在线</StatusBadge>}
+          </div>}
+          extra={<Button size="small" icon={<RefreshCw size={13} />} loading={loadingBridge} onClick={() => void loadHostState(false)}>刷新状态</Button>}
+        >
+          <Flex vertical gap={12}>
+            <Typography.Text type="secondary">服务器只保存任务、派发与结果；AI 在你的电脑上运行，代码仓库和 AI 账号不离开本机。worker 只执行派发给该设备的任务，仓库路径以本机配置为准，开发类任务需在本机弹窗确认。</Typography.Text>
+            {(capabilities?.devices || []).map(device => (
+              <Flex key={device.id} justify="space-between" align="center" gap={8} wrap>
+                <Space size={8}><Typography.Text strong>{device.deviceName}</Typography.Text><Tag>{device.tool}</Tag><Tag>{device.projectIds.length} 个项目</Tag></Space>
+                <Typography.Text type={device.online ? 'success' : 'secondary'}>{device.online ? '在线' : device.lastSeenAt ? `最近在线 ${timeText(device.lastSeenAt)}` : '已配对，未启动 worker'} · 有效期至 {timeText(device.expiresAt)}</Typography.Text>
+              </Flex>
+            ))}
+            <Typography.Text>1. 在你的电脑终端运行一键安装（需要 Node.js 24+）。脚本会下载客户端到 ~/.taskflow，自签名证书时提示核对指纹，然后显示配对码，在本页「设备授权」中确认并勾选项目：</Typography.Text>
+            {commandBlock('bridge-install', bridgeInstallCommand(location.origin), '一键安装')}
+            <Typography.Text>2. 编辑 ~/.taskflow/state/worker.json，把「项目ID」映射到本机代码仓库绝对路径；要接收开发任务时把 allowDevelop 设为 true。</Typography.Text>
+            <Typography.Text>3. 设为登录后自动在后台运行（macOS），之后不用开着终端：</Typography.Text>
+            {commandBlock('bridge-service', '~/.taskflow/bin/taskflow-bridge service --action install', '后台运行')}
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>想先前台试运行可执行 ~/.taskflow/bin/taskflow-bridge worker；查看后台状态用 service --action status，停止用 service --action uninstall。在「我的设备」中开启「允许团队派发」后，项目负责人也能把任务派到这台电脑。</Typography.Text>
+          </Flex>
+        </Card>
+      )}
+      {hostBridge?.supported !== false && !serverMode && (
         <Card
           className="tf-local-bridge-card"
           title={
@@ -693,11 +725,13 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
 
     <CustomClientAdapters userId={user.id} onConnect={startCustomGuide} />
 
-    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
+    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} teamDispatch={serverMode} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
+
+    {serverMode && <TeamAgentsCard key={`team-${user.id}`} projects={projects} onUnauthorized={onUnauthorized} />}
 
     <Collapse className="tf-local-help" items={[
       { key: 'capabilities', label: <Space size={8}><FileCode2 size={15} /><span>接入后可以调用哪些 MCP 能力</span></Space>, children: <div className="tf-local-capabilities">
-        <div className="tf-capability-group"><Typography.Text strong>只读检索工具（5 项）</Typography.Text><Typography.Paragraph type="secondary">查询任务列表、上下文、绑定仓库路径、材料版本、评审记录与冻结输入快照。</Typography.Paragraph><Space wrap size={[8, 8]}>{READ_TOOLS.map(tool => <Tag key={tool} className="tf-mcp-tool-tag"><code>{tool}</code> · {mcpToolLabel(tool)}</Tag>)}</Space></div>
+        <div className="tf-capability-group"><Typography.Text strong>只读检索工具（{READ_TOOLS.length} 项）</Typography.Text><Typography.Paragraph type="secondary">查询任务列表、上下文、绑定仓库路径、材料版本、评审记录、冻结输入快照与团队知识库。</Typography.Paragraph><Space wrap size={[8, 8]}>{READ_TOOLS.map(tool => <Tag key={tool} className="tf-mcp-tool-tag"><code>{tool}</code> · {mcpToolLabel(tool)}</Tag>)}</Space></div>
         <div className="tf-capability-group"><Typography.Text strong>受控回传工具（4 项）</Typography.Text><Typography.Paragraph type="secondary">在项目成员权限内认领任务、上报开发进度、记录伴随心跳或提交指定评审报告。</Typography.Paragraph><Space wrap size={[8, 8]}>{WRITE_TOOLS.map(tool => <Tag key={tool} className="tf-mcp-tool-tag is-write"><code>{tool}</code> · {mcpToolLabel(tool)}</Tag>)}</Space></div>
         <div className="tf-local-capabilities-footer"><Typography.Text type="secondary">云端 AI 托管执行尚未接入，当前均由本机 AI 工具执行并按权限回传。</Typography.Text><Button type="link" icon={<ArrowRight size={14} />} iconPlacement="end" onClick={() => navigateWorkspace('tasks')}>前往任务中心</Button></div>
       </div> },

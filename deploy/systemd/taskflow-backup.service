@@ -1,0 +1,11 @@
+[Unit]
+Description=TaskFlow SQLite online backup
+
+[Service]
+Type=oneshot
+User=taskflow
+Group=taskflow
+UMask=0077
+ExecStart=/usr/local/bin/node /opt/taskflow/deploy/backup.mjs /var/lib/taskflow/platform.sqlite /var/backups/taskflow 14
+ReadWritePaths=/var/backups/taskflow
+ReadOnlyPaths=/var/lib/taskflow

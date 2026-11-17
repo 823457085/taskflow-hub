@@ -11,6 +11,7 @@
     "dev:api": "npm --prefix platform-server start",
     "build": "npm --prefix preview-app run build",
     "build:preview": "npm --prefix preview-app run build:single -- --outDir dist-single",
-    "test": "node --test scripts/preview-http.test.mjs scripts/workspace-navigation.test.mjs scripts/workspace-permissions.test.mjs scripts/client-adapter-storage.test.mjs scripts/task-availability.test.mjs scripts/read-together.test.mjs scripts/jira-reference.test.mjs scripts/source-reference.test.mjs scripts/local-bridge-handoff.test.mjs scripts/local-task-workflow.test.mjs scripts/ui-polish.test.mjs && npm --prefix platform-server test && npm --prefix local-bridge test"
+    "test": "node --test scripts/preview-http.test.mjs scripts/workspace-navigation.test.mjs scripts/workspace-permissions.test.mjs scripts/client-adapter-storage.test.mjs scripts/task-availability.test.mjs scripts/read-together.test.mjs scripts/jira-reference.test.mjs scripts/source-reference.test.mjs scripts/local-bridge-handoff.test.mjs scripts/local-task-workflow.test.mjs scripts/ui-polish.test.mjs scripts/knowledge-import.test.mjs && npm --prefix platform-server test && npm --prefix local-bridge test",
+    "pack:bridge": "COPYFILE_DISABLE=1 tar czf preview-app/dist/taskflow-bridge.tgz --exclude=node_modules --exclude=\"*.test.mjs\" --exclude=.local local-bridge shared/local-client-adapter.mjs shared/local-client-adapter.d.mts && cp deploy/install-bridge.sh preview-app/dist/install-bridge.sh"
   }
 }

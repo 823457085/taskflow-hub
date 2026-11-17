@@ -75,6 +75,49 @@ export function openStorage(dbPath) {
     add('external_accounts', 'deleted_at', 'TEXT');
     add('local_ai_runs', 'runner', "TEXT NOT NULL DEFAULT 'local'");
     add('local_ai_runs', 'workbench_key', 'TEXT');
+    add('local_ai_runs', 'device_id', 'TEXT');
+    add('local_ai_runs', 'phase', 'TEXT');
+    add('local_ai_runs', 'lease_until', 'INTEGER');
+    add('local_device_sessions', 'team_dispatch', 'INTEGER NOT NULL DEFAULT 0');
+    db.exec(`CREATE TABLE IF NOT EXISTS todos (
+      id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),owner_id TEXT NOT NULL REFERENCES users(id),assignee_id TEXT REFERENCES users(id),task_id TEXT REFERENCES tasks(id),
+      title TEXT NOT NULL,details TEXT NOT NULL DEFAULT '',due_date TEXT NOT NULL DEFAULT '',
+      priority TEXT NOT NULL DEFAULT 'normal' CHECK(priority IN ('normal','high')),status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo','doing','done')),
+      version INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,source_id TEXT,UNIQUE(owner_id,source_id));
+      CREATE INDEX IF NOT EXISTS todo_project_idx ON todos(project_id,status);
+      CREATE INDEX IF NOT EXISTS todo_assignee_idx ON todos(assignee_id,status);`);
+    add('local_ai_runs', 'cancel_requested', 'INTEGER NOT NULL DEFAULT 0');
+    add('local_ai_runs', 'payload', 'TEXT');
+    db.exec('CREATE INDEX IF NOT EXISTS ai_run_device_idx ON local_ai_runs(device_id,status)');
+    db.exec(`CREATE TABLE IF NOT EXISTS agent_sessions (
+      id TEXT PRIMARY KEY,owner_id TEXT NOT NULL REFERENCES users(id),project_id TEXT REFERENCES projects(id),task_id TEXT REFERENCES tasks(id),
+      source TEXT NOT NULL,source_id TEXT NOT NULL,title TEXT NOT NULL,objective TEXT NOT NULL DEFAULT '',provider TEXT NOT NULL DEFAULT '',model TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT '',status TEXT NOT NULL,result TEXT NOT NULL DEFAULT '',error TEXT NOT NULL DEFAULT '',workspace TEXT NOT NULL DEFAULT '',branch TEXT NOT NULL DEFAULT '',
+      turns INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,cost_usd REAL NOT NULL DEFAULT 0,jira_keys TEXT NOT NULL DEFAULT '[]',
+      shared INTEGER NOT NULL DEFAULT 0 CHECK(shared IN (0,1)),started_at TEXT NOT NULL,updated_at TEXT NOT NULL,synced_at TEXT NOT NULL,UNIQUE(owner_id,source,source_id));
+      CREATE INDEX IF NOT EXISTS agent_session_owner_idx ON agent_sessions(owner_id,updated_at DESC);
+      CREATE INDEX IF NOT EXISTS agent_session_project_idx ON agent_sessions(project_id,shared,updated_at DESC);
+      CREATE TABLE IF NOT EXISTS agent_session_comments (id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES agent_sessions(id),author_id TEXT NOT NULL REFERENCES users(id),body TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS agent_comment_session_idx ON agent_session_comments(session_id,created_at);
+      CREATE TABLE IF NOT EXISTS deployments (
+      id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),provider TEXT NOT NULL CHECK(provider IN ('manual','yunxiao','jenkins','other')),external_id TEXT,
+      environment TEXT NOT NULL,service TEXT NOT NULL,version TEXT NOT NULL DEFAULT '',status TEXT NOT NULL CHECK(status IN ('running','success','failed','cancelled','unknown')),
+      url TEXT NOT NULL DEFAULT '',notes TEXT NOT NULL DEFAULT '',actor_id TEXT NOT NULL REFERENCES users(id),started_at TEXT NOT NULL,finished_at TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+      UNIQUE(project_id,provider,external_id));
+      CREATE INDEX IF NOT EXISTS deployment_project_idx ON deployments(project_id,started_at DESC);`);
+    db.exec(`CREATE TABLE IF NOT EXISTS knowledge_docs (
+      id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT '[]',
+      source TEXT NOT NULL DEFAULT 'manual',source_ref TEXT,version INTEGER NOT NULL DEFAULT 1,author_id TEXT NOT NULL REFERENCES users(id),updated_by TEXT NOT NULL REFERENCES users(id),
+      created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(project_id,source_ref));
+      CREATE INDEX IF NOT EXISTS knowledge_project_idx ON knowledge_docs(project_id,updated_at DESC);
+      CREATE TABLE IF NOT EXISTS knowledge_revisions (id TEXT PRIMARY KEY,doc_id TEXT NOT NULL REFERENCES knowledge_docs(id),version INTEGER NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,tags TEXT NOT NULL,actor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS knowledge_revision_doc_idx ON knowledge_revisions(doc_id,version DESC);
+      CREATE TABLE IF NOT EXISTS team_skills (
+      id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),name TEXT NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),author_id TEXT NOT NULL REFERENCES users(id),updated_by TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+      UNIQUE(project_id,name));
+      CREATE TABLE IF NOT EXISTS team_skill_revisions (id TEXT PRIMARY KEY,skill_id TEXT NOT NULL REFERENCES team_skills(id),version INTEGER NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,enabled INTEGER NOT NULL,actor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS skill_revision_idx ON team_skill_revisions(skill_id,version DESC);`);
     const interruptedAt = new Date().toISOString();
     db.prepare("UPDATE local_ai_runs SET status='INTERRUPTED',error='服务重启，本地执行已中断',finished_at=?,updated_at=? WHERE status='RUNNING' AND runner='local'").run(interruptedAt, interruptedAt);
     db.prepare('INSERT OR IGNORE INTO projects VALUES (?,?,?,?)').run('default', 'DEFAULT', '默认项目', new Date().toISOString());

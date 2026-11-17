@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { constants } from 'node:fs';
+import { constants, realpathSync } from 'node:fs';
 import { lstat, unlink, open } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { homedir } from 'node:os';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { emitKeypressEvents } from 'node:readline';
@@ -22,6 +23,9 @@ const allowed = {
   pair: ['url', 'web-url', 'name', 'tool'], doctor: ['project', 'adapter'],
   connect: ['url', 'web-url', 'name', 'tool', 'projects'],
   'install-mcp': ['client', 'adapter', 'project'], 'adapter-template': [], 'export-mcp': ['adapter'],
+  worker: ['config', 'once'], 'worker-init': ['config'], service: ['action', 'config'],
+  'sync-delivery': ['config', 'data-dir', 'project', 'match'],
+  'skills-sync': ['config', 'target'],
 };
 export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'];
 const HEARTBEAT_STATUSES = ['IDLE', 'WORKING', 'WAITING', 'OFFLINE'];
@@ -46,7 +50,12 @@ const usage = `TaskFlow 本地进度桥接（Node.js 24）
   sync --task <任务 UUID> --tool <codex|codex-cli|claude-code|cursor|custom> --progress <0..100> --summary <摘要> [--branch <分支>]
   heartbeat --task <任务 UUID> --tool <codex|codex-cli|claude-code|cursor|custom> --status <IDLE|WORKING|WAITING|OFFLINE>
   logout
-仅 install-mcp 写入指定项目的 taskflow MCP 配置；不会安装 Git Hook 或启动 AI。`;
+  worker-init [--config <配置文件>]  生成本机 Bridge 配置模板（项目仓库映射、执行器、是否允许开发类任务）
+  worker [--config <配置文件>] [--once yes]  常驻领取服务器派发给本设备的任务，在本机执行并回传结果
+  service --action <install|uninstall|status> [--config <配置文件>]  macOS 上把 worker 注册为登录后自动运行的后台服务（launchd）
+  sync-delivery [--config <配置文件>] [--data-dir <Delivery/.local/data>] [--project <平台项目ID> --match <部署项目名,名>]  立即把 Delivery 的 Agent 会话（默认仅自己可见）和部署记录同步到平台
+  skills-sync [--config <配置文件>] [--target <Skill 目录，如 ~/.codex/skills>]  把已授权项目中启用的团队 Skill 写入本机，并移除已下线的团队 Skill
+仅 install-mcp 写入指定项目的 taskflow MCP 配置；只有 worker 会在本机启动 AI，且只执行派发给本设备的任务。`;
 
 function fail(message) { throw new Error(message); }
 export function parseArgs(args) {
@@ -94,6 +103,13 @@ export function parseArgs(args) {
     if (!['yes', 'no'].includes(options.claim)) fail('--claim 必须是 yes 或 no。');
   }
   if (['review-context', 'submit-report'].includes(command) && !/^[A-Za-z0-9_-]{1,80}$/.test(options.job || '')) fail('需要有效的 --job 评审 ID。');
+  if (command === 'service' && !['install', 'uninstall', 'status'].includes(options.action)) fail('--action 只能是 install、uninstall 或 status。');
+  if (command === 'skills-sync' && options.target !== undefined && (!options.target.trim() || /[\x00\r\n]/.test(options.target))) fail('--target 目录不正确。');
+  if (command === 'sync-delivery') {
+    if (options['data-dir'] !== undefined && (!options['data-dir'].trim() || /[\x00\r\n]/.test(options['data-dir']))) fail('--data-dir 目录不正确。');
+    if (!!options.project !== !!options.match) fail('--project 与 --match 需要同时提供。');
+    if (options.project && !/^[A-Za-z0-9_-]{1,80}$/.test(options.project)) fail('--project 项目 ID 不正确。');
+  }
   if (command === 'submit-report' && (!options.file?.trim() || /[\x00\r\n]/.test(options.file))) fail('需要有效的 --file 报告文件路径。');
   if (command === 'claim' && (!/^[1-9]\d*$/.test(options.version || '') || !Number.isSafeInteger(Number(options.version)))) fail('--version 必须是当前任务的正整数版本。');
   if (command === 'heartbeat') {
@@ -232,6 +248,28 @@ export async function main(args) {
   }
   if (command === 'pair') { await pairDevice(options); return; }
   if (command === 'connect') { await connectDevice(options); return; }
+  if (command === 'worker-init') {
+    const { workerConfigPath, workerConfigTemplate } = await import('./worker.mjs');
+    const target = options.config ? resolve(options.config) : workerConfigPath;
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    await mkdir(resolve(target, '..'), { recursive: true, mode: 0o700 });
+    try { await writeFile(target, `${JSON.stringify(workerConfigTemplate(), null, 2)}\n`, { mode: 0o600, flag: 'wx' }); }
+    catch (error) { if (error.code === 'EEXIST') fail(`配置已存在，未覆盖：${target}`); throw error; }
+    printData({ status: '已生成 Bridge 配置模板，请填写项目仓库映射', config: target });
+    return;
+  }
+  if (command === 'service') {
+    const { manageService } = await import('./service.mjs');
+    printData(await manageService(options.action, { config: options.config }));
+    return;
+  }
+  if (command === 'worker') {
+    const { runWorker } = await import('./worker.mjs');
+    const controller = new AbortController();
+    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { controller.abort(); process.exit(0); });
+    await runWorker({ config: options.config && resolve(options.config), once: options.once === 'yes' }, { signal: controller.signal });
+    return;
+  }
   if (command === 'doctor') {
     const { runDoctor } = await import('./mcp-setup.mjs');
     const result = await runDoctor({ project: options.project, ...(options.adapter ? { adapter: await loadClientAdapter(options.adapter) } : {}) });
@@ -324,6 +362,31 @@ export async function main(args) {
     });
     return;
   }
+  if (command === 'sync-delivery') {
+    const { syncDelivery } = await import('./delivery-sync.mjs');
+    const { loadWorkerConfig, deliverySyncConfig, deliverySyncStatePath, workerConfigPath } = await import('./worker.mjs');
+    let target;
+    if (options['data-dir']) target = deliverySyncConfig({ dataDir: resolve(options['data-dir']), ...(options.project ? { deployments: { [options.project]: options.match.split(',') } } : {}) });
+    else {
+      target = (await loadWorkerConfig(options.config ? resolve(options.config) : workerConfigPath)).deliverySync;
+      if (!target) fail('worker.json 未配置 deliverySync，请填写或改用 --data-dir 指定 Delivery 数据目录。');
+      if (options.project) target = { ...target, deployments: { [options.project]: options.match.split(',') } };
+    }
+    printData(await syncDelivery({ ...target, statePath: deliverySyncStatePath }, (path, body) => request(session.url, path, { token: session.token, method: 'POST', body })));
+    return;
+  }
+  if (command === 'skills-sync') {
+    const { syncSkills } = await import('./skills-sync.mjs');
+    const { loadWorkerConfig, skillSyncConfig, workerConfigPath } = await import('./worker.mjs');
+    let target;
+    if (options.target) target = skillSyncConfig({ targets: [resolve(options.target.replace(/^~(?=\/|$)/, homedir()))] });
+    else {
+      target = (await loadWorkerConfig(options.config ? resolve(options.config) : workerConfigPath)).skillSync;
+      if (!target) fail('worker.json 未配置 skillSync，请填写或改用 --target 指定 Skill 目录。');
+    }
+    printData(await syncSkills(target, path => request(session.url, path, { token: session.token })));
+    return;
+  }
   if (command === 'tasks') printData(await request(session.url, '/api/tasks', { token: session.token }));
   if (command === 'context') printData(await request(session.url, `/api/tasks/${encodeURIComponent(options.task)}/context`, { token: session.token }));
   if (command === 'assets') printData(await request(session.url, `/api/tasks/${encodeURIComponent(options.task)}/assets`, { token: session.token }));
@@ -339,6 +402,7 @@ export async function main(args) {
     },
   }));
 }
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+const invokedDirectly = () => { try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); } catch { return false; } };
+if (process.argv[1] && invokedDirectly()) {
   main(process.argv.slice(2)).catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
 }

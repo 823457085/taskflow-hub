@@ -1,0 +1,33 @@
+# 容器方式：api 共享 web 的网络命名空间，只监听回环；web(Nginx) 对外提供 HTTPS。
+# 先在仓库根目录执行 npm --prefix preview-app ci && npm run build 生成 preview-app/dist，
+# 并把证书放到 deploy/certs/fullchain.pem、deploy/certs/privkey.pem。
+services:
+  web:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ../preview-app/dist:/opt/taskflow/web:ro
+      - ./nginx/taskflow.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/ssl/taskflow:ro
+
+  api:
+    build: ../platform-server
+    restart: unless-stopped
+    network_mode: "service:web"
+    depends_on: [web]
+    environment:
+      TASKFLOW_DEPLOYMENT: server
+      TASKFLOW_HOST: 127.0.0.1
+      TASKFLOW_TRUST_PROXY: "1"
+      TASKFLOW_COOKIE_SECURE: "1"
+      TASKFLOW_DEVICE_SESSION_HOURS: "168"
+      # 在 deploy/.env 中设置；创建首个管理员后可删除
+      TASKFLOW_SETUP_TOKEN: ${TASKFLOW_SETUP_TOKEN:-}
+    volumes:
+      - taskflow-data:/data
+
+volumes:
+  taskflow-data:

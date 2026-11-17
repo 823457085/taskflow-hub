@@ -12,7 +12,7 @@ npm start
 
 ## 身份与隔离
 
-首次 `POST /api/setup {username,password}` 创建 ADMIN，再通过 `/api/login` 登录。用户名 3–64 字符，仅字母数字及 `_.-`；密码 12–256 字符。口令加盐 scrypt 存储，会话8小时有效，令牌只存哈希。浏览器使用 HttpOnly / SameSite=Strict cookie；CLI 可使用 Bearer 令牌。不要把秘密放入命令参数或日志。
+首次 `POST /api/setup {username,password}` 创建 ADMIN，再通过 `/api/login` 登录。用户名 3–64 字符，仅字母数字及 `_.-`；密码 8–256 字符。口令加盐 scrypt 存储，会话8小时有效，令牌只存哈希。浏览器使用 HttpOnly / SameSite=Strict cookie；CLI 可使用 Bearer 令牌。不要把秘密放入命令参数或日志。
 
 首次和旧库迁移建立 `default` 项目；旧用户/任务无损归入该项目。新增用户不指定项目时加入 default，指定其他项目时仅加入指定项目。后续重启不会再次把所有用户加入 default。
 
@@ -25,12 +25,32 @@ ADMIN 是全局管理员。其他账号按 `project_members.role` 授权，不�
 | GET/POST `/api/projects` | 项目列表 / ADMIN创建 `{key,name}` |
 | GET/POST `/api/projects/:id/members` | 项目成员 / ADMIN或项目LEAD维护 `{userId,role}` |
 | GET/POST `/api/users` | ADMIN读取/创建成员，创建可传projectId |
+| GET `/api/agents?projectId=` | 服务器模式：项目内已接入的本机 Bridge（成员、在线、是否允许团队派发、当前用户能否派发）；仅网页会话 |
+| PATCH `/api/local-devices/:id` | `{teamDispatch}` 设备主人开关团队派发 |
+| POST `/api/me/password` | 本人改密码 `{currentPassword,newPassword}`；保留当前会话与已配对设备，其他登录失效；每用户每分钟最多5次 |
+| POST `/api/users/:id/password` | ADMIN重置他人密码 `{password}`；该成员全部会话与已配对设备失效；不可重置自己 |
 | GET/POST `/api/tasks` | 可见任务列表（支持projectId）/ 创建任务 |
 | GET/PATCH `/api/tasks/:id` | 详情 / `{expectedVersion,title?,assigneeId?,status?}` |
 | POST `/api/tasks/:id/claim` | `{expectedVersion}` 认领未指派或自己的任务 |
 | POST `/api/tasks/:id/progress` | `{tool,deviceId,progress,summary,branch?}` 自报进度 |
 | POST `/api/tasks/:id/heartbeat` | `{deviceId,tool,status}` 设备心跳 |
 | GET `/api/tasks/:id/context` | `{task,assets,progressEvents,devices,integrationStatus}` |
+| GET/POST `/api/todos` | `scope=mine\|project&projectId=` 列表 / 创建 `{projectId?,title,details?,dueDate?,priority?,status?,assigneeId?,taskId?}`；无 projectId 为仅本人可见的个人待办 |
+| PATCH/DELETE `/api/todos/:id` | `{expectedVersion,...}` / `?expectedVersion=`；创建人、负责人和 ADMIN/LEAD/PM 可改，创建人或项目 LEAD 可删 |
+| POST `/api/todos/import` | `{items}` 导入 Delivery `workspace-todos.json` 的条目到个人待办，按原 id 去重，最多500条 |
+| POST `/api/agent-sessions/sync` | `{source:'delivery',items}` 本人或已配对设备同步 Agent 会话（最多100条），按来源 id 去重，仅在更新时间更新时覆盖；服务端遮盖密钥与家目录路径 |
+| GET `/api/agent-sessions` | `scope=mine\|project&projectId=&q=`；项目范围只返回成员主动共享的会话；仅网页会话 |
+| GET/PATCH/DELETE `/api/agent-sessions/:id` | 详情（含评论）/ 所有人改 `{projectId,shared,taskId}` / 所有人删除平台副本 |
+| POST `/api/agent-sessions/:id/comments`、`/api/agent-sessions/share` | 可见者评论 `{body}`；所有人批量共享 `{ids,projectId,shared}` |
+| GET/POST `/api/deployments` | `projectId,environment?,status?` 列表（含各环境最新一次）/ 手动登记 `{projectId,environment,service,version?,status?,url?,notes?}` |
+| PATCH/DELETE `/api/deployments/:id` | 记录人或 ADMIN/LEAD/PM 修改；流水线同步的记录只能改备注；手动记录由记录人或项目 LEAD 删除 |
+| POST `/api/deployments/sync` | `{projectId,items}` 本人或已配对设备同步云效/Jenkins 运行（最多200条），按 provider+externalId 幂等 |
+| GET/POST `/api/knowledge` | `projectId,q?,tag?,limit?` 列表（摘要与项目全部标签，设备可读）/ 新建 `{projectId,title,body?,tags?}`，正文最多30000字 |
+| POST `/api/knowledge/import` | `{projectId,docs:[{sourceRef,title,body?,tags?}]}` 最多50条，按 sourceRef 幂等，变化时留历史版本 |
+| GET/PATCH/DELETE `/api/knowledge/:id` | 全文（设备可读）/ 成员按 `expectedVersion` 编辑（冲突409）/ 作者或项目 LEAD 删除；`GET /:id/revisions` 查看历史 |
+| GET/POST `/api/skills` | `projectId,include=content?` 团队 Skill 列表（设备只拿到启用的）/ ADMIN/LEAD 发布 `{projectId,name,description,content,enabled?}` |
+| GET/PATCH/DELETE `/api/skills/:id` | 详情 / ADMIN/LEAD 按 `expectedVersion` 修改描述、正文或启停 / 删除；`GET /:id/revisions` 查看历史 |
+| GET `/api/work-reports` | `projectId,date?,tzOffset?,memberId?,scope=team?` 按天汇总任务、待办、本机 AI 执行和进度回报；查看他人或全员需 ADMIN/LEAD/PM，个人待办只出现在本人报告 |
 
 任务创建输入 `{projectId?,jiraKey,title,type?,parentId?,assigneeId?}`，type为 STORY/TASK/BUG/RELEASE。任务号按当前单 Jira 实例全局唯一，手动登记的关联为 `unverified`，由连接器读取并导入原事项后为 `verified`。父子须同项目。默认受理人为自己，ADMIN/LEAD/PM可改派到本项目成员或取消指派。受理人及上述管理角色可修改任务；进度和心跳仅受理人、ADMIN或LEAD可写。
 

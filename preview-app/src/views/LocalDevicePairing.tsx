@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
-import { App, Button, Card, Descriptions, Empty, Flex, Form, Grid, Input, List, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Empty, Flex, Form, Grid, Input, List, Popconfirm, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { RefreshCw, ShieldCheck, Unplug } from 'lucide-react';
 import { api, ApiError, Project, timeText } from './workspaceApi';
@@ -24,6 +24,7 @@ interface LocalDevice {
   expiresAt: string;
   projectIds: string[];
   scope: 'LOCAL_BRIDGE';
+  teamDispatch?: boolean;
 }
 interface PairingPreview { userCode: string; request: PairingRequest; suggestedProjectIds?: string[]; handoff?: boolean }
 
@@ -200,13 +201,14 @@ export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onAppro
   </Flex>;
 };
 
-export const LocalDeviceList: React.FC<{ onUnauthorized?: () => void; refreshKey?: number; onAuthorize?: () => void }> = ({ onUnauthorized, refreshKey = 0, onAuthorize }) => {
+export const LocalDeviceList: React.FC<{ onUnauthorized?: () => void; refreshKey?: number; onAuthorize?: () => void; teamDispatch?: boolean }> = ({ onUnauthorized, refreshKey = 0, onAuthorize, teamDispatch = false }) => {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const [projects, setProjects] = useState<Project[]>([]);
   const [devices, setDevices] = useState<LocalDevice[]>([]);
   const [loading, setLoading] = useState(true);
   const [revokingId, setRevokingId] = useState('');
+  const [togglingId, setTogglingId] = useState('');
   const alive = useRef(true);
   const sequence = useRef(0);
   const revokePending = useRef('');
@@ -248,6 +250,18 @@ export const LocalDeviceList: React.FC<{ onUnauthorized?: () => void; refreshKey
     } catch (error) { showError(error); }
     finally { revokePending.current = ''; if (alive.current) setRevokingId(''); }
   };
+  const toggleTeamDispatch = async (device: LocalDevice, value: boolean) => {
+    if (!alive.current || togglingId) return;
+    setTogglingId(device.id);
+    try {
+      await api(`local-devices/${encodeURIComponent(device.id)}`, { teamDispatch: value }, 'PATCH');
+      if (!alive.current) return;
+      setDevices(current => current.map(item => item.id === device.id ? { ...item, teamDispatch: value } : item));
+      void message.success(value ? '已允许项目负责人、PM 和管理员把任务派发到这台设备。' : '已关闭团队派发，只有你自己能派发到这台设备。');
+    } catch (error) { showError(error); }
+    finally { if (alive.current) setTogglingId(''); }
+  };
+  const teamSwitch = (item: LocalDevice) => item.status === 'ACTIVE' ? <Tooltip title="开启后，项目负责人、PM 和管理员可以把任务派发到这台设备，由本机 AI 执行；开发任务仍需你在本机确认。"><Switch size="small" aria-label={`允许团队派发到 ${item.deviceName}`} checked={!!item.teamDispatch} loading={togglingId === item.id} disabled={!!togglingId && togglingId !== item.id} onChange={value => void toggleTeamDispatch(item, value)} /></Tooltip> : <Typography.Text type="secondary">—</Typography.Text>;
   const statusTag = (item: LocalDevice) => <Tag color={item.status === 'ACTIVE' ? 'success' : 'default'} icon={<span aria-hidden="true" style={{ fontSize: 8, marginInlineEnd: 4 }}>●</span>}>{deviceStatusLabel(item.status)}</Tag>;
   const projectNames = (item: LocalDevice) => <Flex vertical gap={4}>{item.projectIds.map(id => { const project = projects.find(project => project.id === id); return <Typography.Text key={id}>{project ? `${project.key} · ${project.name}` : id}</Typography.Text>; })}</Flex>;
   const revokeButton = (item: LocalDevice) => item.status === 'ACTIVE' ? <Popconfirm title="撤销此设备授权？" description="撤销后该设备会话将失效。" okText="撤销" cancelText="取消" okButtonProps={{ danger: true, loading: revokingId === item.id }} onConfirm={() => revoke(item)} disabled={!!revokingId}><Button danger size="small" icon={<Unplug size={14} />} loading={revokingId === item.id} disabled={!!revokingId && revokingId !== item.id}>撤销</Button></Popconfirm> : null;
@@ -256,17 +270,19 @@ export const LocalDeviceList: React.FC<{ onUnauthorized?: () => void; refreshKey
     { title: '授权项目', width: 240, render: (_, item) => projectNames(item) },
     { title: '授权状态', width: 120, render: (_, item) => statusTag(item) },
     { title: '最近调用 / 有效期', width: 225, render: (_, item) => <Flex vertical gap={4}><Typography.Text>{timeText(item.lastSeenAt || undefined)}</Typography.Text><Typography.Text type="secondary" className="tf-local-device-secondary">有效期至 {timeText(item.expiresAt)}</Typography.Text></Flex> },
+    ...(teamDispatch ? [{ title: '允许团队派发', width: 130, render: (_: unknown, item: LocalDevice) => teamSwitch(item) }] : []),
     { title: '操作', width: 100, render: (_, item) => revokeButton(item) },
   ];
   return <Card className="tf-local-devices-card" title="我的设备" style={{ width: '100%', maxWidth: 'none', minWidth: 0 }} extra={<Space size={8} wrap><Button icon={<RefreshCw size={16} />} loading={loading} disabled={!!revokingId} onClick={() => void refresh()}>刷新</Button>{onAuthorize && <Button disabled={!!revokingId} onClick={onAuthorize}>输入配对码</Button>}</Space>}>
     <Flex vertical gap={16} style={{ minWidth: 0 }}>
       <Typography.Paragraph type="secondary" className="tf-local-device-note">共 {devices.length} 条设备授权，其中生效中 {devices.filter(device => device.status === 'ACTIVE').length} 条。最近调用为设备访问本平台的时间，不代表 AI 软件在线。</Typography.Paragraph>
-      {screens.md ? <Table<LocalDevice> rowKey="id" className="tf-local-devices-table" style={{ minWidth: 0 }} columns={columns} dataSource={devices} size="middle" loading={loading} scroll={{ x: 905 }} pagination={devices.length > 5 ? { pageSize: 5, showSizeChanger: false } : false} locale={{ emptyText: '尚无本地设备授权。' }} /> : <List<LocalDevice> rowKey="id" className="tf-local-device-mobile" loading={loading} dataSource={devices} pagination={devices.length > 5 ? { pageSize: 5, showSizeChanger: false } : false} locale={{ emptyText: <Empty description="尚无本地设备授权。" /> }} renderItem={item => <List.Item className="tf-local-device-mobile-item">
+      {screens.md ? <Table<LocalDevice> rowKey="id" className="tf-local-devices-table" style={{ minWidth: 0 }} columns={columns} dataSource={devices} size="middle" loading={loading} scroll={{ x: teamDispatch ? 1035 : 905 }} pagination={devices.length > 5 ? { pageSize: 5, showSizeChanger: false } : false} locale={{ emptyText: '尚无本地设备授权。' }} /> : <List<LocalDevice> rowKey="id" className="tf-local-device-mobile" loading={loading} dataSource={devices} pagination={devices.length > 5 ? { pageSize: 5, showSizeChanger: false } : false} locale={{ emptyText: <Empty description="尚无本地设备授权。" /> }} renderItem={item => <List.Item className="tf-local-device-mobile-item">
         <Flex vertical gap={12} style={{ minWidth: 0, width: '100%' }}>
           <Flex justify="space-between" align="start" gap={8} wrap><Typography.Text strong style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{item.deviceName}</Typography.Text>{statusTag(item)}</Flex>
           <Space size={8} wrap><Typography.Text type="secondary" className="tf-local-device-secondary">{item.tool}</Typography.Text><Tag>{deviceScopeLabel(item.scope)}</Tag></Space>
           <Flex vertical gap={4}><Typography.Text type="secondary" className="tf-local-device-secondary">授权项目</Typography.Text>{projectNames(item)}</Flex>
           <Flex vertical gap={4}><Typography.Text type="secondary" className="tf-local-device-secondary">创建于 {timeText(item.createdAt)}</Typography.Text><Typography.Text type="secondary" className="tf-local-device-secondary">最近调用 {timeText(item.lastSeenAt || undefined)}</Typography.Text><Typography.Text type="secondary" className="tf-local-device-secondary">有效期至 {timeText(item.expiresAt)}</Typography.Text></Flex>
+          {teamDispatch && item.status === 'ACTIVE' && <Space size={8}><Typography.Text type="secondary" className="tf-local-device-secondary">允许团队派发</Typography.Text>{teamSwitch(item)}</Space>}
           {item.status === 'ACTIVE' && <div>{revokeButton(item)}</div>}
         </Flex>
       </List.Item>} />}

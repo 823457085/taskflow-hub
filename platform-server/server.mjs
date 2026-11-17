@@ -9,6 +9,13 @@ import { createConnectors } from './connectors.mjs';
 import { createLocalDevices } from './local-devices.mjs';
 import { createLocalAutomation } from './local-automation.mjs';
 import { createWorkbenchBridge } from './workbench-bridge.mjs';
+import { createBridgeDispatch, BRIDGE_MODES } from './bridge-dispatch.mjs';
+import { createTodos } from './todos.mjs';
+import { createWorkReports } from './work-reports.mjs';
+import { createAgentSessions } from './agent-sessions.mjs';
+import { createDeployments } from './deployments.mjs';
+import { createKnowledge } from './knowledge.mjs';
+import { createTeamSkills } from './team-skills.mjs';
 import { createAccounts } from './accounts.mjs';
 import { globalPermissions, projectPermissions, canEditMemberRole, assertMemberRoleChange } from './permissions.mjs';
 import { ApiError, ROLES, PROJECT_ROLES, STAGES, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
@@ -17,8 +24,12 @@ const SESSION_MS = 8 * 60 * 60 * 1000;
 function credentials(body) {
   const username = textField(body.username, 'username', { min: 3, max: 64 });
   if (!/^[a-zA-Z0-9_.-]+$/.test(username)) fail(400, 'INVALID_INPUT', 'username仅支持字母、数字和_.-');
-  if (typeof body.password !== 'string' || body.password.length < 12 || body.password.length > 256) fail(400, 'INVALID_INPUT', 'password长度需为12至256字符');
+  if (typeof body.password !== 'string' || body.password.length < 8 || body.password.length > 256) fail(400, 'INVALID_INPUT', 'password长度需为8至256字符');
   return { username, password: body.password };
+}
+function newPasswordField(value) {
+  if (typeof value !== 'string' || value.length < 8 || value.length > 256) fail(400, 'INVALID_INPUT', '新密码长度需为8至256字符');
+  return value;
 }
 async function passwordHash(password, salt = randomBytes(16).toString('hex')) { return { salt, hash: Buffer.from(await scrypt(password, salt, 64)).toString('hex') }; }
 async function readBody(req) {
@@ -37,7 +48,20 @@ function repoPathField(value) {
   if (!path.startsWith('/') || /[\r\n\t\x7f]/.test(path) || segments.includes('..') || segments.includes('.git')) fail(400, 'INVALID_REPO_PATH', '请输入有效的本机代码仓库绝对路径');
   return path.length > 1 ? path.replace(/\/+$/, '') : path;
 }
-export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186' } = {}) {
+const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+const LOCAL_ONLY_ROUTES = [/^\/api\/local-automation\//, /^\/api\/local-git\//, /^\/api\/projects\/[^/]+\/git-status$/, /^\/api\/tasks\/[^/]+\/assets\/from-git$/, /^\/api\/tasks\/[^/]+\/ai-runs$/, /^\/api\/ai-runs\//];
+export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186', deployment = 'local', trustProxy = false, cookieSecure = false, deviceSessionMs, setupToken = '', bridgeModes = ['read', 'review'] } = {}) {
+  if (!['local', 'server'].includes(deployment)) throw new Error('deployment must be local or server');
+  const serverMode = deployment === 'server';
+  // Behind a reverse proxy every socket is loopback, so loopback-gated local features must not exist in server mode.
+  if (serverMode) hostBridgeStateDir = null;
+  const clientIp = req => {
+    const socketIp = req.socket.remoteAddress || 'unknown';
+    if (!trustProxy || !LOOPBACK.includes(socketIp)) return socketIp;
+    const forwarded = req.headers['x-real-ip'];
+    return typeof forwarded === 'string' && /^[0-9a-fA-F:.]{2,45}$/.test(forwarded.trim()) ? forwarded.trim() : socketIp;
+  };
+  const cookieFlags = `HttpOnly; SameSite=Strict; Path=/${cookieSecure ? '; Secure' : ''}`;
   const db = openStorage(dbPath);
   const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const value = fn(); db.exec('COMMIT'); return value; } catch (error) { db.exec('ROLLBACK'); throw error; } };
   const audit = (actorId, action, targetId, projectId = null) => db.prepare('INSERT INTO audit (id,actor_id,action,target_id,created_at,project_id) VALUES (?,?,?,?,?,?)').run(randomUUID(), actorId, action, targetId, new Date().toISOString(), projectId);
@@ -69,14 +93,28 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   const assertWritable = (task, user) => { if (task.status === 'DONE') fail(409, 'TASK_DONE', '任务已完成，请先重开任务'); assertAncestorsOpen(task, user); };
   const accounts = createAccounts({ db, dbPath, transaction, audit, projectRole, visibleProjects, key: connectorKey, allowLoopbackHttp: allowConnectorLoopbackHttp });
   const connectors = createConnectors({ db, dbPath, transaction, audit, projectRole, visibleProjects, getTask, assertWritable, accounts, workflow, key: connectorKey, profiles: connectorProfiles, profileReader: connectorProfileReader, allowLoopbackHttp: allowConnectorLoopbackHttp });
-  const localDevices = createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now: deviceClock, hostBridgeStateDir, hostBridgeApiUrl });
+  const todos = createTodos({ db, transaction, audit, projectRole, visibleProjects });
+  const workReports = createWorkReports({ db, projectRole });
+  const agentSessions = createAgentSessions({ db, transaction, audit, projectRole });
+  const deployments = createDeployments({ db, transaction, audit, projectRole });
+  const knowledge = createKnowledge({ db, transaction, audit, projectRole });
+  const teamSkills = createTeamSkills({ db, transaction, audit, projectRole });
+  const localDevices = createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now: deviceClock, hostBridgeStateDir, hostBridgeApiUrl, clientIp, sessionMs: deviceSessionMs });
   const workspaceFor = (userId, projectId) => db.prepare('SELECT project_id AS projectId,repo_path AS repoPath,default_target AS defaultTarget,updated_at AS updatedAt FROM project_workspaces WHERE user_id=? AND project_id=?').get(userId, projectId) || null;
-  const workbenchBridge = createWorkbenchBridge(workbenchUrl, workbenchTaskUrl);
-  const localAutomation = createLocalAutomation({
+  const workbenchBridge = serverMode ? null : createWorkbenchBridge(workbenchUrl, workbenchTaskUrl);
+  const localAutomation = serverMode ? null : createLocalAutomation({
     db, transaction, audit, projectRole, visibleProjects, getTask, taskRole, assertWritable, assertAncestorsOpen,
     workflow, workspaceFor, hostBridgeStateDir, hostBridgeApiUrl, runsDir, localReposFile, repoScanRoots, runnerOverride, appOpener,
     workbenchBridge, canUseHostBridge: localDevices.canUseHostBridge,
   });
+  const bridgeDispatch = serverMode ? createBridgeDispatch({ db, transaction, audit, projectRole, getTask, taskRole, assertWritable, assertAncestorsOpen, workflow, allowedModes: bridgeModes, now: deviceClock }) : null;
+  const serverAutomation = async context => {
+    const { method, path, send } = context;
+    if (await bridgeDispatch.handle(context)) return true;
+    if (!LOCAL_ONLY_ROUTES.some(pattern => pattern.test(path))) return false;
+    if (method === 'GET' && path === '/api/local-git/repositories') { send(200, { repositories: [], tccProtected: false }); return true; }
+    fail(403, 'LOCAL_ONLY_ENDPOINT', '服务器部署不提供本机执行与本机目录访问，请通过已配对的本机 Bridge 执行');
+  };
   const requireAssignee = (task, user) => { if (task.assigneeId !== user.id) requireRole(taskRole(task, user), ['ADMIN', 'LEAD']); };
   const assertMember = (projectId, userId) => { if (userId !== null && !db.prepare('SELECT user_id FROM project_members WHERE project_id=? AND user_id=?').get(projectId, userId)) fail(400, 'ASSIGNEE_NOT_MEMBER', '受理人必须是当前项目成员'); };
   const requireVersion = (task, value) => { if (!Number.isInteger(value) || value < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion'); if (task.version !== value) fail(409, 'VERSION_CONFLICT', '任务已被其他操作更新，请刷新后重试'); };
@@ -95,20 +133,26 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
     const send = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers }); res.end(value === undefined ? undefined : JSON.stringify(value)); };
     try {
       const url = new URL(req.url, 'http://localhost'); const path = url.pathname; const method = req.method;
-      if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 5 });
+      if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 5, deployment });
       if (!['GET', 'HEAD'].includes(method) && req.headers.origin) {
         let origin; try { origin = new URL(req.headers.origin); } catch { fail(403, 'ORIGIN_REJECTED', '请求来源不受支持'); }
         if (origin.host !== req.headers.host || !['http:', 'https:'].includes(origin.protocol)) fail(403, 'ORIGIN_REJECTED', '请求来源不受支持');
       }
       if (method === 'POST' && ['/api/setup', '/api/login'].includes(path)) {
-        const ip = req.socket.remoteAddress || 'unknown'; const now = Date.now();
+        const ip = clientIp(req); const now = Date.now();
         if (authAttempts.size > 1000) for (const [key, item] of authAttempts) if (item.until < now) authAttempts.delete(key);
         const attempt = authAttempts.get(ip);
         if (attempt?.until > now && attempt.count >= 15) fail(429, 'TRY_LATER', '尝试过于频繁，请稍后重试');
         authAttempts.set(ip, { count: attempt?.until > now ? attempt.count + 1 : 1, until: attempt?.until > now ? attempt.until : now + 60_000 });
-        const { username, password } = credentials(await readBody(req));
+        const authBody = await readBody(req);
+        const { username, password } = credentials(authBody);
         if (path === '/api/setup') {
           if (db.prepare('SELECT COUNT(*) AS count FROM users').get().count) fail(409, 'ALREADY_CONFIGURED', '初始管理员已创建');
+          if (serverMode) {
+            if (setupToken.length < 16) fail(403, 'SETUP_TOKEN_UNCONFIGURED', '服务器尚未配置 TASKFLOW_SETUP_TOKEN，无法创建初始管理员');
+            const given = Buffer.from(sha(typeof authBody.setupToken === 'string' ? authBody.setupToken : ''), 'hex');
+            if (!timingSafeEqual(given, Buffer.from(sha(setupToken), 'hex'))) fail(403, 'SETUP_TOKEN_INVALID', '初始化口令不正确');
+          }
           const { salt, hash } = await passwordHash(password); const id = randomUUID();
           transaction(() => {
             if (db.prepare('SELECT COUNT(*) AS count FROM users').get().count) fail(409, 'ALREADY_CONFIGURED', '初始管理员已创建');
@@ -122,10 +166,10 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         if (!timingSafeEqual(Buffer.from(computed.hash, 'hex'), Buffer.from(user?.hash || '0'.repeat(128), 'hex')) || !user) fail(401, 'INVALID_CREDENTIALS', '账号或密码不正确');
         const token = randomBytes(32).toString('base64url');
         transaction(() => { db.prepare('DELETE FROM sessions WHERE expires_at<=?').run(now); db.prepare('INSERT INTO sessions VALUES (?,?,?)').run(sha(token), user.id, now + SESSION_MS); audit(user.id, 'LOGIN', user.id); });
-        return send(200, { token, user: publicUser(user) }, { 'Set-Cookie': `taskflow_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_MS / 1000}` });
+        return send(200, { token, user: publicUser(user) }, { 'Set-Cookie': `taskflow_session=${token}; ${cookieFlags}; Max-Age=${SESSION_MS / 1000}` });
       }
       if (method === 'POST' && ['/api/device-authorizations', '/api/device-authorizations/poll'].includes(path)) { const body = await readBody(req); if (localDevices.publicRoutes({ req, path, method, body, send })) return; }
-      if (method === 'POST' && path === '/api/taskflow/workbench/exchange') {
+      if (method === 'POST' && path === '/api/taskflow/workbench/exchange' && workbenchBridge) {
         return send(200, workbenchBridge.exchange(req, await readBody(req)));
       }
       let user = auth(req);
@@ -134,12 +178,19 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (requestBody) user = auth(req);
       localDevices.authorizeRequest({ method, path, body: requestBody, user });
       if (localDevices.authenticatedRoutes({ req, path, method, body: requestBody, user, send })) return;
-      if (await localAutomation.handle({ req, method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (serverMode ? await serverAutomation({ req, method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })
+        : await localAutomation.handle({ req, method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       if (accounts.handle({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (todos({ method, path, url, user, body: requestBody, send })) return;
+      if (workReports({ method, path, url, user, send })) return;
+      if (agentSessions({ method, path, url, user, body: requestBody, send })) return;
+      if (deployments({ method, path, url, user, body: requestBody, send })) return;
+      if (knowledge({ method, path, url, user, body: requestBody, send })) return;
+      if (teamSkills({ method, path, url, user, body: requestBody, send })) return;
       if (await connectors({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       user = auth(req);
       if (method === 'GET' && path === '/api/me') return send(200, { user: publicUser(user), permissions: globalPermissions(user), ...(user.localDevice ? { authorization: { kind: 'LOCAL_DEVICE', deviceId: user.localDevice.id, projectIds: JSON.parse(user.localDevice.project_ids), expiresAt: new Date(user.localDevice.expires_at).toISOString() } } : {}) });
-      if (method === 'POST' && path === '/api/logout') { transaction(() => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(user.token_hash); localDevices.logout(user); audit(user.id, 'LOGOUT', user.id); }); return send(204, undefined, { 'Set-Cookie': 'taskflow_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0' }); }
+      if (method === 'POST' && path === '/api/logout') { transaction(() => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(user.token_hash); localDevices.logout(user); audit(user.id, 'LOGOUT', user.id); }); return send(204, undefined, { 'Set-Cookie': `taskflow_session=; ${cookieFlags}; Max-Age=0` }); }
       if (path === '/api/users') {
         if (!globalPermissions(user).manageUsers) fail(403, 'FORBIDDEN', '当前角色无权管理用户');
         if (method === 'GET') return send(200, { users: db.prepare('SELECT id,username,role FROM users ORDER BY username').all() });
@@ -152,6 +203,50 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           transaction(() => { if (db.prepare('SELECT id FROM users WHERE username=?').get(username)) fail(409, 'USERNAME_EXISTS', '该账号已存在'); db.prepare('INSERT INTO users VALUES (?,?,?,?,?)').run(id, username, body.role, salt, hash); db.prepare('INSERT INTO project_members VALUES (?,?,?)').run(projectId, id, body.role === 'ADMIN' ? 'LEAD' : body.role); audit(user.id, 'USER_CREATE', id, projectId); });
           return send(201, { user: { id, username, role: body.role } });
         }
+      }
+      if (method === 'POST' && path === '/api/me/password') {
+        const body = requestBody;
+        if (!body || Object.keys(body).some(name => !['currentPassword', 'newPassword'].includes(name))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
+        if (typeof body.currentPassword !== 'string' || !body.currentPassword) fail(400, 'INVALID_INPUT', '请输入当前密码');
+        const next = newPasswordField(body.newPassword);
+        if (next === body.currentPassword) fail(400, 'PASSWORD_UNCHANGED', '新密码不能与当前密码相同');
+        const key = `password:${user.id}`; const now = Date.now(); const attempt = authAttempts.get(key);
+        if (attempt?.until > now && attempt.count >= 5) fail(429, 'TRY_LATER', '尝试过于频繁，请稍后重试');
+        authAttempts.set(key, { count: attempt?.until > now ? attempt.count + 1 : 1, until: attempt?.until > now ? attempt.until : now + 60_000 });
+        const stored = db.prepare('SELECT salt,hash FROM users WHERE id=?').get(user.id);
+        const computed = await passwordHash(body.currentPassword, stored.salt);
+        if (!timingSafeEqual(Buffer.from(computed.hash, 'hex'), Buffer.from(stored.hash, 'hex'))) fail(400, 'CURRENT_PASSWORD_INVALID', '当前密码不正确');
+        const { salt, hash } = await passwordHash(next);
+        user = auth(req);
+        transaction(() => {
+          const latest = db.prepare('SELECT hash FROM users WHERE id=?').get(user.id);
+          if (latest.hash !== stored.hash) fail(409, 'PASSWORD_CHANGED', '密码已被其他操作修改，请重新登录');
+          db.prepare('UPDATE users SET salt=?,hash=? WHERE id=?').run(salt, hash, user.id);
+          // Paired local devices keep their own tokens; only other browser/CLI logins are signed out.
+          db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>? AND token_hash NOT IN (SELECT token_hash FROM local_device_sessions)').run(user.id, user.token_hash);
+          audit(user.id, 'PASSWORD_CHANGE', user.id);
+        });
+        authAttempts.delete(key);
+        return send(204);
+      }
+      const resetRoute = path.match(/^\/api\/users\/([A-Za-z0-9_-]{1,64})\/password$/);
+      if (resetRoute) {
+        if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
+        if (!globalPermissions(user).manageUsers) fail(403, 'FORBIDDEN', '当前角色无权管理用户');
+        const body = requestBody;
+        if (!body || Object.keys(body).some(name => name !== 'password')) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
+        const targetId = resetRoute[1];
+        if (targetId === user.id) fail(400, 'RESET_SELF_FORBIDDEN', '请通过“修改密码”修改自己的密码');
+        if (!db.prepare('SELECT id FROM users WHERE id=?').get(targetId)) fail(404, 'USER_NOT_FOUND', '成员不存在');
+        const { salt, hash } = await passwordHash(newPasswordField(body.password));
+        user = auth(req); if (!globalPermissions(user).manageUsers) fail(403, 'FORBIDDEN', '当前角色无权管理用户');
+        transaction(() => {
+          db.prepare('UPDATE users SET salt=?,hash=? WHERE id=?').run(salt, hash, targetId);
+          db.prepare('UPDATE local_device_sessions SET revoked_at=? WHERE user_id=? AND revoked_at IS NULL').run(new Date().toISOString(), targetId);
+          db.prepare('DELETE FROM sessions WHERE user_id=?').run(targetId);
+          audit(user.id, 'PASSWORD_RESET', targetId);
+        });
+        return send(204);
       }
       if (path === '/api/projects') {
         if (method === 'GET') return send(200, { projects: visibleProjects(user) });
@@ -560,11 +655,21 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       logger.error('TaskFlow request failed'); send(500, { error: { code: 'INTERNAL_ERROR', message: '服务处理失败' } });
     }
   });
-  return { server, db, close: () => new Promise((resolveClose, reject) => { localAutomation.closeAll(); server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); }) };
+  return { server, db, close: () => new Promise((resolveClose, reject) => { localAutomation?.closeAll(); server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); }) };
 }
-export function runtimeOptions(env = process.env) { const port = Number(env.TASKFLOW_PORT || 5187); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('TASKFLOW_PORT must be 1..65535'); return { port, host: env.TASKFLOW_HOST || '127.0.0.1' }; }
+export function runtimeOptions(env = process.env) {
+  const port = Number(env.TASKFLOW_PORT || 5187); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('TASKFLOW_PORT must be 1..65535');
+  const deployment = env.TASKFLOW_DEPLOYMENT || 'local'; if (!['local', 'server'].includes(deployment)) throw new Error('TASKFLOW_DEPLOYMENT must be local or server');
+  const hours = env.TASKFLOW_DEVICE_SESSION_HOURS === undefined ? undefined : Number(env.TASKFLOW_DEVICE_SESSION_HOURS);
+  if (hours !== undefined && (!Number.isInteger(hours) || hours < 1 || hours > 720)) throw new Error('TASKFLOW_DEVICE_SESSION_HOURS must be 1..720');
+  const flag = (name, fallback) => env[name] === undefined ? fallback : env[name] === '1';
+  const bridgeModes = (env.TASKFLOW_BRIDGE_MODES || 'read,review').split(',').map(item => item.trim()).filter(Boolean);
+  if (!bridgeModes.length || bridgeModes.some(mode => !BRIDGE_MODES.includes(mode))) throw new Error('TASKFLOW_BRIDGE_MODES must list read, review and/or develop');
+  return { port, host: env.TASKFLOW_HOST || '127.0.0.1', deployment, trustProxy: flag('TASKFLOW_TRUST_PROXY', false), cookieSecure: flag('TASKFLOW_COOKIE_SECURE', deployment === 'server'), deviceSessionMs: hours && hours * 3_600_000, bridgeModes };
+}
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { port, host } = runtimeOptions(); const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined });
+  const { port, host, deployment, trustProxy, cookieSecure, deviceSessionMs, bridgeModes } = runtimeOptions();
+  const setupToken = process.env.TASKFLOW_SETUP_TOKEN || ''; delete process.env.TASKFLOW_SETUP_TOKEN; const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined, deployment, trustProxy, cookieSecure, deviceSessionMs, setupToken, bridgeModes });
   platform.server.once('error', error => { console.error(`TaskFlow API 启动失败 (${error.code || 'LISTEN_ERROR'})`); platform.db.close(); process.exitCode = 1; });
   platform.server.listen(port, host, () => console.log(`TaskFlow API http://${host}:${port}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => platform.close().then(() => process.exit(0)));

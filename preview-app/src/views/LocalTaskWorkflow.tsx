@@ -2,14 +2,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Card, Checkbox, Collapse, Descriptions, Drawer, Empty, Flex, Input, Segmented, Select, Space, Tag, Typography } from 'antd';
 import { Check, Copy, ExternalLink, FileCheck2, FolderGit2, FolderOpen, Play, RefreshCw, Sparkles, Square, Terminal } from 'lucide-react';
 import {
-  api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo,
+  api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, TeamAgent,
   ProjectWorkspace, REVIEW_ROLES, ReviewJob, Role, Stage, STAGES, timeText, WorkTask,
 } from './workspaceApi';
 import { buildCompanionSyncCommand, buildLocalTaskPrompt, LOCAL_TASK_TARGETS, localReviewCandidates, LocalTaskMode, LocalTaskTarget } from './localTaskWorkflowPrompt';
 import { extractTaskSmartHints } from './taskSmartLinks';
-import { aiRunModeLabel, aiRunStatusLabel, severityLabel, stageLabel, taskStatusLabel, toolLabel } from './displayLabels';
+import { aiRunModeLabel, aiRunStatusLabel, runLocationLabel, severityLabel, stageLabel, taskStatusLabel, toolLabel } from './displayLabels';
 import { isSubmitShortcut, readStoredBool, readStoredChoice, writeStoredBool, writeStoredString } from './uiPreferences';
 import { StatusBadge } from '../components/Primitives';
+import { bridgeInstallCommand } from './bridgeInstall';
 
 const AI_ENGINE_PREF_KEY = 'taskflow.ai.engine';
 const AI_AUTO_SUBMIT_KEY = 'taskflow.ai.autoSubmitReport';
@@ -64,6 +65,8 @@ export const LocalTaskWorkflow: React.FC<{
   const [stoppingRun, setStoppingRun] = useState(false);
   const [submittingDraft, setSubmittingDraft] = useState(false);
   const [rescanningRepos, setRescanningRepos] = useState(false);
+  const [deviceId, setDeviceId] = useState('');
+  const [teamAgents, setTeamAgents] = useState<TeamAgent[]>([]);
 
   const sequence = useRef(0);
   const pending = useRef(false);
@@ -73,9 +76,19 @@ export const LocalTaskWorkflow: React.FC<{
   const prevRunningIds = useRef<Set<string>>(new Set());
   const consoleRef = useRef<HTMLPreElement>(null);
 
+  const serverMode = capabilities?.deployment === 'server';
+  const bridgeModes = serverMode ? capabilities?.bridgeModes || ['read'] : null;
+  const bridgeDevices = serverMode ? (capabilities?.devices || []).filter(device => device.projectIds.includes(task.projectId)) : [];
+  const memberAgents = serverMode ? teamAgents.filter(agent => !agent.mine && agent.dispatchable) : [];
+  const dispatchTargets = [
+    ...bridgeDevices.map(device => ({ id: device.id, deviceName: device.deviceName, online: device.online, lastSeenAt: device.lastSeenAt, owner: null as TeamAgent['owner'] | null })),
+    ...memberAgents.map(agent => ({ id: agent.id, deviceName: agent.deviceName, online: agent.online, lastSeenAt: agent.lastSeenAt, owner: agent.owner })),
+  ];
+  const selectedDevice = dispatchTargets.find(device => device.id === deviceId) || null;
   const frozenTask = frozen || task.status === 'DONE';
-  const canLaunchDevelop = !frozenTask && (canDevelop || !task.assigneeId);
-  const safeMode: LocalTaskMode = frozenTask || (mode === 'develop' && !canLaunchDevelop) || (mode === 'review' && !allowedStages.length) ? 'read' : mode;
+  const canLaunchDevelop = !frozenTask && (canDevelop || !task.assigneeId) && (!bridgeModes || bridgeModes.includes('develop'));
+  const canLaunchReview = !frozenTask && !!allowedStages.length && (!bridgeModes || bridgeModes.includes('review'));
+  const safeMode: LocalTaskMode = frozenTask || (mode === 'develop' && !canLaunchDevelop) || (mode === 'review' && !canLaunchReview) ? 'read' : mode;
 
   let prompt = '';
   try {
@@ -89,7 +102,8 @@ export const LocalTaskWorkflow: React.FC<{
   const smartHints = extractTaskSmartHints(task, repositories);
   const runningRun = runs.find(item => item.status === 'RUNNING') || null;
   const activeRun = runs.find(item => item.id === selectedRunId) || runningRun || runs[0] || null;
-  const workbench = runner === 'workbench';
+  const workbench = !serverMode && runner === 'workbench';
+  const bridgeCommand = bridgeInstallCommand(location.origin);
   const selectedEngine = workbench && engine !== 'cursor' ? 'codex' : engine;
   const engineOptions = workbench ? [{ value: 'codex', label: 'Codex CLI' }, { value: 'cursor', label: 'Cursor Agent' }] : (capabilities?.engines || [
     { id: 'codex' as const, label: 'Codex', tool: 'codex-cli', available: true },
@@ -160,6 +174,7 @@ export const LocalTaskWorkflow: React.FC<{
     const desiredMode = initialMode && !(frozenTask && initialMode !== 'read') ? initialMode : 'read';
     setMode(desiredMode);
     setRunner(initialRunner || 'local');
+    setDeviceId('');
     setRuns([]);
     setTarget('workbench');
     setEngine(storedEngine || 'codex');
@@ -184,7 +199,8 @@ export const LocalTaskWorkflow: React.FC<{
       api<LocalAutomationCapabilities>('local-automation/capabilities'),
       api<{ repositories: LocalGitRepo[] }>('local-git/repositories'),
       api<{ runs: LocalAiRun[] }>(`tasks/${encodeURIComponent(ownerTask)}/ai-runs`),
-    ]).then(([wsRes, capRes, repoRes, runRes]) => {
+      api<{ agents: TeamAgent[] }>(`agents?projectId=${encodeURIComponent(ownerProject)}`),
+    ]).then(([wsRes, capRes, repoRes, runRes, agentRes]) => {
       if (!mounted.current || reqId !== workspaceSeq.current || ownerProject !== task.projectId || ownerUser !== userId) return;
       if (wsRes.status === 'fulfilled') {
         setWorkspace(wsRes.value.workspace);
@@ -196,10 +212,21 @@ export const LocalTaskWorkflow: React.FC<{
       }
       if (capRes.status === 'fulfilled') {
         setCapabilities(capRes.value);
+        if (capRes.value.deployment === 'server') {
+          setRunner('bridge');
+          const scoped = (capRes.value.devices || []).filter(device => device.projectIds.includes(ownerProject));
+          setDeviceId((scoped.find(device => device.online) || scoped[0])?.id || '');
+        }
         setEngine(current => {
           if (capRes.value.engines.some(item => item.id === current && item.available)) return current;
           return capRes.value.engines.find(item => item.available)?.id || current;
         });
+      }
+      const agents = agentRes.status === 'fulfilled' ? agentRes.value.agents || [] : [];
+      setTeamAgents(agents);
+      if (capRes.status === 'fulfilled' && capRes.value.deployment === 'server' && !(capRes.value.devices || []).some(device => device.projectIds.includes(ownerProject))) {
+        const fallback = agents.filter(agent => !agent.mine && agent.dispatchable);
+        setDeviceId((fallback.find(agent => agent.online) || fallback[0])?.id || '');
       }
       if (repoRes.status === 'fulfilled') setRepositories(repoRes.value.repositories || []);
       if (runRes.status === 'fulfilled') {
@@ -301,7 +328,11 @@ export const LocalTaskWorkflow: React.FC<{
 
   const launchAiRun = async () => {
     if (startingRun || runningRun) return;
-    if (safeMode === 'develop' && !workspace?.repoPath && !repoInput.trim()) {
+    if (serverMode && !selectedDevice) {
+      void message.warning('请先在本机配对并运行 Bridge，然后选择接收任务的设备。');
+      return;
+    }
+    if (!serverMode && safeMode === 'develop' && !workspace?.repoPath && !repoInput.trim()) {
       void message.warning('开发协作需要先选择并绑定本机业务 Git 仓库目录。');
       return;
     }
@@ -310,7 +341,7 @@ export const LocalTaskWorkflow: React.FC<{
     let openedWorkbench = false;
     setStartingRun(true);
     try {
-      if (!workspace?.repoPath && repoInput.trim().startsWith('/')) {
+      if (!serverMode && !workspace?.repoPath && repoInput.trim().startsWith('/')) {
         const saved = await api<{ workspace: ProjectWorkspace | null }>(`projects/${encodeURIComponent(task.projectId)}/workspace`, { repoPath: repoInput.trim(), defaultTarget: target }, 'PUT');
         if (mounted.current) setWorkspace(saved.workspace);
       }
@@ -318,9 +349,10 @@ export const LocalTaskWorkflow: React.FC<{
         mode: safeMode,
         engine: selectedEngine,
         ...(workbench ? { runner } : {}),
+        ...(serverMode && selectedDevice ? { runner: 'bridge', deviceId: selectedDevice.id } : {}),
         ...(customInstruction.trim() ? { customInstruction: customInstruction.trim() } : {}),
       };
-      if (safeMode === 'develop' && !task.assigneeId && autoClaim) {
+      if (safeMode === 'develop' && !task.assigneeId && autoClaim && !selectedDevice?.owner) {
         payload.autoClaim = true;
       }
       if (safeMode === 'review') {
@@ -334,7 +366,7 @@ export const LocalTaskWorkflow: React.FC<{
           setStartingRun(false);
           return;
         }
-        if (!workbench && autoSubmitReport) payload.autoSubmitReport = true;
+        if (!workbench && !serverMode && autoSubmitReport) payload.autoSubmitReport = true;
       }
       const res = await api<{ run: LocalAiRun; job?: ReviewJob }>(`tasks/${encodeURIComponent(task.id)}/ai-runs`, payload);
       if (!mounted.current) return;
@@ -346,7 +378,7 @@ export const LocalTaskWorkflow: React.FC<{
         workbenchTab.location.replace(res.run.workbenchUrl);
         openedWorkbench = true;
       }
-      void message.success(workbench ? '已载入任务工作台会话，下方显示状态与结果。' : '已启动本机 AI 执行，下方实时展示输出进度。');
+      void message.success(serverMode ? `已派发到「${selectedDevice?.owner ? `${selectedDevice.owner.username} · ` : ''}${selectedDevice?.deviceName}」，等待本机 Bridge 领取执行。` : workbench ? '已载入任务工作台会话，下方显示状态与结果。' : '已启动本机 AI 执行，下方实时展示输出进度。');
       void onChanged?.().catch(() => {});
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '启动本机 AI 执行失败。');
@@ -362,7 +394,7 @@ export const LocalTaskWorkflow: React.FC<{
       const res = await api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(runId)}/stop`, {});
       if (!mounted.current) return;
       setRuns(current => current.map(item => item.id === res.run.id ? res.run : item));
-      void message.info(res.run.status === 'RUNNING' ? '已请求停止工作台执行。' : '已停止本机 AI 执行。');
+      void message.info(res.run.status !== 'RUNNING' ? '已停止本机 AI 执行。' : res.run.runner === 'bridge' ? '已请求停止，等待本机 Bridge 响应。' : '已请求停止工作台执行。');
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '停止执行失败。');
     } finally {
@@ -432,7 +464,7 @@ export const LocalTaskWorkflow: React.FC<{
   const draftAlreadyReported = !!activeRun?.draft?.autoSubmitted || !!draftJob?.report;
 
   return <Drawer
-    title={workbench ? '任务工作台' : '本地 AI 自动化工作台'}
+    title={workbench ? '任务工作台' : serverMode ? '派发到我的本机 AI' : '本地 AI 自动化工作台'}
     open={open}
     onClose={close}
     size={720}
@@ -440,15 +472,15 @@ export const LocalTaskWorkflow: React.FC<{
     footer={<Flex justify="space-between" align="center" gap={8} wrap>
       <Space size={8} wrap>
         {!workbench && <Button icon={<ExternalLink size={15} />} disabled={!prompt && safeMode !== 'review'} onClick={() => void copy(true)}>复制指令并打开工作台</Button>}
-        {(workspace?.repoPath || repoInput.trim()) && <Button icon={<FolderOpen size={15} />} loading={openingApp === 'finder'} onClick={() => void openLocalApp('finder')}>Finder 打开</Button>}
-        {(workspace?.repoPath || repoInput.trim()) && <Button icon={<Terminal size={15} />} loading={openingApp === 'cursor'} onClick={() => void openLocalApp('cursor')}>在 Cursor 打开</Button>}
+        {!serverMode && (workspace?.repoPath || repoInput.trim()) && <Button icon={<FolderOpen size={15} />} loading={openingApp === 'finder'} onClick={() => void openLocalApp('finder')}>Finder 打开</Button>}
+        {!serverMode && (workspace?.repoPath || repoInput.trim()) && <Button icon={<Terminal size={15} />} loading={openingApp === 'cursor'} onClick={() => void openLocalApp('cursor')}>在 Cursor 打开</Button>}
       </Space>
       <Space size={8}>
         <Button onClick={close}>关闭</Button>
         {runningRun ? (
           <Button danger type="primary" icon={<Square size={14} />} loading={stoppingRun} onClick={() => void stopAiRun(runningRun.id)}>停止当前执行</Button>
         ) : (
-          <Button type="primary" icon={<Play size={15} />} loading={startingRun} onClick={() => void launchAiRun()}>{workbench ? '打开工作台会话' : '直接启动本机 AI 执行'}</Button>
+          <Button type="primary" icon={<Play size={15} />} loading={startingRun} disabled={serverMode && !selectedDevice} onClick={() => void launchAiRun()}>{workbench ? '打开工作台会话' : serverMode ? '派发到本机执行' : '直接启动本机 AI 执行'}</Button>
         )}
       </Space>
     </Flex>}
@@ -462,10 +494,27 @@ export const LocalTaskWorkflow: React.FC<{
           {!!constitutionFiles?.length && <Tag color="cyan">工程规范：{constitutionFiles.join(' · ')}</Tag>}
         </Space>
         <Typography.Title level={4} style={{ margin: '6px 0 4px' }}>{task.title}</Typography.Title>
-        <Typography.Text type="secondary">无需手动复制粘贴任务 ID 或材料：直接调用本机已安装的 Codex / Gemini / Cursor / Claude 执行任务分析、代码协作或生成结构化评审草稿。</Typography.Text>
+        <Typography.Text type="secondary">{serverMode
+          ? '服务器只负责派发与记录：任务由你本机运行的 Bridge 领取，在你的电脑上调用 Codex / Cursor 执行，代码与凭据不会上传到服务器。'
+          : '无需手动复制粘贴任务 ID 或材料：直接调用本机已安装的 Codex / Gemini / Cursor / Claude 执行任务分析、代码协作或生成结构化评审草稿。'}</Typography.Text>
       </div>
 
-      {!workspace?.repoPath && smartHints.matchedRepos.length > 0 && (
+      {serverMode && !dispatchTargets.length && (
+        <Alert
+          type="warning"
+          showIcon
+          title="还没有可接收该项目任务的本机 Bridge"
+          description={<Flex vertical gap={6} style={{ marginTop: 4 }}>
+            <span>在你的电脑终端运行下面的一键安装命令，按提示配对（授权时勾选项目 {task.projectId}），再按「本机接入」页的说明填写仓库映射并启动后台运行。也可以请项目负责人让已接入的成员开启「允许团队派发」。</span>
+            <Flex gap={8} align="center">
+              <Input readOnly value={bridgeCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
+              <Button size="small" icon={<Copy size={14} />} onClick={() => { void navigator.clipboard.writeText(bridgeCommand).then(() => message.success('命令已复制。')).catch(() => message.warning('复制未完成，请手动复制。')); }}>复制</Button>
+            </Flex>
+          </Flex>}
+        />
+      )}
+
+      {!serverMode && !workspace?.repoPath && smartHints.matchedRepos.length > 0 && (
         <Alert
           type="info"
           showIcon
@@ -477,7 +526,7 @@ export const LocalTaskWorkflow: React.FC<{
         />
       )}
 
-      <Card size="small" title={<Space size={6}><FolderGit2 size={15} /><span>项目本地 Git 仓库与快捷打开</span></Space>} extra={<Button size="small" type="text" icon={<RefreshCw size={13} />} loading={rescanningRepos} onClick={() => void rescanRepositories()}>重新扫描</Button>}>
+      {!serverMode && <Card size="small" title={<Space size={6}><FolderGit2 size={15} /><span>项目本地 Git 仓库与快捷打开</span></Space>} extra={<Button size="small" type="text" icon={<RefreshCw size={13} />} loading={rescanningRepos} onClick={() => void rescanRepositories()}>重新扫描</Button>}>
         <Flex vertical gap={10}>
           {repositories.length > 0 && (
             <Select
@@ -508,7 +557,7 @@ export const LocalTaskWorkflow: React.FC<{
             </Space>
           )}
         </Flex>
-      </Card>
+      </Card>}
 
       <Card size="small" title={<Space size={6}><Sparkles size={15} /><span>执行方式</span></Space>}>
         <Flex vertical gap={12}>
@@ -519,7 +568,7 @@ export const LocalTaskWorkflow: React.FC<{
             options={[
               { value: 'read', label: '1. 任务与材料缺口分析' },
               { value: 'develop', label: '2. 本地代码开发协作', disabled: !canLaunchDevelop },
-              { value: 'review', label: '3. 自动生成评审草稿', disabled: frozenTask || !allowedStages.length },
+              { value: 'review', label: '3. 自动生成评审草稿', disabled: !canLaunchReview },
             ]}
             onChange={value => setMode(value as LocalTaskMode)}
           />
@@ -527,10 +576,18 @@ export const LocalTaskWorkflow: React.FC<{
           <Flex gap={12} wrap>
             <div style={{ flex: '1 1 240px' }}>
               <Typography.Text style={{ display: 'block', marginBottom: 4 }}>执行位置</Typography.Text>
-              <Select aria-label="执行位置" style={{ width: '100%' }} value={runner} options={[
-                { value: 'workbench', label: '5288 工作台' },
-                { value: 'local', label: '本机 CLI' },
-              ]} onChange={setRunner} />
+              {serverMode ? (
+                <Select aria-label="接收任务的本机设备" style={{ width: '100%' }} value={selectedDevice?.id} placeholder="未配对本机 Bridge" options={dispatchTargets.map(device => ({
+                  value: device.id,
+                  disabled: !!device.owner && safeMode === 'develop' && task.assigneeId !== device.owner.id,
+                  label: `${device.owner ? `${device.owner.username} 的本机 Bridge` : '我的本机 Bridge'} · ${device.deviceName} · ${device.online ? '在线' : device.lastSeenAt ? `离线（${timeText(device.lastSeenAt)}）` : '未启动 worker'}${device.owner && safeMode === 'develop' && task.assigneeId !== device.owner.id ? ' · 开发任务需先指派给他' : ''}`,
+                }))} onChange={setDeviceId} />
+              ) : (
+                <Select aria-label="执行位置" style={{ width: '100%' }} value={runner} options={[
+                  { value: 'workbench', label: '5288 工作台' },
+                  { value: 'local', label: '本机 CLI' },
+                ]} onChange={setRunner} />
+              )}
             </div>
             <div style={{ flex: '1 1 240px' }}>
               <Typography.Text style={{ display: 'block', marginBottom: 4 }}>执行引擎</Typography.Text>
@@ -582,7 +639,11 @@ export const LocalTaskWorkflow: React.FC<{
             </Checkbox>
           )}
 
-          {safeMode === 'review' && !workbench && (
+          {serverMode && selectedDevice && !selectedDevice.online && (
+            <Typography.Text type="warning" style={{ fontSize: 12 }}>该设备最近未在线，派发会排队最多 30 分钟，期间需在本机运行 rd.mjs worker 才会被领取。</Typography.Text>
+          )}
+
+          {safeMode === 'review' && !workbench && !serverMode && (
             <Checkbox checked={autoSubmitReport} onChange={e => { setAutoSubmitReport(e.target.checked); writeStoredBool(AI_AUTO_SUBMIT_KEY, e.target.checked); }}>
               生成结构化草稿后自动提交为本阶段本地 AI 评审报告（多人项目审批仍由独立成员执行）
             </Checkbox>
@@ -604,13 +665,13 @@ export const LocalTaskWorkflow: React.FC<{
           <Flex justify="space-between" align="center" gap={8} wrap>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>
               {safeMode === 'read' && '只读分析任务需求、现有资产与门禁缺口，不修改代码或平台状态。'}
-              {safeMode === 'develop' && '在绑定仓库执行本地开发与自测，新 Git 提交自动记录开发进度（绝不自动 push）。'}
+              {safeMode === 'develop' && (serverMode ? '在本机 Bridge 配置映射的仓库中开发与自测，执行前需在本机弹窗确认（绝不自动 push）。' : '在绑定仓库执行本地开发与自测，新 Git 提交自动记录开发进度（绝不自动 push）。')}
               {safeMode === 'review' && '基于冻结快照输出结构化评审结论与发现项，支持一键回填提交。'}
             </Typography.Text>
             {!workbench && (runningRun ? (
               <Button danger icon={<Square size={14} />} loading={stoppingRun} onClick={() => void stopAiRun(runningRun.id)}>停止执行</Button>
             ) : (
-              <Button type="primary" icon={<Play size={15} />} loading={startingRun} onClick={() => void launchAiRun()}>
+              <Button type="primary" icon={<Play size={15} />} loading={startingRun} disabled={serverMode && !selectedDevice} onClick={() => void launchAiRun()}>
                 {safeMode === 'read' ? '启动任务分析' : safeMode === 'develop' ? '启动本地开发协作' : '启动 AI 评审'}
               </Button>
             ))}
@@ -626,7 +687,7 @@ export const LocalTaskWorkflow: React.FC<{
             <StatusBadge variant={activeRun.status === 'SUCCEEDED' ? 'green' : activeRun.status === 'RUNNING' ? 'blue' : activeRun.status === 'FAILED' ? 'block' : 'neutral'}>
               {aiRunStatusLabel(activeRun.status)}
             </StatusBadge>
-            <Tag>{activeRun.runner === 'workbench' ? '5288 工作台 · ' : ''}{toolLabel(activeRun.engine)} · {aiRunModeLabel(activeRun.mode)}</Tag>
+            <Tag>{runLocationLabel(activeRun)}{toolLabel(activeRun.engine)} · {aiRunModeLabel(activeRun.mode)}</Tag>
           </Space>}
           extra={(runs.length > 1 || !!activeRun.output || activeRun.workbenchUrl) ? (
             <Space size={6} wrap>
@@ -663,7 +724,7 @@ export const LocalTaskWorkflow: React.FC<{
                 type="warning"
                 showIcon
                 title={activeRun.error}
-                action={activeRun.error.includes('桌面隐私') || activeRun.error.includes('Cursor') ? (
+                action={!serverMode && (activeRun.error.includes('桌面隐私') || activeRun.error.includes('Cursor')) ? (
                   <Space size={4}>
                     <Button size="small" onClick={() => void openLocalApp('cursor')}>打开 Cursor</Button>
                     <Button size="small" onClick={() => void copy(true)}>去工作台处理</Button>
@@ -710,7 +771,9 @@ export const LocalTaskWorkflow: React.FC<{
             )}
 
             <pre ref={consoleRef} className="tf-code-panel" style={{ maxHeight: 260 }}>
-              {activeRun.output || (activeRun.status === 'RUNNING' ? '正在启动本机 AI 并读取任务快照，请稍候…' : '（无控制台输出）')}
+              {activeRun.output || (activeRun.status !== 'RUNNING' ? '（无控制台输出）'
+                : activeRun.runner === 'bridge' && activeRun.bridgePhase === 'QUEUED' ? '已排队，等待本机 Bridge 领取（请确认本机正在运行 rd.mjs worker）…'
+                : '正在启动本机 AI 并读取任务快照，请稍候…')}
             </pre>
           </Flex>
         </Card>

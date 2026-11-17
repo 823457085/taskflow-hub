@@ -114,7 +114,7 @@ test('connect opens a code-free page, completes real cookie-approved device pair
   await assert.rejects(fetch(`http://127.0.0.1:${handoffPort}/taskflow-pairing`, { headers: { Origin: url } }));
   const transport = new StdioClientTransport({ command: process.execPath, args: [join(bridge, 'mcp.mjs')], env: { RD_HUB_STATE_DIR: state }, stderr: 'pipe' }); transport.stderr?.on('data', () => {});
   const client = new Client({ name: 'handoff-fixture', version: '1.0.0' });
-  try { await client.connect(transport); assert.equal((await client.listTools()).tools.length, 9); const tasks = await client.callTool({ name: 'task_list', arguments: {} }); assert.equal(tasks.isError, undefined); assert.equal(JSON.parse(tasks.content[0].text).tasks.length, 1); }
+  try { await client.connect(transport); assert.equal((await client.listTools()).tools.length, 11); const tasks = await client.callTool({ name: 'task_list', arguments: {} }); assert.equal(tasks.isError, undefined); assert.equal(JSON.parse(tasks.content[0].text).tasks.length, 1); }
   finally { await client.close(); }
   const oldFile = await readFile(join(state, 'session.json'), 'utf8'); const before = app.db.prepare('SELECT count(*) AS n FROM local_device_sessions').get().n;
   const reused = await connect({ url, 'web-url': url, name: 'Ignored on reuse', tool: 'custom' }, state, { throwOpen: true });

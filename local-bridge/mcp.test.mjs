@@ -11,7 +11,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const script = fileURLToPath(new URL('./mcp.mjs', import.meta.url));
-const names = ['task_list', 'context', 'assets', 'reviews', 'review_context', 'task_claim', 'progress_report', 'heartbeat', 'report_submit'];
+const names = ['task_list', 'context', 'assets', 'reviews', 'review_context', 'knowledge_search', 'knowledge_doc', 'task_claim', 'progress_report', 'heartbeat', 'report_submit'];
 const token = 'test-mcp-token-9382237-private';
 const deviceId = 'test-mcp-device';
 const localReport = { summary: ' L10001 保留本地报告原文 ', source: 'LOCAL_TOOL', tool: 'codex-cli', evidence: '  已核对接口定义\n', findings: [{ severity: 'WARN', title: '边界待确认', detail: 'L10002 按接口文案显示', location: 'src/task.ts:12' }] };
@@ -64,14 +64,16 @@ test('official SDK client initializes, lists tools and calls all allowed API ope
   assert.equal(mcp.client.getServerVersion().name, 'taskflow-local-bridge');
   const listed = await mcp.client.listTools();
   assert.deepEqual(listed.tools.map(item => item.name), names);
-  assert.ok(listed.tools.slice(0, 5).every(item => item.annotations.readOnlyHint));
-  assert.ok(listed.tools.slice(5).every(item => !item.annotations.readOnlyHint && !item.annotations.openWorldHint));
+  assert.ok(listed.tools.slice(0, 7).every(item => item.annotations.readOnlyHint));
+  assert.ok(listed.tools.slice(7).every(item => !item.annotations.readOnlyHint && !item.annotations.openWorldHint));
   for (const [name, args, path] of [
     ['task_list', {}, '/api/tasks'],
     ['context', { taskId: 'task-1' }, '/api/tasks/task-1/context'],
     ['assets', { taskId: 'task-1' }, '/api/tasks/task-1/assets'],
     ['reviews', { taskId: 'task-1' }, '/api/jobs?taskId=task-1'],
     ['review_context', { jobId: 'job-1' }, '/api/jobs/job-1'],
+    ['knowledge_search', { projectId: 'default', q: '支付 回调' }, '/api/knowledge?projectId=default&q=%E6%94%AF%E4%BB%98+%E5%9B%9E%E8%B0%83&limit=20'],
+    ['knowledge_doc', { docId: 'doc-1' }, '/api/knowledge/doc-1'],
     ['task_claim', { taskId: 'task-1', expectedVersion: 2 }, '/api/tasks/task-1/claim'],
     ['progress_report', { taskId: 'task-1', tool: 'cursor', progress: 45, summary: 'L005 完成接口核对', branch: 'feature/MCP-1' }, '/api/tasks/task-1/progress'],
     ['heartbeat', { taskId: 'task-1', tool: 'cursor', status: 'WORKING' }, '/api/tasks/task-1/heartbeat'],
@@ -83,10 +85,10 @@ test('official SDK client initializes, lists tools and calls all allowed API ope
     assert.equal(data.token, undefined);
     assert.deepEqual(data.nested, {});
   }
-  assert.deepEqual(requests[5], { path: '/api/tasks/task-1/claim', method: 'POST', body: { expectedVersion: 2 } });
-  assert.deepEqual(requests[6].body, { tool: 'cursor', progress: 45, summary: 'L005 完成接口核对', branch: 'feature/MCP-1', deviceId });
-  assert.deepEqual(requests[7].body, { tool: 'cursor', status: 'WORKING', deviceId });
-  assert.deepEqual(requests[8].body, localReport);
+  assert.deepEqual(requests[7], { path: '/api/tasks/task-1/claim', method: 'POST', body: { expectedVersion: 2 } });
+  assert.deepEqual(requests[8].body, { tool: 'cursor', progress: 45, summary: 'L005 完成接口核对', branch: 'feature/MCP-1', deviceId });
+  assert.deepEqual(requests[9].body, { tool: 'cursor', status: 'WORKING', deviceId });
+  assert.deepEqual(requests[10].body, localReport);
   for (const secret of [token, 'test-password-secret', 'test-access-secret', 'test-api-secret', 'test-auth-secret']) assert.ok(!mcp.output().includes(secret));
   assert.equal(mcp.stderr(), '');
   assert.deepEqual(mcp.protocolErrors, [], 'stdout must contain valid JSON-RPC messages only');
@@ -95,7 +97,7 @@ test('official SDK client initializes, lists tools and calls all allowed API ope
 test('missing, public or symlinked session files return tool errors without blocking MCP discovery', async t => {
   const directory = await state(t);
   const mcp = await connect(t, directory);
-  assert.equal((await mcp.client.listTools()).tools.length, 9);
+  assert.equal((await mcp.client.listTools()).tools.length, 11);
   assert.match(errorOf(await mcp.call('task_list')), /尚未登录.*rd\.mjs connect.*网页确认/);
   const sessionPath = join(directory, 'session.json');
   await writeFile(sessionPath, JSON.stringify({ url: 'http://127.0.0.1:1', token, deviceId }), { mode: 0o644 });

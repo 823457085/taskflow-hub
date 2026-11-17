@@ -194,6 +194,8 @@ const MCP_TOOL_MAP: Record<string, string> = {
   assets: '读取材料版本',
   reviews: '读取评审记录',
   review_context: '读取冻结评审快照',
+  knowledge_search: '检索团队知识库',
+  knowledge_doc: '读取知识库文档',
   task_claim: '认领任务',
   progress_report: '上报开发进度',
   heartbeat: '记录会话心跳',
@@ -296,6 +298,16 @@ export const heartbeatStatusLabel = (status?: string | null): string =>
 
 export const aiRunStatusLabel = (status?: string | null): string =>
   status ? AI_RUN_STATUS_MAP[status] || status : '—';
+
+const BRIDGE_PHASE_MAP: Record<string, string> = { QUEUED: '排队等待本机领取', CLAIMED: '本机已领取', EXECUTING: '本机执行中' };
+
+export const runLocationLabel = (run: { runner?: string; status: string; bridgePhase?: string | null; cancelRequested?: boolean }): string => {
+  if (run.runner === 'workbench') return '5288 工作台 · ';
+  if (run.runner !== 'bridge') return '';
+  if (run.status !== 'RUNNING') return '本机 Bridge · ';
+  if (run.cancelRequested) return '本机 Bridge · 停止中 · ';
+  return `本机 Bridge · ${BRIDGE_PHASE_MAP[run.bridgePhase || ''] || '处理中'} · `;
+};
 
 export const aiRunModeLabel = (mode?: string | null): string =>
   mode ? AI_RUN_MODE_MAP[mode] || mode : '—';

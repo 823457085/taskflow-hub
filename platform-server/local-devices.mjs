@@ -63,7 +63,7 @@ function removeHostSessionIfMatching(dir, deviceId) {
   try { unlinkSync(current.filePath); } catch {}
 }
 
-export function createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187' }) {
+export function createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', clientIp = req => req.socket.remoteAddress || 'unknown', sessionMs = SESSION_MS }) {
   const limits = new Map();
   const rate = (key, maximum) => {
     const time = now();
@@ -82,7 +82,7 @@ export function createLocalDevices({ db, transaction, audit, projectRole, visibl
   };
   const publicRoutes = ({ req, path, method, body, send }) => {
     if (method !== 'POST' || !['/api/device-authorizations', '/api/device-authorizations/poll'].includes(path)) return false;
-    const ip = req.socket.remoteAddress || 'unknown';
+    const ip = clientIp(req);
     if (path === '/api/device-authorizations') {
       rate('start:' + ip, 10); keys(body, ['deviceName', 'tool']);
       const deviceName = textField(body.deviceName, 'deviceName', { max: 80 });
@@ -108,7 +108,7 @@ export function createLocalDevices({ db, transaction, audit, projectRole, visibl
       if (!user) fail(410, 'PAIRING_REVOKED', '授权成员已不可用，请重新发起');
       const projectIds = JSON.parse(row.project_ids);
       for (const id of projectIds) projectRole(user, id);
-      const token = randomBytes(32).toString('base64url'); const id = randomUUID(); const expires = now() + SESSION_MS;
+      const token = randomBytes(32).toString('base64url'); const id = randomUUID(); const expires = now() + sessionMs;
       db.prepare('INSERT INTO sessions (token_hash,user_id,expires_at) VALUES (?,?,?)').run(sha(token), user.id, expires);
       db.prepare('INSERT INTO local_device_sessions (id,token_hash,user_id,device_name,tool,project_ids,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?)').run(id, sha(token), user.id, row.device_name, row.tool, row.project_ids, expires, new Date(now()).toISOString());
       db.prepare("UPDATE local_authorizations SET status='CONSUMED' WHERE device_hash=?").run(row.device_hash);
@@ -121,10 +121,10 @@ export function createLocalDevices({ db, transaction, audit, projectRole, visibl
   const session = hash => db.prepare('SELECT * FROM local_device_sessions WHERE token_hash=?').get(hash);
   const authorizeRequest = ({ method, path, body, user }) => {
     const device = user.localDevice; if (!device) return;
-    const read = method === 'GET' && (/^\/api\/(?:me|projects|tasks|jobs)$/.test(path) || /^\/api\/tasks\/[^/]+(?:\/(?:context|assets|gates|bundle))?$/.test(path) || /^\/api\/jobs\/[^/]+$/.test(path));
-    const write = method === 'POST' && (path === '/api/logout' || /^\/api\/tasks\/[^/]+\/(?:claim|progress|heartbeat)$/.test(path) || /^\/api\/jobs\/[^/]+\/report$/.test(path));
-    if (!read && !write) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备仅可读取已授权项目任务并提交认领、进度、心跳和报告');
-    if (/\/(progress|heartbeat)$/.test(path) && body?.deviceId !== device.id) fail(403, 'DEVICE_ID_MISMATCH', '设备标识与当前配对会话不一致');
+    const read = method === 'GET' && (/^\/api\/(?:me|projects|tasks|jobs)$/.test(path) || /^\/api\/tasks\/[^/]+(?:\/(?:context|assets|gates|bundle))?$/.test(path) || /^\/api\/jobs\/[^/]+$/.test(path) || path === '/api/bridge/runs/next' || /^\/api\/knowledge(?:\/[^/]+)?$/.test(path) && path !== '/api/knowledge/import' || path === '/api/skills');
+    const write = method === 'POST' && (path === '/api/logout' || /^\/api\/tasks\/[^/]+\/(?:claim|progress|heartbeat)$/.test(path) || /^\/api\/jobs\/[^/]+\/report$/.test(path) || /^\/api\/bridge\/runs\/[^/]+\/(?:claim|progress|result)$/.test(path) || ['/api/agent-sessions/sync', '/api/deployments/sync'].includes(path));
+    if (!read && !write) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备仅可读取已授权项目任务，提交认领、进度、心跳和报告，领取派发，同步 Agent 与部署记录，以及读取知识库和团队 Skill');
+    if (/^\/api\/tasks\/[^/]+\/(progress|heartbeat)$/.test(path) && body?.deviceId !== device.id) fail(403, 'DEVICE_ID_MISMATCH', '设备标识与当前配对会话不一致');
     db.prepare('UPDATE local_device_sessions SET last_seen_at=? WHERE id=?').run(new Date(now()).toISOString(), device.id);
   };
   const authenticatedRoutes = ({ req, path, method, body, user, send }) => {
@@ -228,12 +228,23 @@ export function createLocalDevices({ db, transaction, audit, projectRole, visibl
       browser(req, user);
       const devices = db.prepare('SELECT d.*,s.token_hash AS active_hash FROM local_device_sessions d LEFT JOIN sessions s ON d.token_hash=s.token_hash WHERE d.user_id=? ORDER BY d.created_at DESC LIMIT 100').all(user.id).map(row => ({
         id: row.id, deviceName: row.device_name, tool: row.tool, projectIds: JSON.parse(row.project_ids), createdAt: row.created_at,
-        lastSeenAt: row.last_seen_at, expiresAt: new Date(row.expires_at).toISOString(), scope: 'LOCAL_BRIDGE',
+        lastSeenAt: row.last_seen_at, expiresAt: new Date(row.expires_at).toISOString(), scope: 'LOCAL_BRIDGE', teamDispatch: !!row.team_dispatch,
         status: row.revoked_at ? 'REVOKED' : row.expires_at <= now() ? 'EXPIRED' : !row.active_hash ? 'REVOKED' : 'ACTIVE',
       }));
       send(200, { devices }); return true;
     }
     const revoke = path.match(/^\/api\/local-devices\/([a-zA-Z0-9_-]{1,80})$/);
+    if (method === 'PATCH' && revoke) {
+      browser(req, user, true); keys(body || {}, ['teamDispatch']);
+      if (typeof body?.teamDispatch !== 'boolean') fail(400, 'INVALID_INPUT', 'teamDispatch必须为布尔值');
+      const row = db.prepare('SELECT * FROM local_device_sessions WHERE id=? AND user_id=? AND revoked_at IS NULL').get(revoke[1], user.id);
+      if (!row) fail(404, 'DEVICE_NOT_FOUND', '本地设备连接不存在');
+      transaction(() => {
+        db.prepare('UPDATE local_device_sessions SET team_dispatch=? WHERE id=?').run(body.teamDispatch ? 1 : 0, row.id);
+        audit(user.id, body.teamDispatch ? 'LOCAL_DEVICE_TEAM_DISPATCH_ON' : 'LOCAL_DEVICE_TEAM_DISPATCH_OFF', row.id);
+      });
+      send(200, { device: { id: row.id, teamDispatch: body.teamDispatch } }); return true;
+    }
     if (method === 'DELETE' && revoke) {
       browser(req, user, true);
       const row = db.prepare('SELECT * FROM local_device_sessions WHERE id=? AND user_id=?').get(revoke[1], user.id);

@@ -195,6 +195,11 @@ export const ReviewDetail: React.FC<{
 
   useEffect(() => { setFindingFilter('ALL'); void run(refresh); }, [jobId]);
 
+  const serverMode = capabilities?.deployment === 'server';
+  const scopedDevices = (capabilities?.devices || []).filter(device => device.projectIds.includes(task.projectId));
+  const bridgeDevice = scopedDevices.find(device => device.online) || scopedDevices[0] || null;
+  const bridgeUnavailable = serverMode && (!bridgeDevice || !(capabilities?.bridgeModes || []).includes('review'));
+  const runTarget = serverMode && bridgeDevice ? { runner: 'bridge', deviceId: bridgeDevice.id } : {};
   const runningAiRun = jobRuns.find(r => r.status === 'RUNNING') || null;
   const latestDraftRun = jobRuns.find(r => r.status === 'SUCCEEDED' && r.draft) || null;
 
@@ -239,12 +244,13 @@ export const ReviewDetail: React.FC<{
         executionMode: nextMode,
       });
       if (accessLost.current || !mounted.current) return;
-      if (autoAiDraft && !created.job.report) {
+      if (autoAiDraft && !created.job.report && !bridgeUnavailable) {
         try {
           await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(task.id)}/ai-runs`, {
             mode: 'review',
             jobId: created.job.id,
             engine,
+            ...runTarget,
           });
           void message.success('已基于最新材料创建新评审并启动本机 AI 草稿生成。');
         } catch {
@@ -259,17 +265,18 @@ export const ReviewDetail: React.FC<{
   };
 
   const startAiDraft = async () => {
-    if (!job || !canReport || startingAi || runningAiRun) return;
+    if (!job || !canReport || startingAi || runningAiRun || bridgeUnavailable) return;
     setStartingAi(true);
     try {
       const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(task.id)}/ai-runs`, {
         mode: 'review',
         jobId: job.id,
         engine,
+        ...runTarget,
       });
       if (!mounted.current || accessLost.current) return;
       setJobRuns(current => [res.run, ...current.filter(item => item.id !== res.run.id)]);
-      void message.info('正在调用本机 AI 分析冻结快照并生成结构化评审草稿…');
+      void message.info(serverMode ? `已派发到「${bridgeDevice?.deviceName}」，等待本机 Bridge 领取并生成草稿…` : '正在调用本机 AI 分析冻结快照并生成结构化评审草稿…');
     } catch (error) {
       if (mounted.current) void message.error(error instanceof Error ? error.message : '启动本机 AI 草稿生成失败。');
     } finally {
@@ -350,30 +357,6 @@ export const ReviewDetail: React.FC<{
         <Flex gap={8} align="center" wrap><Typography.Title level={4} style={{ margin: 0 }}>{stageLabel(job.stage)}</Typography.Title><StatusBadge variant={statusVariant}>{reviewStatusLabel(job.status)}</StatusBadge>{job.stale && <StatusBadge variant="warn">材料已更新·需重审</StatusBadge>}</Flex>
         <Typography.Paragraph type="secondary" className="tf-meta-line">{executionModeLabel(job.executionMode)} · {memberName(members, job.actorId)} · {timeText(job.createdAt)}</Typography.Paragraph>
       </div>
-      <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} items={[
-        { key: 'persona', label: '评审视角', children: personaLabel(job.persona) },
-        { key: 'executor', label: '执行方式', children: job.executor === 'UNCONFIGURED' ? executionModeLabel(job.executionMode) : <code>{job.executor}</code> },
-        { key: 'skills', label: '核验规则集', span: 2, children: skillsLabel(job.skills) },
-        ...(snapshotPlugins.length > 0 ? [{
-          key: 'plugins',
-          label: '项目门禁插件',
-          span: 2,
-          children: (
-            <Space size={[6, 6]} wrap>
-              {snapshotPlugins.map((plugin, idx) => (
-                <Tag key={plugin.id || idx} color="geekblue" style={{ marginInlineEnd: 0 }}>
-                  {plugin.name || plugin.id} {plugin.version ? `v${plugin.version}` : ''}
-                </Tag>
-              ))}
-              {snapshotPolicyHash && (
-                <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
-                  策略指纹 {snapshotPolicyHash.slice(0, 12)}
-                </Typography.Text>
-              )}
-            </Space>
-          ),
-        }] : []),
-      ]} />
       {readOnly && <Typography.Paragraph type="secondary">任务已完成或上级任务已冻结，当前评审仅供查看。</Typography.Paragraph>}
       {(job.stale || job.status === 'CHANGES_REQUESTED') && (
         <Alert
@@ -581,16 +564,25 @@ export const ReviewDetail: React.FC<{
                     {runningAiRun ? (
                       <Button size="small" danger icon={<Square size={13} />} onClick={() => void stopAiDraft(runningAiRun.id)}>停止生成</Button>
                     ) : (
-                      <Button size="small" type="primary" icon={<Play size={13} />} loading={startingAi} onClick={() => void startAiDraft()}>一键生成并填入表单</Button>
+                      <Button size="small" type="primary" icon={<Play size={13} />} loading={startingAi} disabled={bridgeUnavailable} onClick={() => void startAiDraft()}>{serverMode ? '派发到本机生成' : '一键生成并填入表单'}</Button>
                     )}
                     {latestDraftRun && !runningAiRun && (
                       <Button size="small" onClick={() => applyDraftToForm(latestDraftRun)}>重新带入上次草稿</Button>
                     )}
                   </Space>
                 </Flex>
+                {serverMode && !runningAiRun && (
+                  <Typography.Text type={bridgeUnavailable ? 'warning' : 'secondary'} style={{ fontSize: 12 }}>
+                    {!bridgeDevice ? '尚未配对可接收该项目任务的本机 Bridge，请在「本机接入」页按指引配对并运行 worker。'
+                      : bridgeUnavailable ? '服务器未开启评审类派发。'
+                      : `将派发到「${bridgeDevice.deviceName}」（${bridgeDevice.online ? '在线' : '离线，需在本机运行 worker 后才会领取'}）。`}
+                  </Typography.Text>
+                )}
                 {runningAiRun && (
                   <pre ref={consoleRef} className="tf-code-panel" style={{ maxHeight: 160 }}>
-                    {runningAiRun.output || '正在读取冻结输入快照并执行审查，完成后将自动填入下方表单…'}
+                    {runningAiRun.output || (runningAiRun.runner === 'bridge' && runningAiRun.bridgePhase === 'QUEUED'
+                      ? '已排队，等待本机 Bridge 领取（请确认本机正在运行 rd.mjs worker）…'
+                      : '正在读取冻结输入快照并执行审查，完成后将自动填入下方表单…')}
                   </pre>
                 )}
                 {jobRuns[0]?.status === 'FAILED' && jobRuns[0].error && (
@@ -724,8 +716,32 @@ export const ReviewDetail: React.FC<{
       </>}
       <Collapse items={[{
         key: 'snapshot',
-        label: `冻结的输入材料与快照详情（共 ${snapshotAssets.length} 份材料）`,
+        label: `评审配置与冻结快照（${snapshotAssets.length} 份材料）`,
         children: <div className="tf-detail-stack tf-detail-stack-small">
+          <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} items={[
+        { key: 'persona', label: '评审视角', children: personaLabel(job.persona) },
+        { key: 'executor', label: '执行方式', children: job.executor === 'UNCONFIGURED' ? executionModeLabel(job.executionMode) : <code>{job.executor}</code> },
+        { key: 'skills', label: '核验规则集', span: 2, children: skillsLabel(job.skills) },
+        ...(snapshotPlugins.length > 0 ? [{
+          key: 'plugins',
+          label: '项目门禁插件',
+          span: 2,
+          children: (
+            <Space size={[6, 6]} wrap>
+              {snapshotPlugins.map((plugin, idx) => (
+                <Tag key={plugin.id || idx} color="geekblue" style={{ marginInlineEnd: 0 }}>
+                  {plugin.name || plugin.id} {plugin.version ? `v${plugin.version}` : ''}
+                </Tag>
+              ))}
+              {snapshotPolicyHash && (
+                <Typography.Text type="secondary" code style={{ fontSize: 11 }}>
+                  策略指纹 {snapshotPolicyHash.slice(0, 12)}
+                </Typography.Text>
+              )}
+            </Space>
+          ),
+        }] : []),
+      ]} />
           <Descriptions bordered size="small" column={1} items={[
             { key: 'job', label: '评审编号', children: <code className="tf-break">{job.id}</code> },
             { key: 'hash', label: '输入指纹 (SHA256)', children: <code className="tf-break">{job.inputHash || '—'}</code> },

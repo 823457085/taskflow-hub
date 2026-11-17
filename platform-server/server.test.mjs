@@ -6,9 +6,17 @@ import { join } from 'node:path';
 import { createPlatform, runtimeOptions } from './server.mjs';
 const password = 'local-only-test-passphrase';
 test('runtime binding ignores inherited workspace PORT and HOST', () => {
-  assert.deepEqual(runtimeOptions({ PORT: '5288', HOST: '0.0.0.0' }), { port: 5187, host: '127.0.0.1' });
-  assert.deepEqual(runtimeOptions({ PORT: '5288', TASKFLOW_PORT: '5190', TASKFLOW_HOST: '127.0.0.2' }), { port: 5190, host: '127.0.0.2' });
+  const local = { deployment: 'local', trustProxy: false, cookieSecure: false, deviceSessionMs: undefined, bridgeModes: ['read', 'review'] };
+  assert.deepEqual(runtimeOptions({ PORT: '5288', HOST: '0.0.0.0' }), { port: 5187, host: '127.0.0.1', ...local });
+  assert.deepEqual(runtimeOptions({ PORT: '5288', TASKFLOW_PORT: '5190', TASKFLOW_HOST: '127.0.0.2' }), { port: 5190, host: '127.0.0.2', ...local });
   assert.throws(() => runtimeOptions({ TASKFLOW_PORT: '0' }), /TASKFLOW_PORT/);
+  assert.deepEqual(runtimeOptions({ TASKFLOW_DEPLOYMENT: 'server', TASKFLOW_TRUST_PROXY: '1', TASKFLOW_DEVICE_SESSION_HOURS: '168' }),
+    { port: 5187, host: '127.0.0.1', deployment: 'server', trustProxy: true, cookieSecure: true, deviceSessionMs: 168 * 3_600_000, bridgeModes: ['read', 'review'] });
+  assert.deepEqual(runtimeOptions({ TASKFLOW_BRIDGE_MODES: 'read, review,develop' }).bridgeModes, ['read', 'review', 'develop']);
+  assert.throws(() => runtimeOptions({ TASKFLOW_BRIDGE_MODES: 'read,shell' }), /TASKFLOW_BRIDGE_MODES/);
+  assert.equal(runtimeOptions({ TASKFLOW_DEPLOYMENT: 'server', TASKFLOW_COOKIE_SECURE: '0' }).cookieSecure, false);
+  assert.throws(() => runtimeOptions({ TASKFLOW_DEPLOYMENT: 'cloud' }), /TASKFLOW_DEPLOYMENT/);
+  assert.throws(() => runtimeOptions({ TASKFLOW_DEVICE_SESSION_HOURS: '0' }), /TASKFLOW_DEVICE_SESSION_HOURS/);
 });
 test('HTTP authentication, role boundaries, tracked work and persistence', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'taskflow-test-'));

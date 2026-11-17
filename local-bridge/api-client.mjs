@@ -101,11 +101,11 @@ export function redactSecrets(value, secrets = [], omitFields = false) {
   }));
 }
 
-export async function request(url, path, { token, method = 'GET', body } = {}) {
+export async function request(url, path, { token, method = 'GET', body, timeoutMs = 15000 } = {}) {
   let response;
   try {
     response = await fetch(`${url}${path}`, {
-      method, redirect: 'error', signal: AbortSignal.timeout(15000),
+      method, redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
       headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {}),
     });
@@ -115,6 +115,7 @@ export async function request(url, path, { token, method = 'GET', body } = {}) {
     try { errorBody = await response.json(); } catch { /* Preserve only the display message from JSON responses. */ }
     const error = new Error(typeof errorBody?.error?.message === 'string' ? redactSecrets(errorBody.error.message, [token, body?.password, body?.deviceCode]) : response.status === 401 ? '登录已失效或用户名密码错误，请重新登录。' : response.status === 403 ? '当前账号没有此操作权限。' : `平台请求失败（HTTP ${response.status}）。`);
     error.status = response.status;
+    if (typeof errorBody?.error?.code === 'string') error.code = errorBody.error.code;
     throw error;
   }
   if (response.status === 204) return null;

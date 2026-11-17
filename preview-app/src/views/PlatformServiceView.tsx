@@ -1,15 +1,15 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
-import { App, Button, Card, Collapse, Drawer, Empty, Flex, Form, Grid, Input, Segmented, Select, Skeleton, Space, Table, Tag, Tooltip, Typography } from 'antd';
-import type { InputRef, TableColumnsType } from 'antd';
-import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, Copy, Keyboard, LayoutGrid, List, LogOut, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal, Trash2, UserCheck } from 'lucide-react';
+import { App, Button, Card, Collapse, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import type { InputRef } from 'antd';
+import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, List, LogOut, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
-import { api, ApiError, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, timeText, User, WorkTask } from './workspaceApi';
+import { api, ApiError, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, User, WorkTask } from './workspaceApi';
 import { ProjectDirectory, WorkspaceOverview } from './WorkspaceOverview';
 import { clearTaskRoute, navigateWorkspace, openTaskRoute, SECTION_LABELS, taskReturnFilters, WorkspaceSection } from './workspaceNavigation';
-import { isTaskFrozen } from './taskAvailability';
-import { roleLabel, TASK_STATUS_OPTIONS, TASK_TYPE_OPTIONS, taskStatusLabel, taskTypeLabel } from './displayLabels';
-import { formatBatchTasksMarkdown } from './taskContextPack';
+import { ChangePasswordDrawer } from './PasswordDrawers';
+import { roleLabel, TASK_STATUS_OPTIONS, TASK_TYPE_OPTIONS, taskStatusLabel } from './displayLabels';
+import { TaskListTable } from './TaskListTable';
 import {
   clearSearchOnEscape,
   deleteSavedTaskView,
@@ -28,6 +28,12 @@ import './PlatformServiceView.css';
 
 const WorkTaskDetail = lazy(() => import('./WorkTaskDetail').then(mod => ({ default: mod.WorkTaskDetail })));
 const ConnectionsView = lazy(() => import('./ConnectionsView').then(mod => ({ default: mod.ConnectionsView })));
+const TeamTodosView = lazy(() => import('./TeamTodosView').then(mod => ({ default: mod.TeamTodosView })));
+const WorkReportsView = lazy(() => import('./WorkReportsView').then(mod => ({ default: mod.WorkReportsView })));
+const AgentSessionsView = lazy(() => import('./AgentSessionsView').then(mod => ({ default: mod.AgentSessionsView })));
+const DeploymentsView = lazy(() => import('./DeploymentsView').then(mod => ({ default: mod.DeploymentsView })));
+const KnowledgeView = lazy(() => import('./KnowledgeView').then(mod => ({ default: mod.KnowledgeView })));
+const TeamSkillsView = lazy(() => import('./TeamSkillsView').then(mod => ({ default: mod.TeamSkillsView })));
 const LocalIntegrationView = lazy(() => import('./LocalIntegrationView').then(mod => ({ default: mod.LocalIntegrationView })));
 const JiraTaskIntake = lazy(() => import('./JiraTaskIntake').then(mod => ({ default: mod.JiraTaskIntake })));
 const AccountsView = lazy(() => import('./AccountsView').then(mod => ({ default: mod.AccountsView })));
@@ -49,14 +55,13 @@ const VIEW_MODES = ['list', 'board'] as const;
 type TaskViewMode = typeof VIEW_MODES[number];
 const taskFromHash = () => new URLSearchParams(location.hash.slice(1)).get('task') || '';
 const options = (values: string[]) => values.map(value => ({ value, label: value }));
-type LoginValues = { username: string; password: string };
+type LoginValues = { username: string; password: string; setupToken?: string };
 type NewTaskValues = { jiraKey: string; title: string; type: WorkTask['type']; parentId?: string; assigneeId?: string };
 
 const routeFallback = <Card><Skeleton active paragraph={{ rows: 5 }} /></Card>;
 
 export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessionChange?: (authenticated: boolean) => void; onAccessChange?: (access: { manageMembers: boolean; manageConnections: boolean }) => void }> = ({ section = 'overview', onSessionChange, onAccessChange }) => {
   const { message, modal } = App.useApp();
-  const screens = Grid.useBreakpoint();
   const [loginForm] = Form.useForm<LoginValues>();
   const [taskForm] = Form.useForm<NewTaskValues>();
   const [user, setUser] = useState<User | null>(null);
@@ -86,6 +91,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickEverOpened, setQuickEverOpened] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const [shortcutsEverOpened, setShortcutsEverOpened] = useState(false);
   const [digestTick, setDigestTick] = useState(0);
   const [viewMode, setViewMode] = useState<TaskViewMode>(() => readStoredChoice(TASK_VIEW_MODE_KEY, VIEW_MODES, 'list'));
@@ -114,7 +120,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const heading = section === 'members' && !permissions.manageMembers ? '项目成员' : section === 'connections' && !permissions.manageConnections ? '平台读取' : SECTION_LABELS[section];
   const descriptions: Record<WorkspaceSection, string> = {
     overview: '先看交付流程，再从待办、评审和材料进入工作。', projects: '按现有项目组织工作范围和协作。',
-    tasks: '查看和处理当前项目的任务。', reviews: '集中跟踪需求、方案、代码、测试与上线审核。',
+    tasks: '查看和处理当前项目的任务。', todos: '个人待办只有自己可见；项目待办由成员共享，可指派和关联任务。', reports: '按天汇总完成、进行中和卡住的事项，可复制到群里。', sessions: '本机 Agent 会话同步到平台，共享给项目成员查看和讨论。', deployments: '各环境的部署历史，可从 Delivery 同步云效、Jenkins 记录或手动登记。', reviews: '集中跟踪需求、方案、代码、测试与上线审核。',
+    knowledge: '项目共享的排障手册、系统说明和规范，成员的本地 AI 可直接检索。', skills: '项目负责人统一维护 AI Skill，成员本机 Bridge 自动同步。',
     assets: '统一查找需求、方案、代码和测试材料。', members: permissions.manageMembers ? '管理本项目成员与角色，权限以当前项目为准。' : '查看本项目成员与角色。',
     accounts: '管理个人与项目共享账号，选择当前项目使用的身份。', connections: permissions.manageConnections ? '选择账号读取平台资料，管理项目默认连接。' : '使用个人或项目共享账号读取资料，配置权限由项目负责人管理。', local: '连接本地 AI 工具，管理设备授权。',
   };
@@ -170,7 +177,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const clearSession = () => {
     taskCreateSequence.current += 1;
     refreshSequence.current += 1; projectIdRef.current = '';
-    setUser(null); setTasks([]); setAllTasks([]); setProjects([]); setMembers([]); setCandidates([]); setUsers([]); setPlatformPermissions(NO_PLATFORM_PERMISSIONS); setCreateOpen(false); setIntakeOpen(false); setQuickOpen(false); setShortcutsOpen(false);
+    setUser(null); setTasks([]); setAllTasks([]); setProjects([]); setMembers([]); setCandidates([]); setUsers([]); setPlatformPermissions(NO_PLATFORM_PERMISSIONS); setCreateOpen(false); setIntakeOpen(false); setQuickOpen(false); setShortcutsOpen(false); setPasswordOpen(false);
     clearTaskSelection(); setNewProjectOpen(false); resetFilters();
     if (!user) loginForm.resetFields();
     if (user) taskForm.resetFields();
@@ -327,9 +334,9 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     };
     window.addEventListener('hashchange', update); return () => window.removeEventListener('hashchange', update);
   }, []);
-  const authenticate = (values: LoginValues, setup: boolean) => perform(async () => {
-    if (setup) await api('setup', values);
-    await api('login', values); loginForm.setFieldValue('password', ''); await refresh('');
+  const authenticate = ({ setupToken, ...values }: LoginValues, setup: boolean) => perform(async () => {
+    if (setup) await api('setup', { ...values, ...(setupToken ? { setupToken } : {}) });
+    await api('login', values); loginForm.setFieldsValue({ password: '', setupToken: '' }); await refresh('');
   });
   const switchProject = (id: string, destination?: WorkspaceSection) => {
     if (selectedTaskId) clearTaskSelection();
@@ -489,119 +496,32 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     options: projects.filter(item => projectGroup(item).id === group.id).map(item => ({ value: item.id, label: item.key + ' · ' + item.name + ' · ' + allTasks.filter(task => task.projectId === item.id).length + ' 项' })),
   }));
   const isProjectMember = !!user && (user.role === 'ADMIN' || members.some(member => member.id === user.id));
-  const localStatusVariant = (status: WorkTask['status']) => status === 'DONE' ? 'green' : status === 'IN_PROGRESS' || status === 'IN_REVIEW' ? 'blue' : 'neutral';
-
-  const columns: TableColumnsType<WorkTask> = [
-    { title: '任务', key: 'task', width: screens.md ? 430 : undefined, render: (_, task) => <div className="tf-task-cell">
-      <Space wrap size={8}><Text className="tf-task-key">{task.jiraKey}</Text><Text type="secondary">{task.externalRef ? task.externalRef.type : taskTypeLabel(task.type)}</Text>{task.parentId && <Text type="secondary">父任务 {tasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Text>}</Space>
-      <div className="tf-mobile-task-status"><Space wrap size={8}>{task.externalRef && <><Text type="secondary">Jira</Text><StatusBadge variant="blue">{task.externalRef.status}</StatusBadge></>}<Text type="secondary">本地</Text><StatusBadge variant={localStatusVariant(task.status)}>{taskStatusLabel(task.status)}</StatusBadge></Space></div>
-      <Button type="link" className="tf-task-title" disabled={busy} onClick={() => openTask(task.id)}>{task.title}</Button>
-      {task.externalRef && <div className="tf-task-source-meta">
-        {task.externalRef.assignee?.displayName && <Text type="secondary">Jira 经办人：{task.externalRef.assignee.displayName}</Text>}
-        {task.externalRef.priority && <Text type="secondary">优先级：{task.externalRef.priority.name}</Text>}
-        {!!task.externalRef.components?.length && <Text type="secondary">组件：{task.externalRef.components.map(item => item.name).join(' · ')}</Text>}
-        {!!task.externalRef.fixVersions?.length && <Text type="secondary">修复版本：{task.externalRef.fixVersions.map(item => item.name).join(' · ')}</Text>}
-        {!!task.externalRef.labels?.length && <Text type="secondary" className="tf-task-labels" ellipsis={{ tooltip: true }}>标签：{task.externalRef.labels.join(' · ')}</Text>}
-      </div>}
-    </div> },
-    { title: 'Jira 状态', key: 'jiraStatus', width: 120, responsive: ['md'], render: (_, task) => task.externalRef ? <StatusBadge variant="blue">{task.externalRef.status}</StatusBadge> : <Text type="secondary">—</Text> },
-    { title: '本地状态', key: 'status', width: 140, responsive: ['md'], render: (_, task) => {
-      const canInlineSwitch = (canAssign || task.assigneeId === user?.id) && task.status !== 'DONE' && !isTaskFrozen(task, allTasks);
-      return <Flex vertical gap={6} onClick={event => { if (canInlineSwitch) event.stopPropagation(); }}>
-        {canInlineSwitch ? (
-          <Select<TaskStatus>
-            size="small"
-            aria-label={`修改 ${task.jiraKey} 本地状态`}
-            value={task.status}
-            disabled={busy || updatingTaskId === task.id}
-            options={TASK_STATUS_OPTIONS.filter(opt => opt.value !== 'DONE')}
-            onChange={val => void switchTaskStatusInline(task, val)}
-            style={{ width: 108 }}
-          />
-        ) : (
-          <StatusBadge variant={localStatusVariant(task.status)}>{taskStatusLabel(task.status)}</StatusBadge>
-        )}
-        <Text type="secondary" className="tf-table-secondary">自报 {task.progress}%</Text>
-      </Flex>;
-    } },
-    { title: '本地受理人', key: 'assignee', width: 136, responsive: ['md'], render: (_, task) => {
-      const canInlineAssign = canAssign && task.status !== 'DONE' && !isTaskFrozen(task, allTasks);
-      if (!canInlineAssign) return memberName(members, task.assigneeId);
-      return <div onClick={event => event.stopPropagation()}>
-        <Select<string>
-          size="small"
-          aria-label={`修改 ${task.jiraKey} 本地受理人`}
-          value={task.assigneeId || ''}
-          disabled={busy || updatingTaskId === task.id}
-          popupMatchSelectWidth={false}
-          options={[{ value: '', label: '未指派' }, ...members.map(member => ({ value: member.id, label: member.username }))]}
-          onChange={val => void switchTaskAssigneeInline(task, val)}
-          style={{ width: 112 }}
-        />
-      </div>;
-    } },
-    { title: '更新时间', key: 'updatedAt', width: 168, responsive: ['lg'], render: (_, task) => <Text type="secondary" className="tf-table-secondary">{timeText(task.updatedAt)}</Text> },
-    { title: '操作', key: 'actions', width: 136, render: (_, task) => {
-      const canClaimRow = isProjectMember && !task.assigneeId && task.status !== 'DONE';
-      const canRemoveRow = canAssign || task.ownerId === user?.id;
-      if (!canClaimRow && !canRemoveRow) return <Text type="secondary">—</Text>;
-      return <Space size={2} wrap>
-        {canClaimRow && (
-          <Button
-            type="link"
-            size="small"
-            icon={<UserCheck size={14} />}
-            disabled={busy}
-            onClick={event => {
-              event.stopPropagation();
-              void claimTaskQuick(task);
-            }}
-          >
-            认领
-          </Button>
-        )}
-        {canRemoveRow && (
-          <Button
-            type="text"
-            danger
-            size="small"
-            icon={<Trash2 size={14} />}
-            disabled={busy}
-            aria-label={`移出任务 ${task.jiraKey}`}
-            onClick={event => {
-              event.stopPropagation();
-              const descendants: WorkTask[] = [];
-              const seen = new Set([task.id]);
-              const queue = [task.id];
-              while (queue.length) {
-                const pid = queue.shift()!;
-                for (const item of allTasks) {
-                  if (item.parentId === pid && !seen.has(item.id)) {
-                    seen.add(item.id); descendants.push(item); queue.push(item.id);
-                  }
-                }
-              }
-              modal.confirm({
-                title: descendants.length ? `移出 ${task.jiraKey} 及其 ${descendants.length} 个子任务？` : `移出任务 ${task.jiraKey}？`,
-                content: '仅从当前本地工作台移除任务及关联的本地材料/评审记录，不会修改或删除外部 Jira 事项。',
-                okText: '移出工作台',
-                cancelText: '取消',
-                okButtonProps: { danger: true },
-                onOk: () => perform(async () => {
-                  const res = await api<{ deletedCount: number; deletedIds: string[] }>('tasks/' + task.id + (descendants.length ? '?cascade=1' : ''), undefined, 'DELETE');
-                  if (selectedTaskId && res.deletedIds.includes(selectedTaskId)) clearTaskSelection();
-                  void message.success(`已从工作台移出 ${res.deletedCount} 项任务。`);
-                  await refreshTasksOnly();
-                }),
-              });
-            }}
-          >
-            移出
-          </Button>
-        )}
-      </Space>;
-    } },
-  ];
+  const confirmRemoveTask = (task: WorkTask) => {
+    const descendants: WorkTask[] = [];
+    const seen = new Set([task.id]);
+    const queue = [task.id];
+    while (queue.length) {
+      const pid = queue.shift()!;
+      for (const item of allTasks) {
+        if (item.parentId === pid && !seen.has(item.id)) {
+          seen.add(item.id); descendants.push(item); queue.push(item.id);
+        }
+      }
+    }
+    modal.confirm({
+      title: descendants.length ? `移出 ${task.jiraKey} 及其 ${descendants.length} 个子任务？` : `移出任务 ${task.jiraKey}？`,
+      content: '仅从当前本地工作台移除任务及关联的本地材料/评审记录，不会修改或删除外部 Jira 事项。',
+      okText: '移出工作台',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => perform(async () => {
+        const res = await api<{ deletedCount: number; deletedIds: string[] }>('tasks/' + task.id + (descendants.length ? '?cascade=1' : ''), undefined, 'DELETE');
+        if (selectedTaskId && res.deletedIds.includes(selectedTaskId)) clearTaskSelection();
+        void message.success(`已从工作台移出 ${res.deletedCount} 项任务。`);
+        await refreshTasksOnly();
+      }),
+    });
+  };
 
   if (initializing) return <div className="workspace-content tf-workbench"><Card><Skeleton active title={{ width: '36%' }} paragraph={{ rows: 5 }} /></Card></div>;
 
@@ -611,7 +531,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
         <div><span className="tf-login-icon"><ShieldCheck size={24} /></span><Title level={2}>登录平台</Title><Paragraph type="secondary">任务、版本化资产、评审记录与质量门禁集中跟踪。</Paragraph></div>
         <Form name="platform-login" form={loginForm} layout="vertical" requiredMark={false} disabled={busy} onFinish={values => void authenticate(values, false)}>
           <Form.Item htmlFor="service-username" label="用户名" name="username" rules={[{ required: true, message: '请输入用户名。' }, { min: 3, max: 64, message: '用户名需为 3–64 个字符。' }, { pattern: /^[a-zA-Z0-9_.-]+$/, message: '用户名仅支持字母、数字和_.-。' }]}><Input id="service-username" autoComplete="username" maxLength={64} /></Form.Item>
-          <Form.Item htmlFor="service-password" label="密码（12–256 字符）" name="password" rules={[{ required: true, message: '请输入密码。' }, { min: 12, max: 256, message: '密码需为 12–256 个字符。' }]}><Input.Password id="service-password" autoComplete="current-password" maxLength={256} /></Form.Item>
+          <Form.Item htmlFor="service-password" label="密码（8–256 字符）" name="password" rules={[{ required: true, message: '请输入密码。' }, { min: 8, max: 256, message: '密码需为 8–256 个字符。' }]}><Input.Password id="service-password" autoComplete="current-password" maxLength={256} /></Form.Item>
+          <Form.Item htmlFor="service-setup-token" label="初始化口令（仅服务器部署首次创建管理员时填写）" name="setupToken"><Input.Password id="service-setup-token" autoComplete="off" maxLength={256} /></Form.Item>
           <Flex vertical gap={12}>
             <Button type="primary" htmlType="submit" block loading={busy}>登录</Button>
             <Button block disabled={busy} onClick={() => void loginForm.validateFields().then(values => authenticate(values, true)).catch(() => {})}>创建初始管理员并登录</Button>
@@ -639,7 +560,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     await refresh(scopedToProject ? projectId : '');
   });
   const isTaskDetail = section === 'tasks' && !!selectedTaskId;
-  const scoped = ['tasks', 'reviews', 'assets', 'members', 'accounts', 'connections'].includes(section) && !isTaskDetail;
+  const scoped = ['tasks', 'todos', 'reports', 'reviews', 'assets', 'sessions', 'deployments', 'knowledge', 'skills', 'members', 'accounts', 'connections'].includes(section) && !isTaskDetail;
   const navTaskPool = visibleTasks.some(item => item.id === selectedTaskId) ? visibleTasks : tasks;
   const currentNavIndex = isTaskDetail ? navTaskPool.findIndex(item => item.id === selectedTaskId) : -1;
   const prevNavTask = currentNavIndex > 0 ? navTaskPool[currentNavIndex - 1] : undefined;
@@ -701,7 +622,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     setSavedViews(next);
     void message.info(`已移除视图「${view.name}」。`);
   };
-  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
+  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button><Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
   const taskList = <>
       <Card title={<Space size={8}><h2 className="tf-section-heading">任务列表</h2><Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text></Space>} extra={<Space wrap size={8}><Segmented<TaskViewMode> aria-label="任务视图切换" value={viewMode} onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }} options={[{ value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> }, { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> }]} />{hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={busy} onClick={() => void syncMyJiraTasks(false)}>同步我的最新 Jira</Button>}<Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button></Space>} className="tf-task-list-card">
         <div className="tf-task-quick-scopes">
@@ -810,107 +731,31 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
               onClaimTask={target => void claimTaskQuick(target)}
             />
           </Suspense>
-        ) : (() => {
-          const selectedSet = new Set(selectedTaskIds);
-          const selectedTasks = visibleTasks.filter(item => selectedSet.has(item.id));
-          const claimableSelected = isProjectMember
-            ? selectedTasks.filter(item => !item.assigneeId && item.status !== 'DONE')
-            : [];
-          const editableSelected = selectedTasks.filter(
-            item => (canAssign || item.assigneeId === user.id) && item.status !== 'DONE' && !isTaskFrozen(item, allTasks),
-          );
-          const assignableSelected = canAssign
-            ? selectedTasks.filter(item => item.status !== 'DONE' && !isTaskFrozen(item, allTasks))
-            : [];
-          return (
-            <>
-              {selectedTasks.length > 0 && (
-                <div className="tf-batch-bar" role="region" aria-label="批量操作栏">
-                  <Space size={8} wrap>
-                    <Text strong>已选 {selectedTasks.length} 项</Text>
-                    <Button type="link" size="small" style={{ paddingInline: 0 }} onClick={() => setSelectedTaskIds([])}>
-                      取消选择
-                    </Button>
-                  </Space>
-                  <Space size={8} wrap>
-                    {claimableSelected.length > 0 && (
-                      <Button
-                        size="small"
-                        type="primary"
-                        icon={<UserCheck size={13} />}
-                        disabled={busy}
-                        onClick={() => void batchClaimSelected(claimableSelected)}
-                      >
-                        批量认领 ({claimableSelected.length})
-                      </Button>
-                    )}
-                    {editableSelected.length > 0 && (
-                      <Select<TaskStatus>
-                        size="small"
-                        placeholder="批量改状态…"
-                        aria-label="批量修改本地状态"
-                        value={undefined}
-                        disabled={busy}
-                        popupMatchSelectWidth={false}
-                        options={TASK_STATUS_OPTIONS.filter(opt => opt.value !== 'DONE')}
-                        onChange={st => {
-                          const toMove = editableSelected.filter(item => item.status !== st);
-                          if (toMove.length) void batchSwitchStatus(toMove, st);
-                        }}
-                        style={{ width: 128 }}
-                      />
-                    )}
-                    {assignableSelected.length > 0 && (
-                      <Select<string>
-                        size="small"
-                        placeholder="批量指派…"
-                        aria-label="批量指派本地受理人"
-                        value={undefined}
-                        disabled={busy}
-                        popupMatchSelectWidth={false}
-                        options={[{ value: '', label: '未指派' }, ...members.map(member => ({ value: member.id, label: member.username }))]}
-                        onChange={assigneeId => void batchAssignSelected(assignableSelected, assigneeId)}
-                        style={{ width: 128 }}
-                      />
-                    )}
-                    <Button
-                      size="small"
-                      icon={<Copy size={13} />}
-                      onClick={() => {
-                        const md = formatBatchTasksMarkdown(selectedTasks, members);
-                        void navigator.clipboard.writeText(md).then(() => message.success(`已复制 ${selectedTasks.length} 项任务清单 (Markdown)。`)).catch(() => {});
-                      }}
-                    >
-                      复制清单
-                    </Button>
-                  </Space>
-                </div>
-              )}
-              <Table<WorkTask>
-                className="tf-task-table"
-                rowKey="id"
-                rowSelection={{
-                  selectedRowKeys: selectedTaskIds,
-                  onChange: keys => setSelectedTaskIds(keys.map(String)),
-                }}
-                columns={columns}
-                dataSource={visibleTasks}
-                loading={busy}
-                pagination={{ current: currentTaskPage, pageSize: 10, showSizeChanger: false, hideOnSinglePage: true, size: 'small', onChange: setTaskPage }}
-                tableLayout="fixed"
-                scroll={screens.md ? { x: 1040 } : undefined}
-                locale={{ emptyText: tasks.length ? '没有符合条件的任务。' : '当前项目尚无任务，可粘贴 Jira 链接或选择已有事项接入。' }}
-                onRow={record => ({
-                  onClick: event => {
-                    if (!busy && !(event.target as HTMLElement).closest('button,a,input,.ant-select,.ant-select-dropdown,.ant-checkbox-wrapper,.ant-table-selection-column')) {
-                      openTask(record.id);
-                    }
-                  },
-                })}
-              />
-            </>
-          );
-        })()}
+        ) : (
+          <TaskListTable
+            tasks={visibleTasks}
+            projectTasks={tasks}
+            allTasks={allTasks}
+            members={members}
+            userId={user.id}
+            canAssign={canAssign}
+            isProjectMember={isProjectMember}
+            busy={busy}
+            updatingTaskId={updatingTaskId}
+            page={currentTaskPage}
+            onPageChange={setTaskPage}
+            selectedIds={selectedTaskIds}
+            onSelectionChange={setSelectedTaskIds}
+            onOpenTask={openTask}
+            onSwitchStatus={(target, nextStatus) => void switchTaskStatusInline(target, nextStatus)}
+            onSwitchAssignee={(target, assigneeId) => void switchTaskAssigneeInline(target, assigneeId)}
+            onClaim={target => void claimTaskQuick(target)}
+            onRemove={confirmRemoveTask}
+            onBatchClaim={targets => void batchClaimSelected(targets)}
+            onBatchStatus={(targets, nextStatus) => void batchSwitchStatus(targets, nextStatus)}
+            onBatchAssign={(targets, assigneeId) => void batchAssignSelected(targets, assigneeId)}
+          />
+        )}
       </Card>
 
   </>;
@@ -921,6 +766,12 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'members') content = project ? <Suspense fallback={routeFallback}><MembersAccessView key={projectId} projectId={projectId} projectKey={project.key} user={user} role={role || 'DEV'} members={members} users={users} tasks={tasks} candidates={candidates} permissions={permissions} canManageUsers={platformPermissions.manageUsers} onChanged={() => refresh()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense> : <Card><Empty description="尚无可访问的项目" /></Card>;
   else if (section === 'connections') content = <Suspense fallback={routeFallback}><ConnectionsView projectId={projectId} project={project} projects={projects} role={role || 'DEV'} user={user} platformPermissions={platformPermissions} onUnauthorized={clearSession} onForbidden={reloadAccess} onProjectsChanged={async id => { await refresh(id); }} /></Suspense>;
+  else if (section === 'todos') content = <Suspense fallback={routeFallback}><TeamTodosView key={user.id} user={user} projects={projects} projectId={projectId} members={members} tasks={tasks} canAssign={permissions.assignTasks} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'reports') content = <Suspense fallback={routeFallback}><WorkReportsView key={user.id} user={user} projects={projects} projectId={projectId} members={members} canViewOthers={permissions.assignTasks} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'sessions') content = <Suspense fallback={routeFallback}><AgentSessionsView key={user.id} user={user} projects={projects} projectId={projectId} tasks={tasks} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'deployments') content = <Suspense fallback={routeFallback}><DeploymentsView key={user.id} user={user} projectId={projectId} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'knowledge') content = <Suspense fallback={routeFallback}><KnowledgeView key={user.id} user={user} projectId={projectId} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'skills') content = <Suspense fallback={routeFallback}><TeamSkillsView key={user.id} user={user} projectId={projectId} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'local') content = <Suspense fallback={routeFallback}><LocalIntegrationView user={user} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'accounts') content = <Suspense fallback={routeFallback}><AccountsView user={user} project={project} projects={projects} onUnauthorized={clearSession} onForbidden={reloadAccess} onChanged={() => refresh()} /></Suspense>;
   else if (isTaskDetail) content = tasks.some(task => task.id === selectedTaskId) ? <Suspense fallback={routeFallback}><WorkTaskDetail key={selectedTaskId} taskId={selectedTaskId} user={user} role={role || 'DEV'} permissions={permissions} members={members} tasks={tasks} allTasks={allTasks} onOpenTask={openTask} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense> : routeFallback;
@@ -932,6 +783,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       {scoped && <div className="tf-module-scope"><Text type="secondary">项目</Text><Select aria-label="当前项目" showSearch={{ optionFilterProp: 'label' }} value={projectId || undefined} disabled={busy || !projects.length} options={projectOptions} onChange={id => switchProject(id)} placeholder="选择项目" /></div>}
     </>}
     {content}
+    <ChangePasswordDrawer open={passwordOpen} username={user.username} onClose={() => setPasswordOpen(false)} onUnauthorized={clearSession} />
     {(shortcutsOpen || shortcutsEverOpened) && (
       <Suspense fallback={null}>
         <KeyboardShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />

@@ -1,7 +1,8 @@
 FROM node:24-bookworm-slim
 WORKDIR /app
-COPY package.json server.mjs common.mjs storage.mjs workflow.mjs connectors.mjs local-devices.mjs permissions.mjs jira-reference.mjs accounts.mjs ./
-ENV TASKFLOW_HOST=0.0.0.0 TASKFLOW_PORT=5187 TASKFLOW_DB_PATH=/data/platform.sqlite
+COPY package.json *.mjs ./
+RUN rm -f ./*.test.mjs
+ENV TASKFLOW_HOST=127.0.0.1 TASKFLOW_PORT=5187 TASKFLOW_DB_PATH=/data/platform.sqlite TASKFLOW_DEPLOYMENT=server TASKFLOW_TRUST_PROXY=1
 RUN mkdir /data && chown node:node /data
 USER node
 VOLUME /data

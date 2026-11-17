@@ -6,7 +6,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "test": "node --test rd.test.mjs mcp.test.mjs connection.test.mjs browser-handoff.test.mjs"
+    "test": "node --test rd.test.mjs mcp.test.mjs connection.test.mjs browser-handoff.test.mjs worker.test.mjs service.test.mjs delivery-sync.test.mjs skills-sync.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

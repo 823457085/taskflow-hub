@@ -1,10 +1,10 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Drawer, Flex, Form, Grid, Input, Segmented, Select, Skeleton, Space, Spin, Steps, Table, Tabs, Tag, Timeline, Tooltip, Typography } from 'antd';
-import type { DescriptionsProps, TableColumnsType } from 'antd';
-import { Check, CheckCircle2, ChevronRight, ClipboardPaste, Copy, Download, ExternalLink, FileCheck2, FileText, FolderGit2, FolderOpen, GitBranch, Laptop, Link2, MoreHorizontal, Package, Pencil, Play, RefreshCw, Sparkles, Terminal, Trash2, X } from 'lucide-react';
+import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Drawer, Dropdown, Flex, Form, Grid, Input, Progress, Segmented, Select, Skeleton, Space, Spin, Steps, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import type { DescriptionsProps, MenuProps, TableColumnsType } from 'antd';
+import { Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, ExternalLink, FileCheck2, FileText, FolderGit2, FolderOpen, GitBranch, Laptop, Link2, MoreHorizontal, Package, Pencil, RefreshCw, Sparkles, Terminal, Trash2, X } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import {
-  api, ApiError, APPROVE_ROLES, ASSET_ROLES, Asset, AssetKind, CodeupMrItem, ConnectorSummary, Device, ExecutionMode,
+  api, ApiError, APPROVE_ROLES, ASSET_ROLES, Asset, AssetKind, CodeupMrItem, ConnectorSummary, ExecutionMode,
   Gates, LocalAiRun, LocalGitRepo, memberName, ProgressEvent, ProjectGitStatus, ProjectPermissions, ProjectWorkspace,
   REVIEW_ROLES, ReviewJob, Role, Stage, STAGES, TaskContext, TaskDetailBundle, TaskStatus, timeText, User, WorkTask,
 } from './workspaceApi';
@@ -16,27 +16,19 @@ import {
   buildAssetTemplate, buildClipboardGitCommand, detectPastedReference,
   extractTaskSmartHints, formatJiraTaskAsMarkdown,
 } from './taskSmartLinks';
-import type { TaskPanel } from './workspaceNavigation';
+import { TASK_PANELS, type TaskPanel } from './workspaceNavigation';
 import { canQuickApproveReview } from './taskAvailability';
 import {
-  aiRunStatusLabel, assetKindLabel, assetMetaCodeLabel, DEFAULT_APPROVE_REASON, executionModeLabel, gateStatusLabel,
-  gitBranchLabel, heartbeatStatusLabel, mrStateLabel, progressSourceLabel, reviewStatusLabel,
-  stageLabel, TASK_STATUS_OPTIONS, taskStatusLabel, taskTypeLabel, toolLabel,
+  assetKindLabel, DEFAULT_APPROVE_REASON, executionModeLabel, gateStatusLabel,
+  gitBranchLabel, mrStateLabel, reviewStatusLabel,
+  stageLabel, TASK_STATUS_OPTIONS, taskStatusLabel, taskTypeLabel,
 } from './displayLabels';
-import { isEditableTarget, isSubmitShortcut, readStoredBool, writeStoredBool } from './uiPreferences';
-import {
-  analyzeAssetRiskSignals,
-  buildSideBySideUnifiedDiff,
-  computeRevisionLineDiff,
-  pairRevisionDiffSideBySide,
-  parseUnifiedDiffStats,
-  splitUnifiedDiffLines,
-  type SideBySideDiffRow,
-} from './assetDiff';
-import { isLikelyMarkdown, parseMarkdownBlocks, summarizeMarkdownChecklists } from './markdownLite';
-import { MarkdownPreview } from './MarkdownPreview';
-import { buildReleaseDossierMarkdown, evaluateReleaseReadiness } from './releaseReadiness';
+import { isEditableTarget, isSubmitShortcut } from './uiPreferences';
 import { synthesizeTestSuiteFromSpecs } from './specToTestSuite';
+import { TaskActivityPanel } from './TaskActivityPanel';
+import { TaskAssetList } from './TaskAssetList';
+import { TaskReleasePanel } from './TaskReleasePanel';
+import { TaskSmartLinksCard } from './TaskSmartLinksCard';
 import './WorkTaskDetail.css';
 
 const ReviewDetail = lazy(() => import('./ReviewDetail').then(mod => ({ default: mod.ReviewDetail })));
@@ -44,7 +36,6 @@ const LocalTaskWorkflow = lazy(() => import('./LocalTaskWorkflow').then(mod => (
 const TaskContextPackModal = lazy(() => import('./TaskContextPackModal').then(mod => ({ default: mod.TaskContextPackModal })));
 const SubtaskDecomposeModal = lazy(() => import('./SubtaskDecomposeModal').then(mod => ({ default: mod.SubtaskDecomposeModal })));
 const GitHandoffModal = lazy(() => import('./GitHandoffModal').then(mod => ({ default: mod.GitHandoffModal })));
-const GATES_OPEN_KEY = 'taskflow.task.gatesOpen';
 
 interface TaskDraft { title: string; status: TaskStatus; assigneeId: string }
 interface AssetDraft { kind: AssetKind; logicalKey?: string; title: string; content: string; sourceUrl?: string }
@@ -59,15 +50,12 @@ const STAGE_ASSET: Record<Stage, AssetKind> = {
   RELEASE: 'RELEASE_PLAN',
 };
 
-type AssetViewerMode = 'pretty' | 'split' | 'md' | 'rev-diff' | 'rev-split' | 'raw';
-
 export const WorkTaskDetail: React.FC<{
   taskId: string; user: User; role: Role; permissions: ProjectPermissions; members: User[]; tasks: WorkTask[]; allTasks?: WorkTask[];
   onOpenTask: (id: string) => void; onChanged: () => Promise<void>; onUnauthorized: () => void; onForbidden?: () => void;
 }> = ({ taskId, user, role, permissions, members, tasks, allTasks, onOpenTask, onChanged, onUnauthorized, onForbidden }) => {
   const { message, modal } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
-  const [gateExpanded, setGateExpanded] = useState(() => readStoredBool(GATES_OPEN_KEY, false));
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [task, setTask] = useState<WorkTask | null>(null);
@@ -89,17 +77,13 @@ export const WorkTaskDetail: React.FC<{
   const [gitTitle, setGitTitle] = useState('');
   const [codeupMrs, setCodeupMrs] = useState<CodeupMrItem[]>([]);
   const [loadingCodeupMrs, setLoadingCodeupMrs] = useState(false);
-  const [progressValue, setProgressValue] = useState<number>(0);
-  const [progressSummary, setProgressSummary] = useState('');
-  const [reportingProgress, setReportingProgress] = useState(false);
-  const [assetViewModes, setAssetViewModes] = useState<Record<string, AssetViewerMode>>({});
 
   const readRoute = () => {
     const route = new URLSearchParams(location.hash.slice(1));
     if (route.get('task') !== taskId) return { tab: 'overview' as TaskPanel, job: '' };
     const requestedTab = route.get('tab');
     return {
-      tab: (['overview', 'assets', 'reviews', 'activity'].includes(requestedTab || '') ? requestedTab : route.has('job') ? 'reviews' : 'overview') as TaskPanel,
+      tab: ((TASK_PANELS as readonly string[]).includes(requestedTab || '') ? requestedTab : route.has('job') ? 'reviews' : 'overview') as TaskPanel,
       job: route.get('job') || '',
     };
   };
@@ -254,10 +238,6 @@ export const WorkTaskDetail: React.FC<{
   useEffect(() => {
     if (task && drawer !== 'task') taskForm.setFieldsValue({ title: task.title, status: task.status, assigneeId: task.assigneeId || '' });
   }, [task?.version, drawer]);
-
-  useEffect(() => {
-    if (task) setProgressValue(task.progress);
-  }, [task?.id, task?.progress]);
 
   useEffect(() => {
     if (tab !== 'activity' || accessDenied) return;
@@ -706,37 +686,30 @@ export const WorkTaskDetail: React.FC<{
 
   const canReportProgress = !!task && !inputsFrozen && (task.assigneeId === user.id || role === 'ADMIN' || role === 'LEAD');
 
-  const submitWebProgress = async () => {
-    if (!task || !canReportProgress || reportingProgress || busy) return;
-    const summary = progressSummary.trim();
-    if (!summary) {
-      void message.warning('请简要填写本轮开发进展说明。');
-      return;
-    }
+  const reportProgress = async (progress: number, summary: string): Promise<boolean> => {
+    if (!task || !canReportProgress || busy) return false;
     const activeBranch = gitStatus?.branch && gitStatus.branch !== 'HEAD' ? gitStatus.branch : undefined;
-    setReportingProgress(true);
+    const fail = (error: unknown) => {
+      if (accessLost.current || !mounted.current) return;
+      void message.error(error instanceof Error ? error.message : '记录进度失败。');
+      if (error instanceof ApiError && error.status === 403) handleForbidden();
+      else if (error instanceof ApiError && error.status === 401) { clearSensitiveState(); onUnauthorized(); }
+    };
     try {
       const res = await api<{ task: WorkTask; progress: ProgressEvent }>(`tasks/${encodeURIComponent(task.id)}/progress`, {
-        progress: Math.max(0, Math.min(100, Math.round(progressValue))),
+        progress: Math.max(0, Math.min(100, Math.round(progress))),
         tool: 'custom',
         deviceId: 'web-workbench',
         summary,
         ...(activeBranch ? { branch: activeBranch } : {}),
       });
-      if (accessLost.current || !mounted.current) return;
-      setProgressSummary('');
+      if (accessLost.current || !mounted.current) return false;
       setTask(res.task);
       setContext(prev => prev ? { ...prev, task: res.task, progressEvents: [res.progress, ...prev.progressEvents] } : prev);
       void message.success(`已记录开发进度（${res.progress.progress}%）。`);
-      await onChanged();
-    } catch (error) {
-      if (accessLost.current || !mounted.current) return;
-      void message.error(error instanceof Error ? error.message : '记录进度失败。');
-      if (error instanceof ApiError && error.status === 403) handleForbidden();
-      else if (error instanceof ApiError && error.status === 401) { clearSensitiveState(); onUnauthorized(); }
-    } finally {
-      if (mounted.current && !accessLost.current) setReportingProgress(false);
-    }
+    } catch (error) { fail(error); return false; }
+    await onChanged().catch(fail);
+    return true;
   };
 
   const childColumns: TableColumnsType<WorkTask> = [
@@ -744,13 +717,6 @@ export const WorkTaskDetail: React.FC<{
     { title: '本地受理人', width: 140, render: (_, item) => memberName(members, item.assigneeId) },
     { title: '本地状态', width: 140, render: (_, item) => <StatusBadge variant={item.status === 'DONE' ? 'green' : 'neutral'}>{taskStatusLabel(item.status)}</StatusBadge> },
   ];
-  const deviceColumns: TableColumnsType<Device> = [
-    { title: '设备 / 工具', key: 'device', render: (_, item) => <div className="tf-table-title"><Space size={8}><Laptop size={16} /><Typography.Text strong>{toolLabel(item.tool)}</Typography.Text></Space><Typography.Text type="secondary" className="tf-break"><code>{item.deviceId}</code></Typography.Text></div> },
-    { title: '成员', width: 140, render: (_, item) => memberName(members, item.actorId) },
-    { title: '最近心跳', width: 180, render: (_, item) => timeText(item.lastSeen) },
-    { title: '状态', width: 130, render: (_, item) => <StatusBadge variant={item.online ? 'green' : 'neutral'}>{heartbeatStatusLabel(item.status)}</StatusBadge> },
-  ];
-
   if (accessDenied) return null;
   if (!task) return <Card title="任务详情"><Skeleton active loading={busy} />{!busy && <Empty><Space orientation="vertical"><span>任务尚未加载，请返回列表或重试。</span><Button onClick={() => void run(refresh)}>重试</Button></Space></Empty>}</Card>;
 
@@ -864,85 +830,20 @@ export const WorkTaskDetail: React.FC<{
   );
 
   const smartLinksCard = hasSmartSuggestions ? (
-    <Card size="small" className="tf-smart-hints-card" title={<Space size={8}><Sparkles size={16} /><span>智能识别的关联文档、事项与代码库（免复制一键导入）</span></Space>}>
-      <div className="tf-detail-stack tf-detail-stack-small">
-        {!boundRepoPath && smartHints.matchedRepos.map(repo => (
-          <Flex key={repo.path} justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
-            <Space size={8} wrap>
-              <Tag color="geekblue">本机 Git 仓库</Tag>
-              <Typography.Text strong>{repo.name}</Typography.Text>
-              <Typography.Text type="secondary" code>{repo.path}</Typography.Text>
-            </Space>
-            <Space size={6} wrap>
-              <Button size="small" type="primary" disabled={busy} onClick={() => bindRepoQuick(repo.path)}>一键绑定仓库</Button>
-              <Button size="small" icon={<FolderOpen size={13} />} onClick={() => void openRepoInApp('finder', repo.path)}>Finder 打开</Button>
-              <Button size="small" onClick={() => void openRepoInApp('cursor', repo.path)}>在 Cursor 打开</Button>
-            </Space>
-          </Flex>
-        ))}
-
-        {smartHints.detectedLinks.map(link => (
-          <Flex key={link.url} justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
-            <Space size={8} wrap>
-              <Tag color={link.provider === 'confluence' ? 'blue' : link.provider === 'gitlab' || link.provider === 'yunxiao' ? 'purple' : link.provider === 'jenkins' ? 'cyan' : 'default'}>
-                {link.provider.toUpperCase()}
-              </Tag>
-              <Typography.Link href={link.url} target="_blank" rel="noreferrer" className="tf-break">{link.label}</Typography.Link>
-            </Space>
-            <Space size={6} wrap>
-              {link.provider !== 'external' && link.suggestedKinds.filter(k => allowedKinds.includes(k)).map(k => (
-                <Button
-                  key={k}
-                  size="small"
-                  type={(k === 'PRD' && !hasAssetKind('PRD')) || (k === 'CODE' && !hasAssetKind('CODE')) ? 'primary' : 'default'}
-                  disabled={busy}
-                  onClick={() => importReferenceAsAsset({ provider: link.provider as 'confluence' | 'gitlab' | 'jenkins' | 'jira' | 'yunxiao', url: link.url, issueKey: link.issueKey, kind: k })}
-                >
-                  一键导入为{assetKindLabel(k)}
-                </Button>
-              ))}
-              <Button size="small" type="text" icon={<ExternalLink size={13} />} href={link.url} target="_blank" rel="noopener noreferrer">原链接</Button>
-            </Space>
-          </Flex>
-        ))}
-
-        {smartHints.relatedJira.map(rel => (
-          <Flex key={rel.key} justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
-            <Space size={8} wrap>
-              <Tag color="processing">{rel.relation === 'parent' ? 'Jira 父事项' : '关联 Jira'}</Tag>
-              {rel.url ? <Typography.Link href={rel.url} target="_blank" rel="noreferrer">{rel.key}</Typography.Link> : <Typography.Text strong>{rel.key}</Typography.Text>}
-            </Space>
-            <Space size={6} wrap>
-              {rel.sameProject && allowedKinds.includes('PRD') && (
-                <Button size="small" disabled={busy} onClick={() => importReferenceAsAsset({ provider: 'jira', issueKey: rel.key, kind: 'PRD' })}>
-                  拉取 {rel.key} 为需求文档
-                </Button>
-              )}
-              {rel.sameProject && allowedKinds.includes('TECH_SPEC') && (
-                <Button size="small" disabled={busy} onClick={() => importReferenceAsAsset({ provider: 'jira', issueKey: rel.key, kind: 'TECH_SPEC' })}>
-                  拉取为技术方案
-                </Button>
-              )}
-              {tasks.some(t => t.jiraKey === rel.key) && (
-                <Button size="small" type="link" onClick={() => { const found = tasks.find(t => t.jiraKey === rel.key); if (found) onOpenTask(found.id); }}>
-                  打开本地任务
-                </Button>
-              )}
-            </Space>
-          </Flex>
-        ))}
-
-        {jira && !hasAssetKind('PRD') && allowedKinds.includes('PRD') && (
-          <Flex justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
-            <Space size={8} wrap>
-              <Tag>本任务描述</Tag>
-              <Typography.Text type="secondary">若需求直接写在本任务 Jira 正文中，可一键固化为首版需求文档材料</Typography.Text>
-            </Space>
-            <Button size="small" disabled={busy} onClick={saveSelfJiraAsPrd}>将本任务 Jira 描述存为需求文档</Button>
-          </Flex>
-        )}
-      </div>
-    </Card>
+    <TaskSmartLinksCard
+      hints={smartHints}
+      tasks={tasks}
+      allowedKinds={allowedKinds}
+      busy={busy}
+      showRepos={!boundRepoPath}
+      showSelfPrd={!!jira && !hasAssetKind('PRD') && allowedKinds.includes('PRD')}
+      hasAssetKind={hasAssetKind}
+      onBindRepo={bindRepoQuick}
+      onOpenRepo={(app, path) => void openRepoInApp(app, path)}
+      onImport={importReferenceAsAsset}
+      onSaveSelfPrd={saveSelfJiraAsPrd}
+      onOpenTask={onOpenTask}
+    />
   ) : null;
 
   const sourceItems: DescriptionsProps['items'] = jira ? [
@@ -1280,259 +1181,54 @@ export const WorkTaskDetail: React.FC<{
     </Form>
   </>;
 
-  const readiness = evaluateReleaseReadiness({ task, assets, jobs, gates });
-  const copyReleaseDossier = () => {
-    const md = buildReleaseDossierMarkdown({ task, assets, jobs, gates, members, repoPath: boundRepoPath });
-    void navigator.clipboard.writeText(md)
-      .then(() => message.success(`已复制 ${task.jiraKey} 变更发布就绪度与追溯档案 (Markdown)。`))
-      .catch(() => message.warning('浏览器未能复制，请点击右侧下载档案。'));
+  const fixAssetFromRelease = (kind: AssetKind) => {
+    changeTab('assets');
+    openAssetDrawer({ mode: kind === 'CODE' ? 'git' : 'manual', kind, template: kind !== 'CODE' });
   };
-  const downloadReleaseDossier = () => {
-    const md = buildReleaseDossierMarkdown({ task, assets, jobs, gates, members, repoPath: boundRepoPath });
-    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${task.jiraKey}-release-dossier.md`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    void message.success(`已下载 ${task.jiraKey}-release-dossier.md。`);
-  };
+  const passedGateCount = gates?.gates.filter(gate => gate.status === 'PASS').length || 0;
+
+  const openDecompose = () => { setDecomposeEverOpened(true); setDecomposeOpen(true); };
+  const jiraDescription = jira ? (typeof jira.description === 'string' ? jira.description.trim() : jira.description ? JSON.stringify(jira.description, null, 2) : '') : '';
+  const doneChildren = children.filter(item => item.status === 'DONE').length;
 
   const overview = <div className="tf-detail-stack">
-    {smartLinksCard}
-    <Card
-      size="small"
-      title={
-        <Space size={8} wrap>
-          <FileCheck2 size={16} />
-          <span>全链路追溯与发布就绪度记分卡</span>
-          <StatusBadge variant={readiness.grade === 'READY' ? 'green' : readiness.grade === 'ALMOST' ? 'blue' : readiness.unwaivedCriticalCount > 0 || readiness.highRiskRequiresRollback ? 'warn' : 'neutral'}>
-            就绪度 {readiness.score} / 100
-          </StatusBadge>
-        </Space>
-      }
-      extra={
-        <Space size={6} wrap>
-          <Button size="small" icon={<Copy size={13} />} onClick={copyReleaseDossier}>复制发布档案</Button>
-          <Button size="small" icon={<Download size={13} />} onClick={downloadReleaseDossier}>下载 .md</Button>
-        </Space>
-      }
+    {doneAncestor && <Alert type="info" showIcon title={<>上级任务 <Button type="link" size="small" style={{ paddingInline: 2 }} onClick={() => onOpenTask(doneAncestor.id)}>{doneAncestor.jiraKey}</Button> 已完成并冻结，需先重开上级任务才能修改此任务。</>} />}
+    {task.status === 'DONE' && <Alert type="info" showIcon title="任务已完成，可查看历史；需先重开才能新增材料、评审或重新认领。" />}
+    {jira && <Card
+      title={<Space size={8} wrap><span>需求描述</span><Typography.Text type="secondary" className="tf-card-subtitle">来自 Jira {jira.key} · {jira.status}</Typography.Text></Space>}
+      extra={<Typography.Link href={jira.url} target="_blank" rel="noreferrer"><Space size={4}><ExternalLink size={13} />Jira 原单</Space></Typography.Link>}
     >
       <div className="tf-detail-stack tf-detail-stack-small">
-        {readiness.highRiskRequiresRollback && (
-          <Alert
-            type="warning"
-            showIcon
-            title={`检测到高敏变更（${readiness.highRiskLabels.join('、')}），上线方案尚未包含明确回滚/兜底步骤`}
-            action={
-              !inputsFrozen && allowedKinds.includes('RELEASE_PLAN') ? (
-                <Button size="small" type="primary" onClick={() => { changeTab('assets'); openAssetDrawer({ kind: 'RELEASE_PLAN', template: true }); }}>
-                  补齐回滚方案
-                </Button>
-              ) : undefined
-            }
-          />
-        )}
-        <div className="tf-traceability-strip" role="list" aria-label="五阶段全链路追溯链">
-          {readiness.traceabilityChain.map((node, idx) => (
-            <button
-              key={node.stage}
-              type="button"
-              role="listitem"
-              className={`tf-traceability-node ${node.gateStatus === 'PASS' ? 'tf-traceability-node-pass' : ''}`}
-              onClick={() => handlePipelineStepClick(idx + 1)}
-            >
-              <Flex justify="space-between" align="center" gap={4} style={{ width: '100%' }}>
-                <Typography.Text strong style={{ fontSize: 12 }}>{node.stageLabel}</Typography.Text>
-                <StatusBadge variant={node.gateStatus === 'PASS' ? 'green' : ['BLOCKED', 'CHANGES_REQUESTED'].includes(node.gateStatus) ? 'block' : 'neutral'}>
-                  {gateStatusLabel(node.gateStatus)}
-                </StatusBadge>
-              </Flex>
-              {node.latestAsset ? (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                  <code>r{node.latestAsset.revision} · {node.latestAsset.sha256.slice(0, 8)}</code>
-                </Typography.Text>
-              ) : (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }}>未登记{assetKindLabel(node.assetKind)}</Typography.Text>
-              )}
-              {node.approverId && (
-                <Typography.Text type="secondary" style={{ fontSize: 11 }} ellipsis>
-                  签字：{memberName(members, node.approverId)}
-                </Typography.Text>
-              )}
-            </button>
-          ))}
-        </div>
-        <div className="tf-readiness-checks">
-          {readiness.checks.map(chk => (
-            <div key={chk.id} className="tf-readiness-check">
-              <div style={{ minWidth: 0, flex: 1 }}>
-                <Space size={6} wrap>
-                  <Tag color={chk.status === 'pass' ? 'success' : chk.status === 'warn' ? 'warning' : 'error'} style={{ marginInlineEnd: 0 }}>
-                    {chk.maxPoints ? `${chk.points}/${chk.maxPoints}` : chk.status === 'pass' ? '一致' : chk.status === 'fail' ? '不一致' : '待核验'}
-                  </Tag>
-                  <Typography.Text strong style={{ fontSize: 13 }}>{chk.label}</Typography.Text>
-                </Space>
-                <div>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>{chk.detail}</Typography.Text>
-                </div>
-                {!!chk.evidence?.length && (
-                  <details>
-                    <summary>{chk.id === 'traceability' ? '查看逐条验收覆盖' : '查看构建及审批提交'}</summary>
-                    <ul>
-                      {chk.evidence.map((item, idx) => <li key={idx} style={{ overflowWrap: 'anywhere' }}>{item}</li>)}
-                    </ul>
-                  </details>
-                )}
-              </div>
-              {chk.status !== 'pass' && !inputsFrozen && (chk.targetAssetKind || chk.targetStage) && (
-                <Button
-                  size="small"
-                  type="link"
-                  style={{ paddingInline: 2, flex: '0 0 auto' }}
-                  onClick={() => {
-                    if (chk.targetAssetKind && allowedKinds.includes(chk.targetAssetKind)) {
-                      changeTab('assets');
-                      openAssetDrawer({
-                        mode: chk.targetAssetKind === 'CODE' ? 'git' : 'manual',
-                        kind: chk.targetAssetKind,
-                        template: chk.targetAssetKind !== 'CODE',
-                      });
-                    } else if (chk.targetStage) {
-                      const stepIdx = STAGES.findIndex(s => s.value === chk.targetStage);
-                      if (stepIdx >= 0) handlePipelineStepClick(stepIdx + 1);
-                    }
-                  }}
-                >
-                  去处理
-                </Button>
-              )}
-            </div>
-          ))}
-        </div>
+        {jira.title !== task.title && <Typography.Text strong>{jira.title}</Typography.Text>}
+        {jiraDescription ? <pre className="tf-code-panel tf-jira-description">{jiraDescription}</pre> : <Typography.Text type="secondary">Jira 正文为空。</Typography.Text>}
+        <Collapse ghost size="small" className="tf-jira-source" items={[{ key: 'meta', label: 'Jira 字段（优先级、组件、版本等）', children: <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} items={sourceItems} /> }]} />
       </div>
-    </Card>
-    <Card title="任务信息" extra={<Button disabled={!canEdit || busy || !!doneAncestor} onClick={() => openDrawer('task')}>编辑任务</Button>}>
-      <div className="tf-detail-stack tf-detail-stack-small">
-        <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
-          { key: 'type', label: '任务类型', children: jira ? jira.type : taskTypeLabel(task.type) },
-          { key: 'version', label: '任务版本', children: 'v' + task.version },
-          { key: 'assignee', label: '本地受理人', children: memberName(members, task.assigneeId) },
-          { key: 'status', label: '本地状态', children: taskStatusLabel(task.status) },
-          { key: 'progress', label: '自报进度', children: task.progress + '%' },
-          { key: 'updated', label: '最近更新', children: timeText(task.updatedAt) },
-          { key: 'repo', label: '绑定本地仓库', span: 2, children: boundRepoPath ? <Space size={8} wrap><Typography.Text code>{boundRepoPath}</Typography.Text>{!!gitStatus?.constitutionFiles?.length && <Tag color="cyan">工程规范：{gitStatus.constitutionFiles.join(' · ')}</Tag>}<Button size="small" type="link" onClick={() => void openRepoInApp('finder', boundRepoPath)}>Finder 打开</Button><Button size="small" type="link" onClick={() => void openRepoInApp('cursor', boundRepoPath)}>在 Cursor 打开</Button><Button size="small" type="link" onClick={() => void openRepoInApp('terminal', boundRepoPath)}>打开终端</Button></Space> : <Typography.Text type="secondary">未绑定（可在「本地处理」中选择）</Typography.Text> },
-          ...(task.parentId ? [{ key: 'parent', label: '本地父任务', children: <Button type="link" size="small" onClick={() => onOpenTask(task.parentId!)}>{tasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Button> }] : []),
-          ...(jira?.parentKey ? [{ key: 'jiraParent', label: 'Jira 父任务', children: <Typography.Link href={new URL(encodeURIComponent(jira.parentKey), jira.url).href} target="_blank" rel="noreferrer">{jira.parentKey}</Typography.Link> }] : []),
-          ...(task.lastSummary ? [{ key: 'summary', label: '最新进度摘要', span: 2, children: <span className="tf-preserve">{task.lastSummary}</span> }] : []),
-        ]} />
-        {canClaim && <div><Button type="primary" disabled={busy} onClick={claimTaskNow}>认领任务</Button></div>}
-        {doneAncestor && <Typography.Paragraph type="secondary">请先重开祖先任务 <Button type="link" size="small" onClick={() => onOpenTask(doneAncestor.id)}>{doneAncestor.jiraKey}</Button>，再重开此任务。</Typography.Paragraph>}
-        {task.status === 'DONE' && <Typography.Paragraph type="secondary">请先重开任务再变更评审输入。已完成任务可查看历史，不能新增资产、评审或重新认领。</Typography.Paragraph>}
-        {jira && <Collapse className="tf-jira-source" items={[{ key: 'jira', label: 'Jira 来源 · ' + jira.key, children: <div className="tf-detail-stack tf-detail-stack-small"><Typography.Text strong>{jira.title}</Typography.Text><Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} items={sourceItems} /><Typography.Link href={jira.url} target="_blank" rel="noreferrer">查看 Jira 原始任务</Typography.Link><pre className="tf-code-panel">{typeof jira.description === 'string' ? jira.description : JSON.stringify(jira.description, null, 2)}</pre></div> }]} />}
-      </div>
+    </Card>}
+    <Card title="基本信息" extra={<Button size="small" disabled={!canEdit || busy || !!doneAncestor} onClick={() => openDrawer('task')}>编辑任务</Button>}>
+      <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
+        { key: 'progress', label: '自报进度', children: <Progress percent={task.progress} size="small" style={{ width: 160, margin: 0 }} /> },
+        { key: 'updated', label: '最近更新', children: timeText(task.updatedAt) },
+        { key: 'repo', label: '本地仓库', span: 2, children: boundRepoPath ? <Space size={8} wrap><Typography.Text code>{boundRepoPath}</Typography.Text>{!!gitStatus?.branch && gitStatus.branch !== 'HEAD' && <Tag icon={<GitBranch size={11} />}>{gitStatus.branch}</Tag>}{!!gitStatus?.constitutionFiles?.length && <Tag color="cyan">工程规范：{gitStatus.constitutionFiles.join(' · ')}</Tag>}</Space> : <Typography.Text type="secondary">未绑定（启动「本地 AI 一键处理」时可选择）</Typography.Text> },
+        ...(task.parentId ? [{ key: 'parent', label: '本地父任务', children: <Button type="link" size="small" style={{ paddingInline: 0 }} onClick={() => onOpenTask(task.parentId!)}>{tasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Button> }] : []),
+        ...(jira?.parentKey ? [{ key: 'jiraParent', label: 'Jira 父任务', children: <Typography.Link href={new URL(encodeURIComponent(jira.parentKey), jira.url).href} target="_blank" rel="noreferrer">{jira.parentKey}</Typography.Link> }] : []),
+        ...(task.lastSummary ? [{ key: 'summary', label: '最新进展', span: 2, children: <span className="tf-preserve">{task.lastSummary}</span> }] : []),
+      ]} />
     </Card>
     <Card
-      title={
-        <Space size={8}>
-          <span>子任务</span>
-          {children.length > 0 && (
-            <Typography.Text type="secondary" style={{ fontSize: 13, fontWeight: 400 }}>
-              {children.filter(c => c.status === 'DONE').length} / {children.length} 已完成
-            </Typography.Text>
-          )}
-        </Space>
-      }
-      extra={
-        !inputsFrozen && (
-          <Button
-            size="small"
-            icon={<Sparkles size={14} />}
-            disabled={busy}
-            onClick={() => {
-              setDecomposeEverOpened(true);
-              setDecomposeOpen(true);
-            }}
-          >
-            智能拆解 / 批量建子任务
-          </Button>
-        )
-      }
+      title={<Space size={8}><span>子任务</span>{children.length > 0 && <Typography.Text type="secondary" className="tf-card-subtitle">{doneChildren} / {children.length} 已完成</Typography.Text>}</Space>}
+      extra={children.length > 0 && !inputsFrozen && <Button size="small" icon={<Sparkles size={14} />} disabled={busy} onClick={openDecompose}>智能拆解 / 批量建子任务</Button>}
     >
-      {!children.length ? (
-        <Empty>
-          <Space orientation="vertical" size={8}>
-            <span>暂无子任务。可从 PRD / 技术方案一键拆解实施子任务，或套用四步标准研发模板。</span>
-            {!inputsFrozen && (
-              <Button
-                size="small"
-                type="primary"
-                ghost
-                icon={<Sparkles size={14} />}
-                disabled={busy}
-                onClick={() => {
-                  setDecomposeEverOpened(true);
-                  setDecomposeOpen(true);
-                }}
-              >
-                智能拆解并创建子任务
-              </Button>
-            )}
-          </Space>
-        </Empty>
-      ) : (
+      {children.length ? <Flex vertical gap={12}>
+        <Progress percent={Math.round(doneChildren / children.length * 100)} size="small" showInfo={false} />
         <Table<WorkTask> rowKey="id" dataSource={children} columns={childColumns} size="middle" pagination={false} scroll={{ x: 580 }} />
-      )}
+      </Flex> : <Empty>
+        <Space orientation="vertical" size={8}>
+          <span>暂无子任务。可从需求文档 / 技术方案一键拆解，或套用四步标准研发模板。</span>
+          {!inputsFrozen && <Button size="small" type="primary" ghost icon={<Sparkles size={14} />} disabled={busy} onClick={openDecompose}>智能拆解并创建子任务</Button>}
+        </Space>
+      </Empty>}
     </Card>
   </div>;
-
-  const renderSideBySideDiff = (rows: SideBySideDiffRow[], ariaLabel: string, headerText?: React.ReactNode) => (
-    <div className="tf-diff-viewer" aria-label={ariaLabel}>
-      {headerText && (
-        <div className="tf-diff-line tf-diff-file">
-          <span className="tf-diff-code">{headerText}</span>
-        </div>
-      )}
-      {rows.map((row, idx) => {
-        if (row.kind === 'skip') {
-          return <div key={idx} className="tf-diff-skip">{row.text}</div>;
-        }
-        if (row.kind !== 'pair') {
-          return (
-            <div
-              key={idx}
-              className={`tf-diff-line ${
-                row.kind === 'hunk' ? 'tf-diff-hunk' : row.kind === 'file' ? 'tf-diff-file' : 'tf-diff-meta'
-              }`}
-            >
-              <span className="tf-diff-code">{row.text || ' '}</span>
-            </div>
-          );
-        }
-        const leftCls = row.leftType === 'del' ? 'tf-diff-del' : row.leftType === 'empty' ? 'tf-diff-empty' : '';
-        const rightCls = row.rightType === 'add' ? 'tf-diff-add' : row.rightType === 'empty' ? 'tf-diff-empty' : '';
-        return (
-          <div key={idx} className="tf-diff-split-row">
-            <div className={`tf-diff-split-cell ${leftCls}`}>
-              <span className="tf-diff-split-gutter">{row.leftLine ?? ''}</span>
-              <span className="tf-diff-code">
-                {row.leftType === 'del' ? '- ' : row.leftType === 'context' ? '  ' : ''}{row.leftText ?? ''}
-              </span>
-            </div>
-            <div className={`tf-diff-split-cell ${rightCls}`}>
-              <span className="tf-diff-split-gutter">{row.rightLine ?? ''}</span>
-              <span className="tf-diff-code">
-                {row.rightType === 'add' ? '+ ' : row.rightType === 'context' ? '  ' : ''}{row.rightText ?? ''}
-              </span>
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
 
   const assetPanel = <div className="tf-detail-stack">
     {smartLinksCard}
@@ -1544,169 +1240,7 @@ export const WorkTaskDetail: React.FC<{
         <Button type="primary" icon={<FileText size={16} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => openAssetDrawer({ mode: 'manual' })}>添加材料</Button>
       </Space>}
     >
-      {!assets.length ? <Empty>{allowedKinds.length && !inputsFrozen ? '尚无材料，可使用上方「粘贴链接导入」「提取本地 Git 代码」或「模板生成」快速补齐。' : '尚无材料。'}</Empty> : <Collapse items={[...assets].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(asset => {
-        const diffStats = parseUnifiedDiffStats(asset.content);
-        const isMd = !diffStats.hasHunks && isLikelyMarkdown(asset.content, asset.kind);
-        const mdBlocks = isMd ? parseMarkdownBlocks(asset.content) : [];
-        const checklistStats = isMd ? summarizeMarkdownChecklists(mdBlocks) : { checked: 0, total: 0 };
-        const risk = ['CODE', 'TECH_SPEC', 'RELEASE_PLAN'].includes(asset.kind)
-          ? analyzeAssetRiskSignals(asset.content)
-          : { tier: 'NONE' as const, signals: [] };
-        const prevAsset = assets
-          .filter(candidate => candidate.kind === asset.kind && candidate.logicalKey === asset.logicalKey && candidate.revision < asset.revision)
-          .sort((a, b) => b.revision - a.revision)[0];
-        const defaultViewMode: AssetViewerMode = diffStats.hasHunks ? 'pretty' : isMd ? 'md' : 'raw';
-        const rawMode = assetViewModes[asset.id] || defaultViewMode;
-        const currentViewMode: AssetViewerMode = !screens.md && rawMode === 'split'
-          ? 'pretty'
-          : !screens.md && rawMode === 'rev-split'
-            ? 'rev-diff'
-            : rawMode;
-        const revDiff = (currentViewMode === 'rev-diff' || currentViewMode === 'rev-split') && prevAsset
-          ? computeRevisionLineDiff(prevAsset.content, asset.content)
-          : null;
-
-        const modeOptions: { value: AssetViewerMode; label: string }[] = [];
-        if (diffStats.hasHunks) {
-          modeOptions.push({ value: 'pretty', label: '统一对比' });
-          if (screens.md) modeOptions.push({ value: 'split', label: '双栏对比' });
-        } else if (isMd) {
-          modeOptions.push({ value: 'md', label: '排版预览' });
-        }
-        if (prevAsset) {
-          modeOptions.push({ value: 'rev-diff', label: `对比 r${prevAsset.revision}` });
-          if (screens.md) modeOptions.push({ value: 'rev-split', label: `双栏 r${prevAsset.revision}` });
-        }
-        if (modeOptions.length > 0) {
-          modeOptions.push({ value: 'raw', label: '原始文本' });
-        }
-
-        return {
-          key: asset.id,
-          label: <div className="tf-table-title">
-            <Space size={8} wrap>
-              <Typography.Text type="secondary"><code>{assetMetaCodeLabel(asset.kind, asset.logicalKey, asset.revision)}</code></Typography.Text>
-              {diffStats.hasHunks && (
-                <Space size={6}>
-                  <span className="tf-diff-stat-add">+{diffStats.additions}</span>
-                  <span className="tf-diff-stat-del">-{diffStats.deletions}</span>
-                  {diffStats.files.length > 0 && <Tag style={{ marginInlineEnd: 0 }}>{diffStats.files.length} 个文件</Tag>}
-                </Space>
-              )}
-              {checklistStats.total > 0 && (
-                <Tag
-                  color={checklistStats.checked === checklistStats.total ? 'success' : 'processing'}
-                  style={{ marginInlineEnd: 0 }}
-                >
-                  核查项 {checklistStats.checked}/{checklistStats.total}
-                </Tag>
-              )}
-              {prevAsset && <Tag color="blue" style={{ marginInlineEnd: 0 }}>可对比 r{prevAsset.revision}</Tag>}
-              {risk.signals.map(sig => (
-                <Tag
-                  key={sig.code}
-                  color={sig.level === 'HIGH' ? 'error' : sig.level === 'MEDIUM' ? 'warning' : 'default'}
-                  style={{ marginInlineEnd: 0 }}
-                >
-                  {sig.label}
-                </Tag>
-              ))}
-            </Space>
-            <Typography.Text strong className="tf-break">{asset.title}</Typography.Text>
-          </div>,
-          children: <div className="tf-detail-stack tf-detail-stack-small">
-            <Flex justify="space-between" align="center" gap={8} wrap>
-              <Typography.Text type="secondary">{memberName(members, asset.actorId)} · {timeText(asset.createdAt)}</Typography.Text>
-              <Space size={6} wrap>
-                {modeOptions.length > 1 && (
-                  <Segmented<AssetViewerMode>
-                    size="small"
-                    aria-label={`切换 ${asset.title} 视图模式`}
-                    value={currentViewMode}
-                    options={modeOptions}
-                    onChange={val => setAssetViewModes(prev => ({ ...prev, [asset.id]: val }))}
-                  />
-                )}
-                <Button size="small" icon={<Copy size={13} />} onClick={() => { void navigator.clipboard.writeText(asset.content).then(() => message.success('材料内容已复制到剪贴板。')).catch(() => message.warning('浏览器未能复制，请手动选择复制。')); }}>复制内容</Button>
-                {!inputsFrozen && allowedKinds.includes(asset.kind) && (
-                  <Button size="small" icon={<Pencil size={13} />} disabled={busy} onClick={() => openAssetFromBasis(asset)}>基于此版更新</Button>
-                )}
-              </Space>
-            </Flex>
-            <Space size={6} wrap>
-              <Tooltip title={`点击复制完整指纹：${asset.sha256}`}>
-                <Typography.Text
-                  type="secondary"
-                  code
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => { void navigator.clipboard.writeText(asset.sha256).then(() => message.success('SHA256 指纹已复制。')).catch(() => {}); }}
-                >
-                  SHA256 {asset.sha256.slice(0, 12)}
-                </Typography.Text>
-              </Tooltip>
-              {diffStats.files.length > 0 && (
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  涉及文件：{diffStats.files.slice(0, 5).join(' · ')}{diffStats.files.length > 5 ? ` 等 ${diffStats.files.length} 个` : ''}
-                </Typography.Text>
-              )}
-            </Space>
-            {asset.sourceUrl && <Typography.Link href={asset.sourceUrl} target="_blank" rel="noreferrer" className="tf-break">{asset.sourceUrl}</Typography.Link>}
-            {revDiff && prevAsset ? (
-              revDiff.identical ? (
-                <Alert type="info" showIcon title={`当前 r${asset.revision} 与上一版 r${prevAsset.revision} 正文内容完全一致。`} />
-              ) : currentViewMode === 'rev-split' ? (
-                renderSideBySideDiff(
-                  pairRevisionDiffSideBySide(revDiff.rows),
-                  `双栏版本对比 r${prevAsset.revision} 至 r${asset.revision}`,
-                  <>双栏版本对比：r{prevAsset.revision}（左） → r{asset.revision}（右）（<span className="tf-diff-stat-add">+{revDiff.additions}</span> / <span className="tf-diff-stat-del">-{revDiff.deletions}</span> 行）</>,
-                )
-              ) : (
-                <div className="tf-diff-viewer" aria-label={`版本对比 r${prevAsset.revision} 至 r${asset.revision}`}>
-                  <div className="tf-diff-line tf-diff-file">
-                    <span className="tf-diff-code">
-                      版本变更对比：r{prevAsset.revision} → r{asset.revision}（<span className="tf-diff-stat-add">+{revDiff.additions}</span> / <span className="tf-diff-stat-del">-{revDiff.deletions}</span> 行）
-                    </span>
-                  </div>
-                  {revDiff.rows.map((row, idx) => row.type === 'skip' ? (
-                    <div key={idx} className="tf-diff-skip">⋯ 省略 {row.count} 行未变更上下文 ⋯</div>
-                  ) : (
-                    <div key={idx} className={`tf-diff-line ${row.type === 'add' ? 'tf-diff-add' : row.type === 'del' ? 'tf-diff-del' : ''}`}>
-                      <span className="tf-diff-gutter">
-                        {row.oldLine ?? ''}{row.oldLine && row.newLine ? ':' : ''}{row.newLine ?? ''}
-                      </span>
-                      <span className="tf-diff-code">{row.type === 'add' ? '+ ' : row.type === 'del' ? '- ' : '  '}{row.text}</span>
-                    </div>
-                  ))}
-                </div>
-              )
-            ) : currentViewMode === 'split' && diffStats.hasHunks ? (
-              renderSideBySideDiff(buildSideBySideUnifiedDiff(asset.content), '代码双栏 Diff 视图')
-            ) : currentViewMode === 'pretty' && diffStats.hasHunks ? (
-              <div className="tf-diff-viewer" aria-label="代码统一 Diff 视图">
-                {splitUnifiedDiffLines(asset.content).map((line, idx) => (
-                  <div
-                    key={idx}
-                    className={`tf-diff-line ${
-                      line.kind === 'add' ? 'tf-diff-add'
-                        : line.kind === 'del' ? 'tf-diff-del'
-                          : line.kind === 'hunk' ? 'tf-diff-hunk'
-                            : line.kind === 'file' ? 'tf-diff-file'
-                              : line.kind === 'meta' ? 'tf-diff-meta'
-                                : ''
-                    }`}
-                  >
-                    <span className="tf-diff-code">{line.text || ' '}</span>
-                  </div>
-                ))}
-              </div>
-            ) : currentViewMode === 'md' && isMd ? (
-              <MarkdownPreview content={asset.content} blocks={mdBlocks} />
-            ) : (
-              <pre className="tf-code-panel">{asset.content}</pre>
-            )}
-          </div>,
-        };
-      })} />}
+      <TaskAssetList assets={assets} members={members} allowedKinds={allowedKinds} frozen={inputsFrozen} busy={busy} onUpdateFromBasis={openAssetFromBasis} />
     </Card>
   </div>;
 
@@ -1737,8 +1271,7 @@ export const WorkTaskDetail: React.FC<{
           },
         })}
         columns={[
-        { title: '阶段', dataIndex: 'stage', width: 160, render: (value, item) => <Button type="link" size="small" onClick={() => openReview(item.id)}>{stageLabel(value)}</Button> },
-        { title: '执行方式', dataIndex: 'executionMode', render: value => executionModeLabel(value) },
+        { title: '阶段', dataIndex: 'stage', render: (value, item) => <div className="tf-table-title"><Button type="link" size="small" onClick={() => openReview(item.id)}>{stageLabel(value)}</Button><Typography.Text type="secondary" className="tf-table-secondary">{executionModeLabel(item.executionMode)} · {timeText(item.createdAt)}</Typography.Text></div> },
         { title: '状态', render: (_, item) => <Space size={8} wrap><StatusBadge variant={item.status === 'APPROVED' ? 'green' : item.status === 'REPORT_SUBMITTED' ? 'blue' : 'neutral'}>{reviewStatusLabel(item.status)}</StatusBadge>{item.stale && <StatusBadge variant="warn">材料已更新</StatusBadge>}</Space> },
         { title: '快捷操作', width: 220, render: (_, item) => {
           const canApproveRow = canQuickApproveReview(item, task, tasks, user, role);
@@ -1754,130 +1287,43 @@ export const WorkTaskDetail: React.FC<{
             )}
           </Space>;
         } },
-        { title: '创建时间', width: 180, render: (_, item) => timeText(item.createdAt) },
-      ]} locale={{ emptyText: <Empty>尚无评审记录。</Empty> }} />
+      ]} locale={{ emptyText: <Empty><Space orientation="vertical" size={8}><span>尚无评审记录。材料就绪后可发起评审，或让本机 AI 直接生成评审报告草稿。</span>{!inputsFrozen && !!allowedStages.length && <Button size="small" type="primary" ghost icon={<Sparkles size={14} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: 'review' })}>一键 AI 评审</Button>}</Space></Empty> }} />
+      {jobs.length > 0 && !selectedJob && <Typography.Text type="secondary" className="tf-table-hint">点击任意一条评审查看报告、发现项与审批。</Typography.Text>}
     </Card>
-    <TaskMergeRequests key={`${user.id}:${task.id}`} taskId={task.id} taskVersion={task.version}
+    {selectedJob && <div id="workspace-review-detail" className="tf-review-panel"><Suspense fallback={<Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}><ReviewDetail key={selectedJob.id} jobId={selectedJob.id} task={task} user={user} role={role} members={members} repoPath={boundRepoPath} constitutionFiles={gitStatus?.constitutionFiles || []} onChanged={changed} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onOpenJob={id => openReview(id)} readOnly={inputsFrozen} onReady={() => { if (tab === 'reviews') document.getElementById('workspace-review-detail')?.scrollIntoView({ block: 'start', behavior: 'instant' }); }} /></Suspense></div>}
+    {hasAssetKind('CODE') && <TaskMergeRequests key={`${user.id}:${task.id}`} taskId={task.id} taskVersion={task.version}
       approvedJobId={gates?.gates.find(gate => gate.stage === 'CODE_REVIEW' && gate.status === 'PASS')?.jobId}
       active={tab === 'reviews'} readOnly={inputsFrozen} onUnauthorized={onUnauthorized}
-      onImport={!inputsFrozen && allowedKinds.includes('CODE') ? () => openAssetDrawer({ mode: 'link', kind: 'CODE' }) : undefined} />
-    {selectedJob && <div id="workspace-review-detail" className="tf-review-panel"><Suspense fallback={<Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}><ReviewDetail key={selectedJob.id} jobId={selectedJob.id} task={task} user={user} role={role} members={members} repoPath={boundRepoPath} constitutionFiles={gitStatus?.constitutionFiles || []} onChanged={changed} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onOpenJob={id => openReview(id)} readOnly={inputsFrozen} onReady={() => { if (tab === 'reviews') document.getElementById(selectedJob.stage === 'CODE_REVIEW' ? 'workspace-merge-requests' : 'workspace-review-detail')?.scrollIntoView({ block: 'start', behavior: 'instant' }); }} /></Suspense></div>}
+      onImport={!inputsFrozen && allowedKinds.includes('CODE') ? () => openAssetDrawer({ mode: 'link', kind: 'CODE' }) : undefined} />}
   </div>;
 
-  const activityPanel = <div className="tf-detail-stack">
-    <Card title="本地 AI 自动化协作"><div className="tf-detail-stack tf-detail-stack-small">
-      <Typography.Paragraph type="secondary">无需手动复制粘贴任务 ID 或材料：可直接启动本机已安装的 Codex / Gemini / Cursor / Claude 进行任务分析、本地代码协作与结构化评审报告生成。</Typography.Paragraph>
-      <Space wrap size={8}>
-        <Button type="primary" icon={<Play size={15} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: 'read' })}>启动本地 AI 工作台</Button>
-        {boundRepoPath && <Button icon={<FolderOpen size={15} />} onClick={() => void openRepoInApp('finder', boundRepoPath)}>Finder 打开</Button>}
-        {boundRepoPath && <Button onClick={() => void openRepoInApp('cursor', boundRepoPath)}>在 Cursor 打开仓库</Button>}
-        {boundRepoPath && <Button icon={<Terminal size={15} />} onClick={() => void openRepoInApp('terminal', boundRepoPath)}>打开终端</Button>}
-        <Button onClick={() => { location.hash = 'view=local'; }}>查看本机接入配置<ChevronRight size={16} /></Button>
-      </Space>
-    </div></Card>
-    <Card title={`本机 AI 执行记录 (${aiRuns.length})`}>
-      {aiRuns.length ? (
-        <Collapse items={aiRuns.map(item => ({
-          key: item.id,
-          label: <Space size={8} wrap>
-            <StatusBadge variant={item.status === 'SUCCEEDED' ? 'green' : item.status === 'RUNNING' ? 'blue' : item.status === 'FAILED' ? 'block' : 'neutral'}>{aiRunStatusLabel(item.status)}</StatusBadge>
-            <Typography.Text strong>{item.mode === 'read' ? '任务分析' : item.mode === 'develop' ? '开发协作' : '本地评审'}</Typography.Text>
-            <Tag>{toolLabel(item.engine)}</Tag>
-            <Typography.Text type="secondary">{timeText(item.startedAt)}</Typography.Text>
-          </Space>,
-          children: <div className="tf-detail-stack tf-detail-stack-small">
-            {item.error && <Alert type="warning" showIcon title={item.error} />}
-            <Flex justify="space-between" align="center" gap={8} wrap>
-              {item.jobId ? <Button size="small" type="link" style={{ paddingInline: 0 }} onClick={() => openReview(item.jobId!)}>查看关联评审记录</Button> : <span />}
-              {item.output && (
-                <Button
-                  size="small"
-                  icon={<Copy size={13} />}
-                  onClick={() => {
-                    void navigator.clipboard.writeText(item.output).then(() => message.success('AI 执行输出已复制。')).catch(() => message.warning('浏览器未能复制，请手动选择复制。'));
-                  }}
-                >
-                  复制输出
-                </Button>
-              )}
-            </Flex>
-            <pre className="tf-code-panel">{item.output || '（无输出）'}</pre>
-          </div>,
-        }))} />
-      ) : <Empty>尚无本机 AI 执行记录。点击「启动本地 AI 工作台」即可直接运行。</Empty>}
-    </Card>
-    <Card title="设备心跳"><Table<Device> rowKey={device => device.actorId + ':' + device.deviceId} dataSource={context?.devices || []} columns={deviceColumns} size="middle" pagination={false} scroll={{ x: 680 }} locale={{ emptyText: <Empty>尚无设备心跳。在线状态按服务接收时间计算，超过 90 秒未上报会离线。</Empty> }} /></Card>
-    <Card title="进度事件">
-      <div className="tf-detail-stack">
-        {canReportProgress && (
-          <div style={{ padding: 12, background: 'var(--tf-raised)', border: '1px solid var(--tf-border)', borderRadius: 8 }}>
-            <Flex vertical gap={8}>
-              <Flex justify="space-between" align="center" gap={8} wrap>
-                <Space size={8} wrap>
-                  <Typography.Text strong>记录开发进度</Typography.Text>
-                  <Input
-                    type="number"
-                    size="small"
-                    min={0}
-                    max={100}
-                    aria-label="进度百分比"
-                    value={progressValue}
-                    disabled={reportingProgress || busy}
-                    onChange={event => {
-                      const next = Number(event.target.value);
-                      if (!Number.isNaN(next)) setProgressValue(Math.max(0, Math.min(100, Math.round(next))));
-                    }}
-                    suffix="%"
-                    style={{ width: 88 }}
-                  />
-                  {([25, 50, 75, 90, 100] as const).map(pct => (
-                    <Tag
-                      key={pct}
-                      color={progressValue === pct ? 'blue' : undefined}
-                      style={{ cursor: 'pointer', marginInlineEnd: 0 }}
-                      onClick={() => setProgressValue(pct)}
-                    >
-                      {pct}%
-                    </Tag>
-                  ))}
-                </Space>
-                {gitStatus?.branch && gitStatus.branch !== 'HEAD' && (
-                  <Space size={4}>
-                    <GitBranch size={13} />
-                    <Typography.Text type="secondary" code style={{ fontSize: 12 }}>{gitStatus.branch}</Typography.Text>
-                  </Space>
-                )}
-              </Flex>
-              <Flex gap={8} align="start" wrap>
-                <Input.TextArea
-                  rows={2}
-                  maxLength={2000}
-                  aria-label="开发进展说明"
-                  placeholder="填写阶段性进展、关键改动或联调结果（按 Cmd/Ctrl + Enter 快速记录）"
-                  value={progressSummary}
-                  disabled={reportingProgress || busy}
-                  style={{ flex: '1 1 320px' }}
-                  onChange={event => setProgressSummary(event.target.value)}
-                  onKeyDown={event => {
-                    if (isSubmitShortcut(event)) {
-                      event.preventDefault();
-                      void submitWebProgress();
-                    }
-                  }}
-                />
-                <Button type="primary" loading={reportingProgress} disabled={busy || !progressSummary.trim()} onClick={() => void submitWebProgress()}>
-                  记录进度
-                </Button>
-              </Flex>
-            </Flex>
-          </div>
-        )}
-        {context?.progressEvents.length ? <Timeline items={context.progressEvents.map(event => ({
-          content: <div><Flex justify="space-between" gap={12} wrap><Typography.Text strong>{memberName(members, event.actorId)} · {progressSourceLabel(event.tool, event.deviceId)}</Typography.Text><Typography.Text type="secondary">自报 {event.progress}% · {timeText(event.createdAt)}</Typography.Text></Flex><Typography.Paragraph className="tf-preserve tf-meta-line">{event.summary}</Typography.Paragraph>{event.branch && <Typography.Text type="secondary" className="tf-break"><Space size={8}><GitBranch size={14} /><code>{event.branch}</code></Space></Typography.Text>}</div>,
-        }))} /> : <Empty>尚无进度事件。自报进度不构成测试或门禁通过证据。</Empty>}
-      </div>
-    </Card>
-  </div>;
+  const releasePanel = <TaskReleasePanel
+    task={task}
+    assets={assets}
+    jobs={jobs}
+    gates={gates}
+    members={members}
+    repoPath={boundRepoPath}
+    frozen={inputsFrozen}
+    allowedKinds={allowedKinds}
+    onOpenReview={openReview}
+    onFixAsset={fixAssetFromRelease}
+    onFixStage={stage => handlePipelineStepClick(STAGES.findIndex(item => item.value === stage) + 1)}
+  />;
+
+  const activityPanel = <TaskActivityPanel
+    taskProgress={task.progress}
+    members={members}
+    progressEvents={context?.progressEvents || []}
+    devices={context?.devices || []}
+    aiRuns={aiRuns}
+    branch={gitStatus?.branch}
+    canReport={canReportProgress}
+    busy={busy}
+    onReport={reportProgress}
+    onStartLocalAi={() => openLocalWorkflow({ mode: 'read' })}
+    onOpenReview={openReview}
+  />;
 
   const pipelineSteps = [
     {
@@ -1953,11 +1399,28 @@ export const WorkTaskDetail: React.FC<{
       if (canComplete && task.status !== 'DONE' && canEdit && !doneAncestor) {
         completeTaskNow();
       } else {
-        setGateExpanded(true);
-        writeStoredBool(GATES_OPEN_KEY, true);
-        document.querySelector('.tf-gate-panel')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        changeTab('release');
       }
     }
+  };
+
+  const workflowMode: LocalTaskMode = inputsFrozen ? 'read' : canEdit ? 'develop' : 'read';
+  const moreActions: MenuProps['items'] = [
+    { key: 'workbench', icon: <Laptop size={14} />, label: '在工作台处理' },
+    { key: 'context-pack', icon: <Package size={14} />, label: '打包上下文 / 导出' },
+    { key: 'git-handoff', icon: <GitBranch size={14} />, label: '分支 / Worktree / MR 描述' },
+    ...(boundRepoPath ? [
+      { type: 'divider' as const },
+      { key: 'finder', icon: <FolderOpen size={14} />, label: 'Finder 打开仓库' },
+      { key: 'cursor', icon: <ExternalLink size={14} />, label: '在 Cursor 打开仓库' },
+      { key: 'terminal', icon: <Terminal size={14} />, label: '在终端打开仓库' },
+    ] : []),
+  ];
+  const runMoreAction = (key: string) => {
+    if (key === 'workbench') openLocalWorkflow({ mode: workflowMode, runner: 'workbench' });
+    else if (key === 'context-pack') { setContextPackEverOpened(true); setContextPackOpen(true); }
+    else if (key === 'git-handoff') { setGitHandoffEverOpened(true); setGitHandoffOpen(true); }
+    else if ((key === 'finder' || key === 'cursor' || key === 'terminal') && boundRepoPath) void openRepoInApp(key, boundRepoPath);
   };
 
   const assetDrawerPrimaryAction = () => {
@@ -2127,17 +1590,15 @@ export const WorkTaskDetail: React.FC<{
         </Space>
       </Flex>
       <Flex gap={8} wrap className="tf-task-summary-actions">
-        <Button type="primary" icon={<Sparkles size={16} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: inputsFrozen ? 'read' : canEdit ? 'develop' : 'read' })}>本地 AI 一键处理</Button>
-        <Button icon={<Laptop size={16} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: inputsFrozen ? 'read' : canEdit ? 'develop' : 'read', runner: 'workbench' })}>在工作台处理</Button>
-        <Button icon={<FileText size={16} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => { changeTab('assets'); openAssetDrawer({ mode: 'link' }); }}>导入 / 添加材料</Button>
-        <Button disabled={busy || inputsFrozen || !allowedStages.length} onClick={() => { changeTab('reviews'); openDrawer('review'); }}>发起评审</Button>
-        <Button icon={<Package size={15} />} disabled={busy} onClick={() => { setContextPackEverOpened(true); setContextPackOpen(true); }}>打包上下文 / 导出</Button>
-        <Button icon={<GitBranch size={15} />} disabled={busy} onClick={() => { setGitHandoffEverOpened(true); setGitHandoffOpen(true); }}>分支 / Worktree / MR 描述</Button>
-        {boundRepoPath && <Button icon={<FolderOpen size={15} />} onClick={() => void openRepoInApp('finder', boundRepoPath)}>Finder 打开</Button>}
-        {boundRepoPath && <Button onClick={() => void openRepoInApp('cursor', boundRepoPath)}>在 Cursor 打开</Button>}
         {canComplete && task.status !== 'DONE' && canEdit && !doneAncestor && (
           <Button type="primary" icon={<CheckCircle2 size={16} />} onClick={completeTaskNow}>一键完成核验</Button>
         )}
+        <Button type={canComplete && task.status !== 'DONE' ? 'default' : 'primary'} icon={<Sparkles size={16} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: workflowMode })}>本地 AI 一键处理</Button>
+        <Button icon={<FileText size={16} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => { changeTab('assets'); openAssetDrawer({ mode: 'link' }); }}>导入 / 添加材料</Button>
+        <Button disabled={busy || inputsFrozen || !allowedStages.length} onClick={() => { changeTab('reviews'); openDrawer('review'); }}>发起评审</Button>
+        <Dropdown trigger={['click']} disabled={busy} menu={{ items: moreActions, onClick: ({ key }) => runMoreAction(key) }}>
+          <Button>更多操作<ChevronDown size={14} /></Button>
+        </Dropdown>
       </Flex>
     </Card>
 
@@ -2167,19 +1628,11 @@ export const WorkTaskDetail: React.FC<{
 
     <div ref={panelRef} className="tf-detail-panel"><Tabs more={{ trigger: 'click', icon: <MoreHorizontal size={16} aria-label="更多页签" /> }} locale={{ dropdownAriaLabel: '更多页签' }} className="tf-task-tabs" activeKey={tab} onChange={changeTab} items={[
       { key: 'overview', label: '任务信息', children: overview },
-      { key: 'assets', label: '任务材料 (' + assets.length + ')', children: assetPanel },
-      { key: 'reviews', label: '评审记录 (' + jobs.length + ')', children: reviewPanel },
+      { key: 'assets', label: '材料 (' + assets.length + ')', children: assetPanel },
+      { key: 'reviews', label: '评审 (' + jobs.length + ')', children: reviewPanel },
+      { key: 'release', label: '门禁与发布 (' + passedGateCount + '/' + STAGES.length + ')', children: releasePanel },
       { key: 'activity', label: '开发进度', children: activityPanel },
     ]} /></div>
-
-    <Collapse className="tf-gate-panel" activeKey={gateExpanded ? ['gates'] : []} onChange={keys => { const next = keys.includes('gates'); setGateExpanded(next); writeStoredBool(GATES_OPEN_KEY, next); }} items={[{ key: 'gates', label: <Space size={12}><Typography.Text strong>阶段门禁明细</Typography.Text><StatusBadge variant={gates?.overall === 'PASS' ? 'green' : 'neutral'}>{gates ? gateStatusLabel(gates.overall) : '计算中'}</StatusBadge></Space>, children: <>
-      <Steps current={-1} orientation={screens.lg ? 'horizontal' : 'vertical'} titlePlacement={screens.lg ? 'vertical' : 'horizontal'} className="tf-gate-steps" items={gates?.gates.map(gate => ({
-        title: STAGES.find(item => item.value === gate.stage)?.label || stageLabel(gate.stage),
-        status: gate.status === 'PASS' ? 'finish' : ['BLOCKED', 'CHANGES_REQUESTED'].includes(gate.status) ? 'error' : 'wait',
-        content: <div className="tf-gate-description"><StatusBadge variant={gate.status === 'PASS' ? 'green' : ['BLOCKED', 'CHANGES_REQUESTED'].includes(gate.status) ? 'block' : 'neutral'}>{gateStatusLabel(gate.status)}</StatusBadge><Typography.Text type="secondary">{gate.reason}</Typography.Text>{gate.jobId && <Button type="link" size="small" onClick={() => openReview(gate.jobId!)}>查看评审</Button>}</div>,
-      }))} />
-      <Typography.Paragraph type="secondary" className="tf-gate-footnote">依据当前输入版本、报告与独立审批计算；进度百分比不会放行门禁。通过不触发外部发布。</Typography.Paragraph>
-    </> }]} />
 
     <Drawer forceRender title="编辑任务" size={640} className="tf-task-detail-drawer" open={drawer === 'task'} closable={!busy} keyboard={!busy} maskClosable={!busy} onClose={closeDrawer} footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canEdit || !!doneAncestor} onClick={() => taskForm.submit()}>保存任务</Button></Flex>}>{taskEditor}</Drawer>
     <Drawer

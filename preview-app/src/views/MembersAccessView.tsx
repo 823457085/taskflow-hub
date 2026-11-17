@@ -7,6 +7,7 @@ import { StatusBadge } from '../components/Primitives';
 import { roleLabel, stageLabel } from './displayLabels';
 import { clearSearchOnEscape, isSubmitShortcut } from './uiPreferences';
 import { openTaskRoute } from './workspaceNavigation';
+import { ResetPasswordDrawer } from './PasswordDrawers';
 import {
   AUDIT_CATEGORY_OPTIONS,
   describeAuditAction,
@@ -37,6 +38,7 @@ export const MembersAccessView: React.FC<{
   const [pluginForm] = Form.useForm<{ id: string; name: string; version: string; stages: Stage[] }>();
   const [open, setOpen] = useState(false);
   const [newMemberOpen, setNewMemberOpen] = useState(false);
+  const [resetTarget, setResetTarget] = useState<{ id: string; username: string } | null>(null);
   const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
   const [editingId, setEditingId] = useState('');
   const [memberSearch, setMemberSearch] = useState('');
@@ -62,7 +64,7 @@ export const MembersAccessView: React.FC<{
   const availableCandidates = candidates.filter(candidate => !members.some(member => member.id === candidate.id));
   const capabilityKey = JSON.stringify([projectId, user.id, user.role, role, permissions, canManageUsers]);
   const closeForms = () => {
-    setOpen(false); setNewMemberOpen(false); setPluginDrawerOpen(false); setEditingId('');
+    setOpen(false); setNewMemberOpen(false); setPluginDrawerOpen(false); setEditingId(''); setResetTarget(null);
     form.resetFields(); newMemberForm.resetFields(); pluginForm.resetFields();
   };
   const invalidate = () => { sequence.current += 1; pending.current = false; setBusy(false); };
@@ -146,6 +148,9 @@ export const MembersAccessView: React.FC<{
   const membershipAction = (member: ProjectMember) => canManage && member.canEditRole ? <Button type="link" disabled={busy} onClick={() => editMember(member)}>编辑角色</Button> : null;
   const closeMembership = () => { setOpen(false); setEditingId(''); form.resetFields(); };
   const closeNewMember = () => { setNewMemberOpen(false); newMemberForm.resetFields(); };
+  const resetPasswordAction = (member: User) => member.id === user.id
+    ? <Tooltip title="请在顶部“修改密码”修改自己的密码"><Typography.Text type="secondary">当前账号</Typography.Text></Tooltip>
+    : <Button type="link" disabled={busy} onClick={() => setResetTarget({ id: member.id, username: member.username })}>重置密码</Button>;
   const closePluginDrawer = () => { setPluginDrawerOpen(false); pluginForm.resetFields(); };
   const loadPlugins = useCallback(async () => {
     const seq = ++pluginSeq.current;
@@ -389,8 +394,9 @@ export const MembersAccessView: React.FC<{
     </Card>
     {canCreateUsers && <Card className="tf-members-card" title="平台成员" extra={<Button icon={<Plus size={16} />} disabled={busy} onClick={() => { newMemberForm.resetFields(); setNewMemberOpen(true); }}>创建平台成员</Button>}>
       <Typography.Paragraph type="secondary">创建后加入当前项目，项目角色决定其可访问的任务与操作。</Typography.Paragraph>
-      {screens.md ? <Table rowKey="id" dataSource={users} columns={[{ title: '成员', dataIndex: 'username' }, { title: '平台角色', dataIndex: 'role', render: value => <StatusBadge variant="neutral">{roleLabel(value)}</StatusBadge> }]} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} /> : <List className="tf-members-mobile-list" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} dataSource={users} renderItem={member => <List.Item><List.Item.Meta title={member.username} description={<StatusBadge variant="neutral">{roleLabel(member.role)}</StatusBadge>} /></List.Item>} />}
+      {screens.md ? <Table rowKey="id" dataSource={users} columns={[{ title: '成员', dataIndex: 'username' }, { title: '平台角色', dataIndex: 'role', render: value => <StatusBadge variant="neutral">{roleLabel(value)}</StatusBadge> }, { title: '操作', key: 'actions', render: (_, member) => resetPasswordAction(member) }]} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} /> : <List className="tf-members-mobile-list" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} dataSource={users} renderItem={member => <List.Item extra={resetPasswordAction(member)}><List.Item.Meta title={member.username} description={<StatusBadge variant="neutral">{roleLabel(member.role)}</StatusBadge>} /></List.Item>} />}
     </Card>}
+    <ResetPasswordDrawer target={canCreateUsers ? resetTarget : null} onClose={() => setResetTarget(null)} onUnauthorized={onUnauthorized} onForbidden={onForbidden} />
     <Card
       className="tf-members-card"
       title={
@@ -619,7 +625,7 @@ export const MembersAccessView: React.FC<{
     <Drawer title="创建平台成员" open={newMemberOpen && canCreateUsers} onClose={closeNewMember} closable={!busy} maskClosable={!busy} keyboard={!busy} size={520} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeNewMember}>取消</Button><Button type="primary" loading={busy} disabled={!canCreateUsers} onClick={() => newMemberForm.submit()}>创建成员</Button></Flex>}>
       <Form name="new-platform-member" form={newMemberForm} layout="vertical" disabled={busy || !canCreateUsers} initialValues={{ role: 'DEV' }} onFinish={createUser} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canCreateUsers) { event.preventDefault(); newMemberForm.submit(); } }}>
         <Form.Item label="成员用户名" name="username" rules={[{ required: true, message: '请输入成员用户名。' }, { min: 3, max: 64, message: '用户名需为 3–64 个字符。' }, { pattern: /^[a-zA-Z0-9_.-]+$/, message: '用户名仅支持字母、数字和_.-。' }]}><Input autoComplete="off" maxLength={64} /></Form.Item>
-        <Form.Item label="初始密码（12–256 字符）" name="password" rules={[{ required: true, message: '请输入初始密码。' }, { min: 12, max: 256, message: '密码需为 12–256 个字符。' }]}><Input.Password autoComplete="new-password" maxLength={256} /></Form.Item>
+        <Form.Item label="初始密码（8–256 字符）" name="password" rules={[{ required: true, message: '请输入初始密码。' }, { min: 8, max: 256, message: '密码需为 8–256 个字符。' }]}><Input.Password autoComplete="new-password" maxLength={256} /></Form.Item>
         <Form.Item label="平台角色" name="role" rules={[{ required: true }]}><Select options={choices(ROLES)} /></Form.Item>
       </Form>
     </Drawer>

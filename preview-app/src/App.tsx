@@ -9,7 +9,7 @@ import {
   KeyRound,
   Laptop,
   LayoutDashboard,
-  ListTodo,
+  Bot, BookOpen, ListChecks, ListTodo, NotebookText, Rocket, Sparkles,
   Menu as MenuIcon,
   MonitorPlay,
   PanelLeftClose,
@@ -27,6 +27,8 @@ const TOP_NAV_SECTIONS: { key: WorkspaceSection; shortLabel: string; icon: React
   { key: 'overview', shortLabel: '工作台', icon: <LayoutDashboard size={14} /> },
   { key: 'projects', shortLabel: '项目', icon: <FolderKanban size={14} /> },
   { key: 'tasks', shortLabel: '任务', icon: <ListTodo size={14} /> },
+  { key: 'todos', shortLabel: '待办', icon: <ListChecks size={14} /> },
+  { key: 'reports', shortLabel: '日报', icon: <NotebookText size={14} /> },
   { key: 'reviews', shortLabel: '评审', icon: <ClipboardCheck size={14} /> },
   { key: 'assets', shortLabel: '材料', icon: <FileText size={14} /> },
   { key: 'members', shortLabel: '成员', icon: <Users size={14} /> },
@@ -88,10 +90,16 @@ export const App: React.FC<{
       { key: 'overview', icon: <LayoutDashboard size={14} />, label: SECTION_LABELS.overview },
       { key: 'projects', icon: <FolderKanban size={14} />, label: SECTION_LABELS.projects },
       { key: 'tasks', icon: <ListTodo size={14} />, label: SECTION_LABELS.tasks },
+      { key: 'todos', icon: <ListChecks size={14} />, label: SECTION_LABELS.todos },
+      { key: 'reports', icon: <NotebookText size={14} />, label: SECTION_LABELS.reports },
     ] },
     { type: 'group', label: railCollapsed ? '·' : '交付协作', children: [
       { key: 'reviews', icon: <ClipboardCheck size={14} />, label: SECTION_LABELS.reviews },
       { key: 'assets', icon: <FileText size={14} />, label: SECTION_LABELS.assets },
+      { key: 'sessions', icon: <Bot size={14} />, label: SECTION_LABELS.sessions },
+      { key: 'deployments', icon: <Rocket size={14} />, label: SECTION_LABELS.deployments },
+      { key: 'knowledge', icon: <BookOpen size={14} />, label: SECTION_LABELS.knowledge },
+      { key: 'skills', icon: <Sparkles size={14} />, label: SECTION_LABELS.skills },
     ] },
     { type: 'group', label: railCollapsed ? '·' : '平台与本机', children: [
       { key: 'members', icon: <Users size={14} />, label: sectionLabel('members') },
@@ -147,7 +155,7 @@ export const App: React.FC<{
             <span className="tf-shell-brand-mark">TF</span>
             <span className="tf-shell-brand-copy">
               <strong>TASKFLOW</strong>
-              <span>{themeId.toUpperCase()} // :5186</span>
+              <span>{themeId.toUpperCase()} // {location.host}</span>
             </span>
           </button>
           {authenticated && desktop && (
@@ -217,8 +225,8 @@ export const App: React.FC<{
             <div className="tf-shell-sidebar-foot">
               {!railCollapsed ? (
                 <div className="tf-sider-signal">
-                  <span>本机桥接</span>
-                  <em>已就绪 · :5186</em>
+                  <span>服务地址</span>
+                  <em>{location.host}</em>
                 </div>
               ) : (
                 demoEntry
@@ -237,7 +245,7 @@ export const App: React.FC<{
         <div className="tf-statusbar-left">
           <span className="tf-statusbar-dot" aria-hidden="true" />
           <strong>TaskFlow AI Hub</strong>
-          <span>{themeMeta.label} · 127.0.0.1:5186</span>
+          <span>{themeMeta.label} · {location.host}</span>
         </div>
         <div className="tf-statusbar-center">{themeMeta.telemetry}</div>
         {authenticated && (

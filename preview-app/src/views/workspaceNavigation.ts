@@ -1,11 +1,12 @@
 import type { AssetKind, Stage } from './workspaceApi';
 
-export type WorkspaceSection = 'overview' | 'projects' | 'tasks' | 'reviews' | 'assets' | 'members' | 'accounts' | 'connections' | 'local';
+export type WorkspaceSection = 'overview' | 'projects' | 'tasks' | 'todos' | 'reports' | 'reviews' | 'assets' | 'sessions' | 'deployments' | 'knowledge' | 'skills' | 'members' | 'accounts' | 'connections' | 'local';
 export const SECTION_LABELS: Record<WorkspaceSection, string> = {
-  overview: '工作台', projects: '项目空间', tasks: '任务中心', reviews: '评审中心',
-  assets: '材料中心', members: '成员与权限', accounts: '账号管理', connections: '平台连接', local: '本地 AI 接入',
+  overview: '工作台', projects: '项目空间', tasks: '任务中心', todos: '团队待办', reports: '工作报告', reviews: '评审中心',
+  assets: '材料中心', sessions: 'Agent 记录', deployments: '部署记录', knowledge: '知识库', skills: '团队 Skill', members: '成员与权限', accounts: '账号管理', connections: '平台连接', local: '本地 AI 接入',
 };
-export type TaskPanel = 'overview' | 'assets' | 'reviews' | 'activity';
+export const TASK_PANELS = ['overview', 'assets', 'reviews', 'release', 'activity'] as const;
+export type TaskPanel = typeof TASK_PANELS[number];
 export interface TaskDestination { tab?: TaskPanel; jobId?: string; from?: WorkspaceSection }
 export function currentWorkspaceSection(): WorkspaceSection {
   const route = new URLSearchParams(location.hash.slice(1));

@@ -155,7 +155,7 @@ test('custom doctor verifies fixed SDK transport and config without executing pl
   const report = JSON.parse(checked.stdout);
   assert.equal(report.configurations.length, 4);
   assert.equal(report.configurations.find(item => item.client === 'custom').status, 'MATCHED');
-  assert.deepEqual(report.mcp, { status: 'CONNECTED', toolCount: 9 });
+  assert.deepEqual(report.mcp, { status: 'CONNECTED', toolCount: 11 });
   assert.equal(report.authentication.status, 'AUTHORIZED'); assert.match(report.note, /软件内确认/);
   assertPrivate(checked);
 });
@@ -301,7 +301,7 @@ test('doctor uses the real SDK stdio handshake and authenticated task_list witho
   const result = await invoke(['doctor', '--project', project], state);
   assert.equal(result.code, 0, result.stderr);
   const report = JSON.parse(result.stdout);
-  assert.equal(report.ok, true); assert.equal(report.mcp.status, 'CONNECTED'); assert.equal(report.mcp.toolCount, 9);
+  assert.equal(report.ok, true); assert.equal(report.mcp.status, 'CONNECTED'); assert.equal(report.mcp.toolCount, 11);
   assert.deepEqual(report.authentication, { status: 'AUTHORIZED', taskCount: 2, projectCount: 2 });
   assert.ok(report.software.some(item => item.name === 'codex' && item.installed));
   assert.ok(report.configurations.every(item => item.status === 'MISSING'));

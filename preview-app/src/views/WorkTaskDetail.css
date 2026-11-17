@@ -32,6 +32,9 @@
 .tf-gate-description > .ant-typography { font-size: 12px; }
 .tf-gate-description .ant-btn { padding-inline: 0; }
 .tf-gate-footnote.ant-typography { margin: 24px 0 0; font-size: 12px; }
+.tf-gate-description > .tf-gate-meta.ant-typography { font-size: 11px; }
+.tf-progress-reporter { padding: 12px; background: var(--tf-raised); border: 1px solid var(--tf-border); border-radius: var(--tf-control-radius, 8px); }
+.tf-device-collapse { background: var(--tf-surface); }
 .tf-task-tabs > .ant-tabs-nav { position: sticky; top: 44px; z-index: 15; margin: 0 0 12px; background: var(--tf-stage-bg); padding-top: 6px; }
 .tf-detail-panel, .tf-review-panel { scroll-margin-top: 108px; }
 .tf-section-divider.ant-divider { margin: 0; }
@@ -91,14 +94,9 @@
 .tf-md-table th, .tf-md-table td { border: 1px solid var(--tf-border); padding: 6px 10px; text-align: left; vertical-align: top; }
 .tf-md-table th { background: var(--tf-raised); font-weight: 600; }
 .tf-md-hr { border: 0; border-top: 1px solid var(--tf-border); margin: 4px 0; }
-.tf-traceability-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
-.tf-traceability-node { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; background: var(--tf-raised); border: 1px solid var(--tf-border); border-radius: var(--tf-control-radius, 8px); cursor: pointer; text-align: left; transition: border-color 140ms ease, background 140ms ease; min-width: 0; }
-.tf-traceability-node:hover { border-color: color-mix(in srgb, var(--tf-accent) 45%, var(--tf-border)); background: var(--tf-surface); }
-.tf-traceability-node-pass { border-color: color-mix(in srgb, var(--tf-success) 38%, var(--tf-border)); }
 .tf-readiness-checks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .tf-readiness-check { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 10px; background: var(--tf-raised); border: 1px solid var(--tf-border); border-radius: var(--tf-control-radius, 8px); min-width: 0; }
 @media (max-width: 991px) {
-  .tf-traceability-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tf-readiness-checks { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 767px) {
@@ -111,3 +109,7 @@
   .tf-gate-steps .ant-steps-item { padding-bottom: 16px; }
   .tf-task-detail .ant-table-wrapper { min-width: 0; }
 }
+.tf-card-subtitle.ant-typography { font-size: 13px; font-weight: 400; }
+.tf-table-hint.ant-typography { display: block; margin-top: 8px; font-size: 12px; }
+.tf-jira-description { max-height: 320px; font-family: inherit; font-size: 13px; }
+.tf-jira-source .ant-collapse-header { padding-inline: 0 !important; }

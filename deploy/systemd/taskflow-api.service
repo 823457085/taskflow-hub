@@ -1,0 +1,24 @@
+[Unit]
+Description=TaskFlow AI Hub API (server deployment)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taskflow
+Group=taskflow
+WorkingDirectory=/opt/taskflow/platform-server
+EnvironmentFile=/etc/taskflow/taskflow.env
+ExecStart=/usr/local/bin/node server.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/taskflow
+ReadOnlyPaths=/etc/taskflow
+
+[Install]
+WantedBy=multi-user.target
