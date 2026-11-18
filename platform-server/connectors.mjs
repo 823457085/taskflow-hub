@@ -230,7 +230,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
   const named = value => value && value.id !== undefined && typeof value.name === 'string' ? { id: String(value.id), name: value.name } : null;
   const namedArray = value => Array.isArray(value) ? value.map(named).filter(Boolean) : [];
   function issueValue(row, issue) {
-    if (typeof issue?.key !== 'string' || typeof issue?.fields?.summary !== 'string') fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回有效事项');
+    if (typeof issue?.key !== 'string' || /^LOCAL-T[0-9A-F]{32}$/i.test(issue.key) || typeof issue?.fields?.summary !== 'string') fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回有效事项');
     const fields = issue.fields; const project = fields.project && named(fields.project) && typeof fields.project.key === 'string' ? { ...named(fields.project), key: fields.project.key } : null;
     const binding = projectBinding(row);
     if (binding && (!project || project.id !== binding.remote_id)) fail(403, 'JIRA_PROJECT_SCOPE_MISMATCH', 'Jira返回的事项不属于当前绑定项目');

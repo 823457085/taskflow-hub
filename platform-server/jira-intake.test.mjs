@@ -102,6 +102,30 @@ test('link admission rejects foreign sources, invisible projects, injected field
   assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM tasks').get().n, 0);
 });
 
+test('local projects and tasks can be used while Jira is unavailable', async t => {
+  const f = await fixture(); t.after(() => f.close());
+  const member = await f.member();
+  f.state.error = 'Jira unavailable';
+  const requestsBefore = f.state.requests.length;
+  const { project } = (await f.call('/api/projects', { key: 'OFFLINE', name: 'Offline project' }, f.admin, 201)).data;
+  const { task } = (await f.call('/api/tasks', { projectId: project.id, title: 'Local task' }, f.admin, 201)).data;
+  assert.match(task.jiraKey, /^LOCAL-T[0-9A-F]{32}$/);
+  assert.equal(task.externalRef, null);
+  const { task: parent } = (await f.call('/api/tasks', { projectId: f.project.id, title: 'Offline work in bound project' }, member, 201)).data;
+  const { task: child } = (await f.call('/api/tasks', { projectId: f.project.id, parentId: parent.id, title: 'Offline subtask' }, member, 201)).data;
+  assert.equal(child.parentId, parent.id);
+  assert.match(child.jiraKey, /^LOCAL-T[0-9A-F]{32}$/);
+  assert.notEqual(child.jiraKey, parent.jiraKey);
+  await f.call('/api/tasks', { projectId: f.project.id, title: 'Wrong project', jiraKey: 'OTHER-5' }, member, 400, 'JIRA_TASK_PROJECT_MISMATCH');
+  await f.call('/api/jira/tasks/import', { reference: parent.jiraKey }, member, 400, 'INVALID_JIRA_REFERENCE');
+  assert.ok((await f.call('/api/projects', undefined, member)).data.projects.some(item => item.id === f.project.id));
+  assert.equal(f.state.requests.length, requestsBefore);
+  f.state.error = null;
+  f.state.response = [f.issue(parent.jiraKey)];
+  await f.call('/api/jira/tasks/search', { projectId: f.project.id }, member, 502, 'REMOTE_RESOURCE_INVALID');
+  assert.equal((await f.call(`/api/tasks/${parent.id}`, undefined, member)).data.task.externalRef, null);
+});
+
 test('Jira import reads again, creates verified original metadata and opens an existing task without overwriting it', async t => {
   const f = await fixture(); t.after(() => f.close()); const member = await f.member();
   await f.call('/api/jira/tasks/lookup', { reference: 'TEST-1' }, member);

@@ -4,11 +4,28 @@ export const PROJECT_ROLES = ['DEV', 'QA', 'LEAD', 'SRE', 'PM'];
 export const STAGES = ['PRD', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
 export const KINDS = ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE', 'RELEASE_PLAN'];
 export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'];
-export const REVIEW_ROLES = { ADMIN: STAGES, LEAD: ['PRD', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE'], DEV: ['TECH_SPEC', 'CODE_REVIEW'], QA: ['TEST_CASE'], SRE: ['RELEASE'], PM: ['PRD'] };
-export const APPROVAL_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD'], CODE_REVIEW: ['ADMIN', 'LEAD'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'] };
+// Advisory review stages: reviewed and reported like gate stages, but never part of the five completion gates.
+export const ADVISORY_STAGES = ['TASK_BREAKDOWN'];
+export const REVIEW_STAGES = [...STAGES, ...ADVISORY_STAGES];
+// Delivery chain order shown to users: 需求 → Jira任务与子任务 → 技术方案 → 代码·分支·仓库 → 测试用例 → 上线.
+export const CHAIN_STAGES = ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
+// Explicit review inputs per stage (asset kinds that must exist, optional context kinds, and whether child tasks are an input).
+export const STAGE_INPUTS = {
+  PRD: { required: ['PRD'], optional: [], children: false },
+  TASK_BREAKDOWN: { required: [], optional: ['PRD'], children: true },
+  TECH_SPEC: { required: ['PRD', 'TECH_SPEC'], optional: [], children: false },
+  CODE_REVIEW: { required: ['PRD', 'TECH_SPEC', 'CODE'], optional: [], children: false },
+  TEST_CASE: { required: ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE'], optional: [], children: false },
+  RELEASE: { required: KINDS, optional: [], children: false },
+};
+export const REVIEW_ROLES = { ADMIN: REVIEW_STAGES, LEAD: ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE'], DEV: ['TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW'], QA: ['TEST_CASE'], SRE: ['RELEASE'], PM: ['PRD', 'TASK_BREAKDOWN'] };
+export const APPROVAL_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TASK_BREAKDOWN: ['ADMIN', 'LEAD'], TECH_SPEC: ['ADMIN', 'LEAD'], CODE_REVIEW: ['ADMIN', 'LEAD'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'] };
+export const REPORT_VERDICTS = ['PASS', 'CONDITIONAL', 'FAIL'];
+export const CHECKLIST_RESULTS = ['PASS', 'WARN', 'FAIL', 'NA'];
 export const ASSET_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'], CODE: ['ADMIN', 'LEAD', 'DEV'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE_PLAN: ['ADMIN', 'LEAD', 'SRE'] };
 export const STAGE_AGENTS = {
   PRD: { persona: 'ai-pm', skills: ['prd-completeness-audit', 'state-machine-validator'] },
+  TASK_BREAKDOWN: { persona: 'ai-delivery-lead', skills: ['requirement-coverage-map', 'subtask-granularity-check'] },
   TECH_SPEC: { persona: 'ai-architect', skills: ['prd-techspec-align', 'golden-contract-extractor'] },
   CODE_REVIEW: { persona: 'ai-reviewer', skills: ['cross-repo-contract-diff', 'fe-security-and-perf'] },
   TEST_CASE: { persona: 'ai-qa', skills: ['ac-blackbox-coverage', 'whitebox-branch-scanner'] },

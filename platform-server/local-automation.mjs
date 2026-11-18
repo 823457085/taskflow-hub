@@ -4,7 +4,7 @@ import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, rea
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { ApiError, ASSET_ROLES, REVIEW_ROLES, STAGES, fail, sha, textField, publicGitRemote } from './common.mjs';
+import { ApiError, ASSET_ROLES, REVIEW_ROLES, REVIEW_STAGES, fail, sha, textField, publicGitRemote } from './common.mjs';
 import { projectPermissions } from './permissions.mjs';
 import { buildAiPrompt } from './ai-prompt.mjs';
 
@@ -103,10 +103,23 @@ export function extractReviewDraft(rawText, { allowPlainText = true } = {}) {
         }))
         : [];
       if (!allowPlainText && (!Array.isArray(parsed.findings) || parsed.findings.length !== findings.length)) return null;
+      const verdict = ['PASS', 'CONDITIONAL', 'FAIL'].includes(parsed.verdict) ? parsed.verdict : null;
+      const score = Number.isFinite(parsed.score) ? Math.max(0, Math.min(100, Math.round(parsed.score))) : null;
+      const checklist = Array.isArray(parsed.checklist)
+        ? parsed.checklist.slice(0, 60).filter(item => item && typeof item.item === 'string' && item.item.trim() && ['PASS', 'WARN', 'FAIL', 'NA'].includes(item.result)).map(item => ({
+          item: item.item.trim().slice(0, 300),
+          result: item.result,
+          note: typeof item.note === 'string' ? item.note.trim().slice(0, 2000) : '',
+          ...(typeof item.ref === 'string' && item.ref.trim() ? { ref: item.ref.trim().slice(0, 500) } : {}),
+        }))
+        : [];
       return {
         summary: parsed.summary.trim().slice(0, 8000),
         ...(typeof parsed.evidence === 'string' && parsed.evidence.trim() ? { evidence: parsed.evidence.trim().slice(0, 8000) } : {}),
         findings,
+        ...(verdict ? { verdict } : {}),
+        ...(score !== null ? { score } : {}),
+        ...(checklist.length ? { checklist } : {}),
       };
     } catch {
       return null;
@@ -570,7 +583,7 @@ export function createLocalAutomation({
         targetJob = hydrated;
       } else {
         const stage = body.stage;
-        if (!STAGES.includes(stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
+        if (!REVIEW_STAGES.includes(stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
         const created = workflow.createReview(currentTask, user, role, { stage, executionMode: 'LOCAL_REPORT' });
         targetJob = created.job;
       }
@@ -728,6 +741,9 @@ export function createLocalAutomation({
                 summary: draft.summary,
                 ...(draft.evidence ? { evidence: draft.evidence } : {}),
                 findings: draft.findings || [],
+                ...(draft.verdict ? { verdict: draft.verdict } : {}),
+                ...(draft.score !== undefined ? { score: draft.score } : {}),
+                ...(draft.checklist ? { checklist: draft.checklist } : {}),
               });
               autoSubmitted = true;
             }

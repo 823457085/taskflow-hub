@@ -1,3 +1,4 @@
+import { rubricPrompt } from './review-rubrics.mjs';
 export function buildAiPrompt({ mode, task, job, repoPath, constitutionFiles = [], contextFilePath, customInstruction }) {
   const header = [
     `你正在协助处理 TaskFlow 研发任务 ${task.jiraKey}（${task.title}）。`,
@@ -32,9 +33,11 @@ export function buildAiPrompt({ mode, task, job, repoPath, constitutionFiles = [
   return [
     ...header,
     `本次为阶段【${job.stage}】的本地工具评审（Job ID: ${job.id}，冻结输入哈希: ${job.inputHash}）。`,
+    ...(rubricPrompt(job.stage) ? [rubricPrompt(job.stage)] : []),
+    ...(job.stage === 'TASK_BREAKDOWN' ? ['子任务清单在 reviewSnapshot.children 中，需求文档（如有）在 reviewSnapshot.assets 中；请先从需求中提炼需求点，再逐条映射到承接的子任务 Jira 号（checklist 的 ref 字段填写子任务号）。'] : []),
     ...(policyLine ? [policyLine] : []),
     '请严格依据 context.json 中的 reviewSnapshot 冻结资产与任务需求进行专业审查，先给出简明中文分析，并在回复末尾附带如下格式的 JSON 代码块（以便平台一键填入或提交评审报告）：',
-    '```taskflow-review-draft\n{\n  "summary": "评审总体结论与核心依据",\n  "evidence": "核对的材料版本、代码位置或验证说明",\n  "findings": [\n    {\n      "severity": "WARN",\n      "title": "问题简述（无问题时 findings 留空数组 []）",\n      "detail": "详细原因与修改建议",\n      "location": "文件路径或文档章节"\n    }\n  ]\n}\n```',
+    '```taskflow-review-draft\n{\n  "verdict": "PASS | CONDITIONAL | FAIL（有 CRITICAL 问题必须为 FAIL；仅有 WARN 为 CONDITIONAL）",\n  "score": 0-100 的整数,\n  "summary": "评审总体结论与核心依据",\n  "evidence": "核对的材料版本、代码位置或验证说明",\n  "checklist": [\n    { "item": "审核清单条目", "result": "PASS | WARN | FAIL | NA", "note": "依据或差距", "ref": "对应文档章节 / 子任务号 / 文件" }\n  ],\n  "findings": [\n    {\n      "severity": "WARN",\n      "title": "问题简述（无问题时 findings 留空数组 []）",\n      "detail": "详细原因与修改建议",\n      "location": "文件路径或文档章节"\n    }\n  ]\n}\n```',
     '约束：只客观输出审查结果（CRITICAL / WARN / INFO），不要虚构未核实的执行证据，不要修改代码文件或外部系统。',
   ].join('\n\n');
 }

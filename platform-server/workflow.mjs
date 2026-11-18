@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { STAGES, KINDS, TOOLS, STAGE_AGENTS, REVIEW_ROLES, APPROVAL_ROLES, fail, sha, textField, assetRow } from './common.mjs';
+import { STAGES, REVIEW_STAGES, STAGE_INPUTS, REPORT_VERDICTS, CHECKLIST_RESULTS, KINDS, TOOLS, STAGE_AGENTS, REVIEW_ROLES, APPROVAL_ROLES, fail, sha, textField, assetRow } from './common.mjs';
+const parseChecklist = value => { if (!value) return []; try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; } };
 export function createWorkflow(db, audit, transaction) {
   const assetsFor = taskId => db.prepare('SELECT * FROM assets WHERE task_id=? ORDER BY rowid DESC').all(taskId).map(assetRow);
   const reportFor = jobId => {
     const row = db.prepare('SELECT * FROM reports WHERE job_id=?').get(jobId);
-    return row ? { id: row.id, summary: row.summary, source: row.source, tool: row.tool, evidence: row.evidence, actorId: row.actor_id, createdAt: row.created_at } : null;
+    return row ? { id: row.id, summary: row.summary, source: row.source, tool: row.tool, evidence: row.evidence, actorId: row.actor_id, createdAt: row.created_at, verdict: row.verdict || null, score: Number.isInteger(row.score) ? row.score : null, checklist: parseChecklist(row.checklist) } : null;
   };
   const decisionFor = jobId => {
     const row = db.prepare('SELECT * FROM decisions WHERE job_id=?').get(jobId);
@@ -19,10 +20,16 @@ export function createWorkflow(db, audit, transaction) {
     waiver: row.waiver_id ? { id: row.waiver_id, reason: row.waiver_reason, actorId: row.waiver_actor_id, createdAt: row.waiver_created_at } : null,
   }));
   const createMemo = () => ({ assets: new Map(), plugins: new Map(), inputs: new Map(), gate: new Map(), gates: new Map(), approver: new Map() });
+  // Child tasks as a review input. Only fields that describe the breakdown itself are hashed, so Jira status churn does not invalidate the review.
+  const childrenFor = taskId => db.prepare('SELECT id,jira_key,title,assignee_id,external_ref FROM tasks WHERE parent_id=? ORDER BY jira_key').all(taskId).map(row => {
+    const ref = row.external_ref ? JSON.parse(row.external_ref) : null;
+    return { id: row.id, jiraKey: row.jira_key, title: row.title, assigneeId: row.assignee_id || null, issueType: ref?.issueType?.name || ref?.type || null, fixVersions: (ref?.fixVersions || []).map(item => item?.name).filter(Boolean), description: typeof ref?.description === 'string' ? ref.description.slice(0, 4000) : '' };
+  });
   function inputs(task, stage, upstream, memo) {
     const cacheKey = !upstream && memo ? `${task.id}:${stage}` : '';
     if (cacheKey && memo.inputs.has(cacheKey)) return memo.inputs.get(cacheKey);
-    const kinds = KINDS.slice(0, STAGES.indexOf(stage) + 1);
+    const spec = STAGE_INPUTS[stage] || { required: KINDS.slice(0, STAGES.indexOf(stage) + 1), optional: [], children: false };
+    const kinds = [...spec.required, ...spec.optional];
     let taskAssets = memo?.assets.get(task.id);
     if (!taskAssets) {
       taskAssets = assetsFor(task.id);
@@ -31,7 +38,9 @@ export function createWorkflow(db, audit, transaction) {
     const latest = new Map();
     for (const asset of taskAssets) if (kinds.includes(asset.kind) && !latest.has(`${asset.kind}:${asset.logicalKey}`)) latest.set(`${asset.kind}:${asset.logicalKey}`, asset);
     const assets = [...latest.values()].sort((a, b) => `${a.kind}:${a.logicalKey}`.localeCompare(`${b.kind}:${b.logicalKey}`));
-    const missing = kinds.filter(kind => !assets.some(asset => asset.kind === kind));
+    const missing = spec.required.filter(kind => !assets.some(asset => asset.kind === kind));
+    const children = spec.children ? childrenFor(task.id) : null;
+    if (children && !children.length) missing.push('SUBTASKS');
     const agent = STAGE_AGENTS[stage];
     let projectPlugins = memo?.plugins.get(task.projectId);
     if (!projectPlugins) {
@@ -40,12 +49,13 @@ export function createWorkflow(db, audit, transaction) {
     }
     const plugins = projectPlugins.filter(plugin => plugin.stages.includes(stage));
     const snapshot = { task: { id: task.id, title: task.title, assigneeId: task.assigneeId, contextVersion: task.contextVersion, ...(task.externalRef ? { jira: { key: task.externalRef.key, title: task.externalRef.title, description: task.externalRef.description, project: task.externalRef.project, type: task.externalRef.type, issueType: task.externalRef.issueType, priority: task.externalRef.priority, components: task.externalRef.components, fixVersions: task.externalRef.fixVersions, labels: task.externalRef.labels, parentKey: task.externalRef.parentKey, requirementsHash: task.externalRef.requirementsHash } } : {}) }, assets, persona: agent.persona, skills: agent.skills.map(id => ({ id, version: '1.0.0' })), plugins, missingKinds: missing };
+    if (children) snapshot.children = children;
     if (stage === 'RELEASE') {
       const previous = upstream || STAGES.slice(0, 4).map(item => gate(task, item, undefined, memo));
       snapshot.upstreamApprovals = previous.map(item => ({ stage: item.stage, status: item.status, jobId: item.jobId || null, decisionId: item.jobId ? decisionFor(item.jobId)?.id || null : null }));
     }
     const policyHash = sha(JSON.stringify({ persona: snapshot.persona, skills: snapshot.skills, plugins: snapshot.plugins }));
-    const inputHash = sha(JSON.stringify({ task: snapshot.task, assets: assets.map(({ id, kind, logicalKey, revision, sha256 }) => ({ id, kind, logicalKey, revision, sha256 })), ...(snapshot.upstreamApprovals ? { upstreamApprovals: snapshot.upstreamApprovals } : {}) }));
+    const inputHash = sha(JSON.stringify({ task: snapshot.task, assets: assets.map(({ id, kind, logicalKey, revision, sha256 }) => ({ id, kind, logicalKey, revision, sha256 })), ...(snapshot.upstreamApprovals ? { upstreamApprovals: snapshot.upstreamApprovals } : {}), ...(children ? { children } : {}) }));
     const result = { assets, missing, inputHash, snapshot: { ...snapshot, policyHash, inputHash } };
     if (cacheKey) memo.inputs.set(cacheKey, result);
     return result;
@@ -108,7 +118,7 @@ export function createWorkflow(db, audit, transaction) {
   };
   const roleCanReview = (role, stage) => REVIEW_ROLES[role]?.includes(stage);
   function createReview(task, user, role, body) {
-    if (!STAGES.includes(body.stage)) fail(400, 'INVALID_STAGE', '评审阶段不受支持');
+    if (!REVIEW_STAGES.includes(body.stage)) fail(400, 'INVALID_STAGE', '评审阶段不受支持');
     if (!roleCanReview(role, body.stage)) fail(403, 'FORBIDDEN', '当前角色无权发起此阶段评审');
     const mode = body.executionMode || 'CLOUD_AI';
     if (!['CLOUD_AI', 'HUMAN_REVIEW', 'LOCAL_REPORT'].includes(mode)) fail(400, 'INVALID_MODE', '执行模式不受支持');
@@ -139,8 +149,17 @@ export function createWorkflow(db, audit, transaction) {
       if (!item || !['CRITICAL', 'WARN', 'INFO'].includes(item.severity)) fail(400, 'INVALID_FINDINGS', '问题严重程度不受支持');
       return { severity: item.severity, title: textField(item.title, 'title', { max: 200, preserve: true }), detail: textField(item.detail, 'detail', { max: 4000, preserve: true }), location: item.location === undefined ? null : textField(item.location, 'location', { min: 0, max: 500, preserve: true }) };
     });
+    const verdict = body.verdict === undefined || body.verdict === null ? null : body.verdict;
+    if (verdict !== null && !REPORT_VERDICTS.includes(verdict)) fail(400, 'INVALID_VERDICT', '评审结论仅支持 PASS / CONDITIONAL / FAIL');
+    const score = body.score === undefined || body.score === null ? null : body.score;
+    if (score !== null && (!Number.isInteger(score) || score < 0 || score > 100)) fail(400, 'INVALID_SCORE', '评分必须是0至100的整数');
+    if (body.checklist !== undefined && body.checklist !== null && (!Array.isArray(body.checklist) || body.checklist.length > 60)) fail(400, 'INVALID_CHECKLIST', 'checklist必须为不超过60项的数组');
+    const checklist = (body.checklist || []).map(item => {
+      if (!item || !CHECKLIST_RESULTS.includes(item.result)) fail(400, 'INVALID_CHECKLIST', '检查项结果仅支持 PASS / WARN / FAIL / NA');
+      return { item: textField(item.item, 'checklist.item', { max: 300, preserve: true }), result: item.result, note: item.note === undefined || item.note === null ? '' : textField(item.note, 'checklist.note', { min: 0, max: 2000, preserve: true }), ...(item.ref ? { ref: textField(item.ref, 'checklist.ref', { max: 500, preserve: true }) } : {}) };
+    });
     transaction(() => {
-      db.prepare('INSERT INTO reports VALUES (?,?,?,?,?,?,?,?)').run(randomUUID(), row.id, summary, body.source, body.source === 'LOCAL_TOOL' ? body.tool : null, evidence, user.id, new Date().toISOString());
+      db.prepare('INSERT INTO reports (id,job_id,summary,source,tool,evidence,actor_id,created_at,verdict,score,checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), row.id, summary, body.source, body.source === 'LOCAL_TOOL' ? body.tool : null, evidence, user.id, new Date().toISOString(), verdict, score, checklist.length ? JSON.stringify(checklist) : null);
       for (const finding of findings) db.prepare('INSERT INTO findings VALUES (?,?,?,?,?,?)').run(randomUUID(), row.id, finding.severity, finding.title, finding.detail, finding.location);
       db.prepare("UPDATE jobs SET status='REPORT_SUBMITTED' WHERE id=?").run(row.id);
       audit(user.id, 'REVIEW_REPORT', row.id, task.projectId);
@@ -185,5 +204,5 @@ export function createWorkflow(db, audit, transaction) {
     transaction(() => { db.prepare('INSERT INTO waivers VALUES (?,?,?,?,?)').run(randomUUID(), findingId, reason, user.id, new Date().toISOString()); audit(user.id, 'FINDING_WAIVER', findingId, task.projectId); });
     return jobRow(row, task);
   }
-  return { assetsFor, inputs, gates, jobRow, createMemo, createReview, submitReport, decide, waive };
+  return { assetsFor, childrenFor, inputs, gate, gates, jobRow, createMemo, createReview, submitReport, decide, waive };
 }

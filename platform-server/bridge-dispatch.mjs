@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { REVIEW_ROLES, STAGES, fail, textField } from './common.mjs';
+import { REVIEW_ROLES, REVIEW_STAGES, fail, textField } from './common.mjs';
 import { projectPermissions } from './permissions.mjs';
 import { buildAiPrompt } from './ai-prompt.mjs';
 import { extractReviewDraft } from './local-automation.mjs';
@@ -160,7 +160,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
         if (!REVIEW_ROLES[role]?.includes(hydrated.stage)) fail(403, 'FORBIDDEN', '当前角色无权执行该阶段评审');
         targetJob = hydrated;
       } else {
-        if (!STAGES.includes(body.stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
+        if (!REVIEW_STAGES.includes(body.stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
         targetJob = workflow.createReview(currentTask, user, role, { stage: body.stage, executionMode: 'LOCAL_REPORT' }).job;
       }
     }

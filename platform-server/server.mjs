@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStorage } from './storage.mjs';
 import { createWorkflow } from './workflow.mjs';
+import { createDeliveryChain, chainReportMarkdown } from './delivery-chain.mjs';
 import { createConnectors } from './connectors.mjs';
 import { createLocalDevices } from './local-devices.mjs';
 import { createLocalAutomation } from './local-automation.mjs';
@@ -104,6 +105,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   const teamSkills = createTeamSkills({ db, transaction, audit, projectRole });
   const localDevices = createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now: deviceClock, hostBridgeStateDir, hostBridgeApiUrl, clientIp, sessionMs: deviceSessionMs });
   const workspaceFor = (userId, projectId) => db.prepare('SELECT project_id AS projectId,repo_path AS repoPath,default_target AS defaultTarget,updated_at AS updatedAt FROM project_workspaces WHERE user_id=? AND project_id=?').get(userId, projectId) || null;
+  const deliveryChain = createDeliveryChain({ db, workflow, workspaceFor });
   const workbenchBridge = serverMode ? null : createWorkbenchBridge(workbenchUrl, workbenchTaskUrl);
   const localAutomation = serverMode ? null : createLocalAutomation({
     db, transaction, audit, projectRole, visibleProjects, getTask, taskRole, assertWritable, assertAncestorsOpen,
@@ -341,6 +343,15 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           return send(200, membersFor(user, projectId));
         }
       }
+      if (method === 'GET' && path === '/api/chain-statuses') {
+        const projectId = url.searchParams.get('projectId');
+        if (!projectId) fail(400, 'PROJECT_REQUIRED', '请指定项目');
+        projectRole(user, projectId);
+        const memo = workflow.createMemo();
+        const statuses = {};
+        for (const row of db.prepare('SELECT * FROM tasks WHERE project_id=?').all(projectId)) statuses[row.id] = deliveryChain.statusesFor(taskRow(row), memo);
+        return send(200, { statuses });
+      }
       if (path === '/api/tasks') {
         if (method === 'GET') {
           const projectId = url.searchParams.get('projectId');
@@ -353,23 +364,31 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         }
         if (method === 'POST') {
           const body = requestBody; const projectId = body.projectId || 'default'; const role = projectRole(user, projectId);
-          const jiraKey = textField(body.jiraKey, 'jiraKey', { max: 48 }).toUpperCase(); const title = textField(body.title, 'title', { max: 200 });
-          if (!/^[A-Z][A-Z0-9]*-[1-9]\d*$/.test(jiraKey)) fail(400, 'INVALID_JIRA_KEY', 'jiraKey格式不正确');
-          const binding = db.prepare('SELECT remote_key FROM jira_project_bindings WHERE project_id=?').get(projectId);
-          if (binding && !jiraKey.startsWith(`${binding.remote_key}-`)) fail(400, 'JIRA_TASK_PROJECT_MISMATCH', `任务号必须属于当前Jira项目 ${binding.remote_key}`);
+          const title = textField(body.title, 'title', { max: 200 });
+          const id = randomUUID();
+          const jiraKey = body.jiraKey === undefined
+            ? `LOCAL-T${id.replaceAll('-', '').toUpperCase()}`
+            : textField(body.jiraKey, 'jiraKey', { max: 48 }).toUpperCase();
+          if (body.jiraKey !== undefined) {
+            if (!/^[A-Z][A-Z0-9]*-[1-9]\d*$/.test(jiraKey)) fail(400, 'INVALID_JIRA_KEY', 'jiraKey格式不正确');
+            const binding = db.prepare('SELECT remote_key FROM jira_project_bindings WHERE project_id=?').get(projectId);
+            if (binding && !jiraKey.startsWith(`${binding.remote_key}-`)) fail(400, 'JIRA_TASK_PROJECT_MISMATCH', `任务号必须属于当前Jira项目 ${binding.remote_key}`);
+          }
           const type = body.type || 'TASK'; if (!['STORY', 'TASK', 'BUG', 'RELEASE'].includes(type)) fail(400, 'INVALID_TASK_TYPE', '任务类型不受支持');
           const parentId = body.parentId || null; if (parentId) { const parent = getTask(parentId, user); if (parent.projectId !== projectId) fail(400, 'INVALID_PARENT', '父任务必须属于同一项目'); assertWritable(parent, user); }
           const assigneeId = body.assigneeId === undefined ? user.id : body.assigneeId;
           if (assigneeId !== user.id && !projectPermissions(user, role).assignTasks) fail(403, 'FORBIDDEN', '当前角色无权分配任务'); assertMember(projectId, assigneeId);
-          const id = randomUUID(); const now = new Date().toISOString();
+          const now = new Date().toISOString();
           transaction(() => { if (db.prepare('SELECT id FROM tasks WHERE jira_key=?').get(jiraKey)) fail(409, 'TASK_EXISTS', '该任务已登记'); db.prepare('INSERT INTO tasks (id,jira_key,title,owner_id,created_at,updated_at,project_id,parent_id,task_type,assignee_id) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, jiraKey, title, user.id, now, now, projectId, parentId, type, assigneeId); bumpParentContexts(db, [parentId]); audit(user.id, 'TASK_CREATE', id, projectId); });
           return send(201, { task: getTask(id, user) });
         }
       }
-      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle))?$/);
+      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle|chain|chain-report))?$/);
       if (taskRoute) {
         const task = getTask(taskRoute[1], user); const role = taskRole(task, user); const action = taskRoute[2];
         if (method === 'GET' && !action) return send(200, { task });
+        if (method === 'GET' && action === 'chain') return send(200, { chain: deliveryChain.chainFor(task, user) });
+        if (method === 'GET' && action === 'chain-report') return send(200, { markdown: chainReportMarkdown(deliveryChain.chainFor(task, user)) });
         if (method === 'GET' && action === 'bundle') {
           const memo = workflow.createMemo();
           const assets = workflow.assetsFor(task.id);
