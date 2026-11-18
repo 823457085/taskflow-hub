@@ -121,7 +121,7 @@ test('custom source passes the same official MCP schemas and fixed API routes as
   const mcp = await connect(t, await state(t, { url, token }));
   const listed = await mcp.client.listTools();
   assert.deepEqual(listed.tools.map(item => item.name), names);
-  for (const name of ['progress_report', 'heartbeat']) assert.deepEqual(listed.tools.find(item => item.name === name).inputSchema.properties.tool.enum, ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom']);
+  for (const name of ['progress_report', 'heartbeat']) assert.deepEqual(listed.tools.find(item => item.name === name).inputSchema.properties.tool.enum, ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom']);
   dataOf(await mcp.call('progress_report', { taskId: 'task-1', tool: 'custom', progress: 30, summary: '自定义客户端自报进度' }));
   dataOf(await mcp.call('heartbeat', { taskId: 'task-1', tool: 'custom', status: 'WORKING' }));
   dataOf(await mcp.call('report_submit', { jobId: 'job-1', report: { ...localReport, tool: 'custom' } }));

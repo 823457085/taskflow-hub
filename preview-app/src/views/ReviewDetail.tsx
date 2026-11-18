@@ -18,6 +18,7 @@ import {
 import { isSubmitShortcut, readStoredChoice, writeStoredString } from './uiPreferences';
 import { buildBatchFindingsFixPrompt, buildSingleFindingFixPrompt, sortActionableFindings } from './findingFixPrompt';
 import { buildSarifLogFromReview, parseSarifFindingsToDraft } from './sarifExport';
+import { ChecklistTable, draftExtras, VerdictTag } from './ChainReportBits';
 import './WorkTaskDetail.css';
 
 const AI_ENGINE_PREF_KEY = 'taskflow.ai.engine';
@@ -78,6 +79,7 @@ export const ReviewDetail: React.FC<{
   const [job, setJob] = useState<ReviewJob | null>(null);
   const [busy, setBusy] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
+  const [appliedDraftExtras, setAppliedDraftExtras] = useState<ReturnType<typeof draftExtras>>({});
   const [engine, setEngine] = useState<LocalAiEngineId>(() => readStoredChoice(AI_ENGINE_PREF_KEY, ENGINE_IDS, 'codex'));
   const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
   const [jobRuns, setJobRuns] = useState<LocalAiRun[]>([]);
@@ -97,12 +99,13 @@ export const ReviewDetail: React.FC<{
 
   const clearSensitiveState = () => {
     accessLost.current = true; refreshSequence.current += 1;
-    setAccessDenied(true); setJob(null); setJobRuns([]); setBusy(false);
+    setAccessDenied(true); setJob(null); setJobRuns([]); setBusy(false); setAppliedDraftExtras({});
     reportForm.resetFields(); decisionForm.resetFields();
   };
 
   const applyDraftToForm = (run: LocalAiRun) => {
     if (!run.draft) return;
+    setAppliedDraftExtras(draftExtras(run.draft));
     reportForm.setFieldsValue({
       tool: run.tool || 'codex-cli',
       summary: run.draft.summary,
@@ -303,9 +306,10 @@ export const ReviewDetail: React.FC<{
         ...(job.executionMode === 'LOCAL_REPORT' ? { tool: values.tool } : {}),
         ...(values.evidence?.trim() ? { evidence: values.evidence } : {}),
         findings: (values.findings || []).map(finding => ({ ...finding, location: finding.location?.trim() ? finding.location : undefined })),
+        ...appliedDraftExtras,
       });
       if (accessLost.current || !mounted.current) return;
-      setJob(result.job); reportForm.resetFields(); void message.success('报告已提交并保留原始内容，等待审批。');
+      setJob(result.job); setAppliedDraftExtras({}); reportForm.resetFields(); void message.success('报告已提交并保留原始内容，等待审批。');
       await update();
     }, true);
   };
@@ -330,7 +334,7 @@ export const ReviewDetail: React.FC<{
 
   const engineOptions = (capabilities?.engines || [
     { id: 'codex' as const, label: 'Codex', tool: 'codex-cli', available: true },
-    { id: 'antigravity' as const, label: 'Gemini / Antigravity', tool: 'custom', available: true },
+    { id: 'antigravity' as const, label: 'Gemini / Antigravity', tool: 'antigravity', available: true },
     { id: 'cursor' as const, label: 'Cursor Agent', tool: 'cursor', available: true },
     { id: 'claude' as const, label: 'Claude Code', tool: 'claude-code', available: true },
   ]).map(item => ({
@@ -417,6 +421,8 @@ export const ReviewDetail: React.FC<{
           <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>{memberName(members, job.report.actorId)} · {reportSourceLabel(job.report.source)}{job.report.tool ? ' · ' + toolLabel(job.report.tool) : ''} · {timeText(job.report.createdAt)}</Typography.Paragraph>
           <Typography.Paragraph className="tf-preserve">{job.report.summary}</Typography.Paragraph>
           {job.report.evidence && <pre className="tf-code-panel">{job.report.evidence}</pre>}
+          {(job.report.verdict || typeof job.report.score === 'number') && <div style={{ marginBottom: 8 }}><VerdictTag verdict={job.report.verdict} score={job.report.score} /></div>}
+          {!!job.report.checklist?.length && <ChecklistTable items={job.report.checklist} />}
         </div>
         {job.findings.length > 0 && (() => {
           const unwaivedCriticalCount = job.findings.filter(item => item.severity === 'CRITICAL' && !item.waiver).length;
@@ -607,6 +613,15 @@ export const ReviewDetail: React.FC<{
               ))}
             </Flex>
             <Form.Item label="验证证据或执行说明（可选）" name="evidence"><Input.TextArea rows={3} maxLength={8000} className="tf-code-input" /></Form.Item>
+            {(appliedDraftExtras.verdict || typeof appliedDraftExtras.score === 'number' || !!appliedDraftExtras.checklist?.length) && (
+              <div style={{ marginBottom: 14 }}>
+                <Space size={8} wrap style={{ marginBottom: 6 }}>
+                  <VerdictTag verdict={appliedDraftExtras.verdict} score={appliedDraftExtras.score} />
+                  {!!appliedDraftExtras.checklist?.length && <Tag>含 AI 检查清单 {appliedDraftExtras.checklist.length} 项</Tag>}
+                </Space>
+                {!!appliedDraftExtras.checklist?.length && <ChecklistTable items={appliedDraftExtras.checklist} />}
+              </div>
+            )}
             <input
               ref={sarifFileInputRef}
               type="file"

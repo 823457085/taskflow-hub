@@ -73,10 +73,11 @@ test('HTTP authentication, role boundaries, tracked work and persistence', async
     assert.equal(context.body.task.progress, 50); assert.equal(context.body.integrationStatus, 'UNCONFIGURED'); assert.deepEqual(context.body.assets, []);
     assert.equal((await call('/api/reviews', 'POST', { taskId: task.id, stage: 'RELEASE' }, dev.token)).status, 403);
     assert.equal((await call('/api/reviews', 'POST', { taskId: task.id, stage: 'TEST_CASE' }, dev.token)).status, 403);
-    const review = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW' }, dev.token);
+    assert.equal((await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW' }, dev.token)).status, 409);
+    const review = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW', executionMode: 'CLOUD_AI' }, dev.token);
     assert.equal(review.status, 201); assert.equal(review.body.job.status, 'AWAITING_CONFIGURATION');
     assert.equal(review.body.job.persona, 'ai-reviewer'); assert.equal(review.body.job.executor, 'UNCONFIGURED'); assert.ok(review.body.job.skills.includes('cross-repo-contract-diff'));
-    const retry = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW' }, dev.token);
+    const retry = await call('/api/reviews', 'POST', { taskId: task.id, stage: 'CODE_REVIEW', executionMode: 'CLOUD_AI' }, dev.token);
     assert.equal(retry.status, 200); assert.equal(retry.body.job.id, review.body.job.id);
     assert.equal((await call('/api/reviews', 'POST', { taskId: 'missing', stage: 'TEST_CASE' }, qa.token)).status, 404);
     const manifest = { id: 'contract-audit', name: 'Contract audit', version: '1.0.0', stages: ['CODE_REVIEW'], command: 'must-not-be-stored' };

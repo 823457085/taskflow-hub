@@ -56,7 +56,7 @@ test('report validation preserves submitted evidence and rejects forged cloud ex
   assert.throws(() => validateReport({ ...report, findings: [{ severity: 'PASS', title: 'x', detail: 'y' }] }), /findings/);
   assert.throws(() => validateReport({ ...report, summary: ' '.repeat(20) }), /summary/);
   assert.throws(() => validateReport({ ...report, findings: Array(51).fill(report.findings[0]) }), /findings/);
-  for (const tool of ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom']) {
+  for (const tool of ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom']) {
     assert.equal(validateReport({ ...report, tool }).tool, tool);
     assert.equal(parseArgs(['sync', '--task', 'task-1', '--tool', tool, '--progress', '20', '--summary', '明确上报']).options.tool, tool);
     assert.equal(parseArgs(['heartbeat', '--task', 'task-1', '--tool', tool, '--status', 'WORKING']).options.tool, tool);

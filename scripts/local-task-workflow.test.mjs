@@ -63,8 +63,10 @@ test('bound project repository paths and companion sync commands validate input 
   for (const bad of ['relative/path', '/Users/demo/../escape', '/Users/demo/.git/hooks', '/Users/demo/line\nbreak']) {
     assert.throws(() => buildLocalTaskPrompt(draft({ mode: 'develop', repoPath: bad })), /目录/);
   }
-  assert.equal(buildCompanionSyncCommand({ jiraKey: 'SAMPLE-562', target: 'antigravity', repoPath: '/Users/demo/sample' }), "taskflow-hub start --task 'SAMPLE-562' --tool custom --repo '/Users/demo/sample'");
-  assert.equal(buildCompanionSyncCommand({ jiraKey: 'SAMPLE-562', target: 'codex' }), "taskflow-hub start --task 'SAMPLE-562' --tool codex-cli");
+  assert.equal(buildCompanionSyncCommand({ task, target: 'antigravity', repoPath: '/Users/demo/sample' }), "taskflow-hub start --task 'SAMPLE-562' --tool antigravity --repo '/Users/demo/sample'");
+  assert.equal(buildCompanionSyncCommand({ task, target: 'codex' }), "taskflow-hub start --task 'SAMPLE-562' --tool codex-cli");
+  const localTask = { id: 'aa11bb22-cc33-4dd4-8ee5-001122334455', jiraKey: 'LOCAL-TAA11BB22CC334DD48EE5001122334455' };
+  assert.equal(buildCompanionSyncCommand({ task: localTask, target: 'codex' }), "taskflow-hub start --task 'aa11bb22-cc33-4dd4-8ee5-001122334455' --tool codex-cli");
 });
 
 test('real platform review responses remain eligible only while their exact input is current and no report is submitted', async t => {

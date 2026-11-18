@@ -100,7 +100,7 @@ test('even ADMIN device tokens are limited to consented projects and cannot mana
     const other = (await f.expect('/api/projects', { method: 'POST', bearer: admin.token, body: { key: 'OTHER', name: 'Unconsented project' } }, 201)).data.project;
     const ownTask = (await f.expect('/api/tasks', { method: 'POST', bearer: admin.token, body: { jiraKey: 'DEV-1', title: 'Allowed local work' } }, 201)).data.task;
     const hiddenTask = (await f.expect('/api/tasks', { method: 'POST', bearer: admin.token, body: { projectId: other.id, jiraKey: 'OTHER-1', title: 'Hidden work' } }, 201)).data.task;
-    const hiddenJob = (await f.expect('/api/reviews', { method: 'POST', bearer: admin.token, body: { taskId: hiddenTask.id, stage: 'CODE_REVIEW' } }, 201)).data.job;
+    const hiddenJob = (await f.expect('/api/reviews', { method: 'POST', bearer: admin.token, body: { taskId: hiddenTask.id, stage: 'CODE_REVIEW', executionMode: 'CLOUD_AI' } }, 201)).data.job;
     const pair = await f.begin(); await f.decision(pair, admin); const device = (await f.poll(pair)).data;
     assert.equal(device.user.role, 'ADMIN');
     const me = await f.expect('/api/me', { bearer: device.token }); assert.equal(me.data.authorization.kind, 'LOCAL_DEVICE');

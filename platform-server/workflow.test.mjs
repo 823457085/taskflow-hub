@@ -37,7 +37,7 @@ test('project isolation, assignees, claims, concurrent versions and scoped audit
     const outsider = (await f.expect('/api/users', 'POST', { username: 'outsider', password, role: 'LEAD', projectId: project.id }, admin.token, 201)).user;
     const outsiderToken = await f.login('outsider');
     const hidden = (await f.expect('/api/tasks', 'POST', { projectId: project.id, jiraKey: 'SEC-1', title: 'Private work' }, outsiderToken, 201)).task;
-    const hiddenJob = (await f.expect('/api/reviews', 'POST', { taskId: hidden.id, stage: 'CODE_REVIEW' }, outsiderToken, 201)).job;
+    const hiddenJob = (await f.expect('/api/reviews', 'POST', { taskId: hidden.id, stage: 'CODE_REVIEW', executionMode: 'CLOUD_AI' }, outsiderToken, 201)).job;
     for (const suffix of ['', '/context', '/assets', '/gates']) await f.expect(`/api/tasks/${hidden.id}${suffix}`, 'GET', undefined, dev.token, 403);
     for (const suffix of ['/progress', '/claim', '/heartbeat']) await f.expect(`/api/tasks/${hidden.id}${suffix}`, 'POST', {}, dev.token, 403);
     await f.expect(`/api/jobs/${hiddenJob.id}`, 'GET', undefined, dev.token, 403);
@@ -436,6 +436,7 @@ test('workflow createMemo deduplicates assets, plugins, gates and approver SQL q
   }
 });
 
+
 test('GET /api/tasks/:id/bundle returns exact single-roundtrip parity with individual endpoints and enforces project isolation', async () => {
   const f = await fixture();
   try {
@@ -477,6 +478,7 @@ test('GET /api/tasks/:id/bundle returns exact single-roundtrip parity with indiv
     await f.app.close();
   }
 });
+
 
 test('GET /api/overview-summary computes DORA flowTelemetry (Lead Time, Review Turnaround, First-Time Pass Rate, 7d Throughput) with strict project isolation', async () => {
   const f = await fixture();
@@ -540,4 +542,24 @@ test('GET /api/overview-summary computes DORA flowTelemetry (Lead Time, Review T
   } finally {
     await f.app.close();
   }
+});
+
+test('reviews default to LOCAL_REPORT and explicit STAGE_INPUTS governs TASK_BREAKDOWN independently of five gates', async () => {
+  const f = await fixture();
+  try {
+    const { ADMIN: admin, DEV: dev, LEAD: lead } = await accounts(f);
+    const parent = (await f.expect('/api/tasks', 'POST', { jiraKey: 'EX-1', title: 'Requirement carrier', assigneeId: dev.id }, admin.token, 201)).task;
+    await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TASK_BREAKDOWN' }, dev.token, 409);
+    const child = (await f.expect('/api/tasks', 'POST', { jiraKey: 'EX-2', title: 'Child task', parentId: parent.id }, admin.token, 201)).task;
+    const breakdownJob = (await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TASK_BREAKDOWN' }, dev.token, 201)).job;
+    assert.equal(breakdownJob.executionMode, 'LOCAL_REPORT');
+    assert.equal(breakdownJob.status, 'AWAITING_REPORT');
+    assert.deepEqual(breakdownJob.snapshot.children.map(item => item.jiraKey), ['EX-2']);
+    await f.expect(`/api/jobs/${breakdownJob.id}/report`, 'POST', { source: 'LOCAL_TOOL', tool: 'antigravity', summary: 'Breakdown checked', verdict: 'PASS', score: 92, findings: [] }, dev.token, 201);
+    await f.expect(`/api/jobs/${breakdownJob.id}/decision`, 'POST', { decision: 'APPROVE', reason: 'Looks good' }, lead.token, 201);
+    const gates = await f.expect(`/api/tasks/${parent.id}/gates`, 'GET', undefined, admin.token);
+    assert.equal(gates.gates.length, 5);
+    assert.equal(gates.overall, 'BLOCKED');
+    assert.equal(child.parentId, parent.id);
+  } finally { await f.app.close(); }
 });

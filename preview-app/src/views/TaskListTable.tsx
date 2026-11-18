@@ -1,12 +1,15 @@
 import React from 'react';
-import { App as AntApp, Button, Flex, Grid, Select, Space, Table, Tooltip, Typography } from 'antd';
+import { App as AntApp, Button, Flex, Grid, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { Copy, Trash2, UserCheck } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import { memberName, ProjectMember, TaskStatus, timeText, WorkTask } from './workspaceApi';
+import type { ChainStatusMap } from './workspaceApi';
+import { ChainStatusDots } from './TaskChainPanel';
 import { TASK_STATUS_OPTIONS, taskStatusLabel, taskTypeLabel } from './displayLabels';
 import { isTaskFrozen } from './taskAvailability';
 import { formatBatchTasksMarkdown } from './taskContextPack';
+import { buildTaskTree, type TreeTaskRow } from './taskTree';
 
 const { Text } = Typography;
 const PAGE_SIZE = 10;
@@ -47,25 +50,30 @@ export const TaskListTable: React.FC<{
   onBatchClaim: (tasks: WorkTask[]) => void;
   onBatchStatus: (tasks: WorkTask[], status: TaskStatus) => void;
   onBatchAssign: (tasks: WorkTask[], assigneeId: string) => void;
+  chainStatuses?: Record<string, ChainStatusMap>;
+  groupByParent?: boolean;
 }> = props => {
-  const { tasks, projectTasks, allTasks, members, userId, canAssign, isProjectMember, busy, updatingTaskId, page, onPageChange, selectedIds, onSelectionChange, onOpenTask } = props;
+  const { tasks, projectTasks, allTasks, members, userId, canAssign, isProjectMember, busy, updatingTaskId, page, onPageChange, selectedIds, onSelectionChange, onOpenTask, groupByParent = false } = props;
   const { message } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
   const assigneeOptions = [{ value: '', label: '未指派' }, ...members.map(member => ({ value: member.id, label: member.username }))];
   const editableStatusOptions = TASK_STATUS_OPTIONS.filter(opt => opt.value !== 'DONE');
+  const dataSource: TreeTaskRow[] = groupByParent ? buildTaskTree(tasks) : tasks;
 
-  const columns: TableColumnsType<WorkTask> = [
-    { title: '任务', key: 'task', width: screens.md ? 430 : undefined, render: (_, task) => <div className="tf-task-cell">
+  const columns: TableColumnsType<TreeTaskRow> = [
+    { title: '任务', key: 'task', width: screens.md ? 350 : undefined, render: (_, task) => <div className="tf-task-cell">
       <Space wrap size={8}>
         <Text className="tf-task-key">{task.jiraKey}</Text>
         <Text type="secondary">{task.externalRef ? task.externalRef.type : taskTypeLabel(task.type)}</Text>
-        {task.parentId && <Text type="secondary">父任务 {projectTasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Text>}
+        {!!task.subtasks?.length && <Tag style={{ marginInlineEnd: 0 }}>{task.subtasks.length} 个子任务</Tag>}
+        {task.parentId && !groupByParent && <Text type="secondary">父任务 {projectTasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Text>}
       </Space>
       <div className="tf-mobile-task-status"><Space wrap size={8}>{task.externalRef && <><Text type="secondary">Jira</Text><StatusBadge variant="blue">{task.externalRef.status}</StatusBadge></>}<Text type="secondary">本地</Text><StatusBadge variant={localStatusVariant(task.status)}>{taskStatusLabel(task.status)}</StatusBadge></Space></div>
       <Button type="link" className="tf-task-title" disabled={busy} onClick={() => onOpenTask(task.id)}>{task.title}</Button>
       <JiraMeta task={task} />
     </div> },
     { title: 'Jira 状态', key: 'jiraStatus', width: 120, responsive: ['md'], render: (_, task) => task.externalRef ? <StatusBadge variant="blue">{task.externalRef.status}</StatusBadge> : <Text type="secondary">—</Text> },
+    { title: <Tooltip title="需求 → 拆分 → 方案 → 代码 → 测试 → 上线，每个环节的审核状态">交付链路</Tooltip>, key: 'chain', width: 256, responsive: ['lg'], render: (_, task) => <ChainStatusDots statuses={props.chainStatuses?.[task.id]} /> },
     { title: '本地状态', key: 'status', width: 140, responsive: ['md'], render: (_, task) => {
       const editable = (canAssign || task.assigneeId === userId) && task.status !== 'DONE' && !isTaskFrozen(task, allTasks);
       return <Flex vertical gap={6}>
@@ -161,16 +169,17 @@ export const TaskListTable: React.FC<{
         </Space>
       </div>
     )}
-    <Table<WorkTask>
+    <Table<TreeTaskRow>
       className="tf-task-table"
       rowKey="id"
       rowSelection={{ selectedRowKeys: selectedIds, onChange: keys => onSelectionChange(keys.map(String)) }}
       columns={columns}
-      dataSource={tasks}
+      dataSource={dataSource}
+      expandable={groupByParent ? { childrenColumnName: 'subtasks', defaultExpandAllRows: true } : undefined}
       loading={busy}
       pagination={{ current: page, pageSize: PAGE_SIZE, showSizeChanger: false, hideOnSinglePage: true, size: 'small', onChange: onPageChange }}
       tableLayout="fixed"
-      scroll={screens.md ? { x: 1040 } : undefined}
+      scroll={screens.md ? { x: 1080 } : undefined}
       locale={{ emptyText: projectTasks.length ? '没有符合条件的任务。' : '当前项目尚无任务，可粘贴 Jira 链接或选择已有事项接入。' }}
       onRow={record => ({
         onClick: event => {

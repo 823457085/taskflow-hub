@@ -5,6 +5,7 @@ import type { InputRef } from 'antd';
 import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import { api, ApiError, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, User, WorkTask } from './workspaceApi';
+import type { ChainStatusMap } from './workspaceApi';
 import { ProjectDirectory, WorkspaceOverview } from './WorkspaceOverview';
 import { clearTaskRoute, navigateWorkspace, openTaskRoute, SECTION_LABELS, taskReturnFilters, WorkspaceSection } from './workspaceNavigation';
 import { ChangePasswordDrawer } from './PasswordDrawers';
@@ -49,14 +50,17 @@ const { Text, Title, Paragraph } = Typography;
 const FILTERS_OPEN_KEY = 'taskflow.tasks.filtersOpen';
 const TASK_SCOPE_KEY = 'taskflow.tasks.quickScope';
 const TASK_VIEW_MODE_KEY = 'taskflow.tasks.viewMode';
+const TASK_GROUP_MODE_KEY = 'taskflow.tasks.groupMode';
 const QUICK_SCOPES = ['all', 'mine', 'unclaimed', 'active', 'done'] as const;
 type QuickTaskScope = typeof QUICK_SCOPES[number];
 const VIEW_MODES = ['list', 'board'] as const;
 type TaskViewMode = typeof VIEW_MODES[number];
+const GROUP_MODES = ['grouped', 'flat'] as const;
+type TaskGroupMode = typeof GROUP_MODES[number];
 const taskFromHash = () => new URLSearchParams(location.hash.slice(1)).get('task') || '';
 const options = (values: string[]) => values.map(value => ({ value, label: value }));
 type LoginValues = { username: string; password: string; setupToken?: string };
-type NewTaskValues = { jiraKey: string; title: string; type: WorkTask['type']; parentId?: string; assigneeId?: string };
+type NewTaskValues = { jiraKey?: string; title: string; type: WorkTask['type']; parentId?: string; assigneeId?: string };
 
 const routeFallback = <Card><Skeleton active paragraph={{ rows: 5 }} /></Card>;
 
@@ -68,6 +72,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [initializing, setInitializing] = useState(true);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState('');
+  const [chainStatuses, setChainStatuses] = useState<Record<string, ChainStatusMap>>({});
   const [tasks, setTasks] = useState<WorkTask[]>([]);
   const [allTasks, setAllTasks] = useState<WorkTask[]>([]);
   const [members, setMembers] = useState<ProjectMember[]>([]);
@@ -95,18 +100,22 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [shortcutsEverOpened, setShortcutsEverOpened] = useState(false);
   const [digestTick, setDigestTick] = useState(0);
   const [viewMode, setViewMode] = useState<TaskViewMode>(() => readStoredChoice(TASK_VIEW_MODE_KEY, VIEW_MODES, 'list'));
+  const [groupMode, setGroupMode] = useState<TaskGroupMode>(() => readStoredChoice(TASK_GROUP_MODE_KEY, GROUP_MODES, 'grouped'));
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [savedViews, setSavedViews] = useState<SavedTaskFilterView[]>([]);
   const [savingViewOpen, setSavingViewOpen] = useState(false);
   const [savingViewName, setSavingViewName] = useState('');
   const [taskPage, setTaskPage] = useState(1);
   const [updatingTaskId, setUpdatingTaskId] = useState('');
+  const [syncingJira, setSyncingJira] = useState(false);
   const taskSearchRef = useRef<InputRef>(null);
   const shortcutNavRef = useRef<{ prevTaskId?: string; nextTaskId?: string; openTask: (id: string) => void; busy: boolean }>({ openTask: () => {}, busy: false });
   const lastRoutedTaskId = useRef(taskFromHash());
   const projectIdRef = useRef('');
   const refreshSequence = useRef(0);
   const pendingOperations = useRef(0);
+  const jiraSyncInFlight = useRef(false);
+  const jiraTasksRefreshPending = useRef(false);
   const taskCreateSequence = useRef(0);
   const mounted = useRef(true);
   const currentContext = useRef({ userId: '', projectId: '', section });
@@ -175,6 +184,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     setCreateOpen(false); setIntakeOpen(false); setNewProjectOpen(false); setQuickOpen(false); setShortcutsOpen(false); taskForm.resetFields(); resetFilters(); clearTaskSelection();
   };
   const clearSession = () => {
+    jiraTasksRefreshPending.current = false;
     taskCreateSequence.current += 1;
     refreshSequence.current += 1; projectIdRef.current = '';
     setUser(null); setTasks([]); setAllTasks([]); setProjects([]); setMembers([]); setCandidates([]); setUsers([]); setPlatformPermissions(NO_PLATFORM_PERMISSIONS); setCreateOpen(false); setIntakeOpen(false); setQuickOpen(false); setShortcutsOpen(false); setPasswordOpen(false);
@@ -217,7 +227,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       const firstActiveJiraProject = visibleProjects.find(item => item.jira && taskData.tasks.some(task => task.projectId === item.id));
       const selectedProject = visibleProjects.find(item => item.id === linkedTask?.projectId) ||
         visibleProjects.find(item => item.id === preferredProjectId) ||
-        (savedProject && (!firstActiveJiraProject || taskData.tasks.some(task => task.projectId === savedProject.id)) ? savedProject : undefined) ||
+        savedProject ||
         firstActiveJiraProject ||
         visibleProjects.find(item => item.jira) || visibleProjects[0];
       const projectMembers = selectedProject
@@ -265,6 +275,11 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   };
   const reloadAccess = () => { clearProjectAccess(); void perform(() => refresh('')); };
   useEffect(() => {
+    if (busy || syncingJira || !jiraTasksRefreshPending.current || !user) return;
+    jiraTasksRefreshPending.current = false;
+    void refreshTasksOnly().catch(handleError);
+  }, [busy, syncingJira, user?.id]);
+  useEffect(() => {
     let active = true;
     mounted.current = true;
     pendingOperations.current += 1; setBusy(true);
@@ -298,6 +313,15 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   };
   useEffect(() => { closeCreateTask(); setIntakeOpen(false); setNewProjectOpen(false); }, [section]);
   useEffect(() => { closeCreateTask(); setIntakeOpen(false); setSelectedTaskIds([]); setSavedViews(readSavedTaskViews(projectId)); setSavingViewOpen(false); setSavingViewName(''); }, [projectId, user?.id]);
+  // Delivery-chain progress for the task list (one request per project; refreshed when the task list changes).
+  useEffect(() => {
+    if (section !== 'tasks' || !projectId || !user) return;
+    let alive = true;
+    api<{ statuses: Record<string, ChainStatusMap> }>(`chain-statuses?projectId=${encodeURIComponent(projectId)}`)
+      .then(data => { if (alive) setChainStatuses(data.statuses); })
+      .catch(() => { if (alive) setChainStatuses({}); });
+    return () => { alive = false; };
+  }, [section, projectId, user?.id, tasks]);
   useEffect(() => { setTaskPage(1); }, [projectId, query, quickScope, statusFilter, jiraTypeFilter, jiraStatusFilter, jiraVersionFilter]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -374,7 +398,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     const isCurrent = () => mounted.current && request === taskCreateSequence.current && currentContext.current.userId === user.id && currentContext.current.projectId === projectId && currentContext.current.section === section && location.hash === requestRoute;
     return perform(async () => {
       try {
-        const result = await api<{ task: WorkTask }>('tasks', { projectId, ...values, parentId: values.parentId || null, ...(canAssign ? { assigneeId: values.assigneeId || null } : { assigneeId: user.id }) });
+        const result = await api<{ task: WorkTask }>('tasks', { projectId, ...values, jiraKey: values.jiraKey?.trim() || undefined, parentId: values.parentId || null, ...(canAssign ? { assigneeId: values.assigneeId || null } : { assigneeId: user.id }) });
         if (!isCurrent()) return;
         taskForm.resetFields(); setCreateOpen(false); void message.success('任务已登记。');
         await refresh(projectId, isCurrent);
@@ -508,7 +532,11 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     (!query.trim() || (task.jiraKey + ' ' + task.title).toLowerCase().includes(query.trim().toLowerCase())) &&
     (!statusFilter || task.status === statusFilter) && (!jiraTypeFilter || task.externalRef?.type === jiraTypeFilter) &&
     (!jiraStatusFilter || task.externalRef?.status === jiraStatusFilter) && (!jiraVersionFilter || task.externalRef?.fixVersions?.some(version => version.name === jiraVersionFilter)));
-  const currentTaskPage = Math.min(taskPage, Math.max(1, Math.ceil(visibleTasks.length / 10)));
+  const visibleIdSet = new Set(visibleTasks.map(task => task.id));
+  const topRowCount = viewMode === 'list' && groupMode === 'grouped'
+    ? visibleTasks.filter(task => !task.parentId || task.parentId === task.id || !visibleIdSet.has(task.parentId)).length
+    : visibleTasks.length;
+  const currentTaskPage = Math.min(taskPage, Math.max(1, Math.ceil(topRowCount / 10)));
   useEffect(() => { if (currentTaskPage !== taskPage) setTaskPage(currentTaskPage); }, [currentTaskPage, taskPage]);
   const projectOptions = groups.map(group => ({
     label: group.name,
@@ -563,21 +591,33 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   </div>;
 
   const hasBoundJira = projects.some(item => !!item.jira);
-  const syncMyJiraTasks = (scopedToProject = false) => perform(async () => {
-    const res = await api<{
-      identity: { displayName?: string; name?: string } | null;
-      importedCount: number; updatedCount: number; removedCount: number; unassignedCount: number;
-    }>('jira/tasks/sync-mine', scopedToProject && projectId ? { projectId } : {});
-    const parts = [
-      res.importedCount ? `新接入 ${res.importedCount} 项` : '',
-      res.updatedCount ? `更新 ${res.updatedCount} 项` : '',
-      res.removedCount ? `清理非本人/已结项 ${res.removedCount} 项` : '',
-      res.unassignedCount ? `解绑已转交任务 ${res.unassignedCount} 项` : '',
-    ].filter(Boolean);
-    const who = res.identity?.displayName || res.identity?.name || '';
-    void message.success(parts.length ? `已按${who ? `「${who}」` : ''}最新 Jira 同步：${parts.join('，')}。` : `已按${who ? `「${who}」` : ''}最新 Jira 校验，当前待办已是最新。`);
-    await refresh(scopedToProject ? projectId : '');
-  });
+  const syncMyJiraTasks = async () => {
+    if (jiraSyncInFlight.current) return;
+    jiraSyncInFlight.current = true;
+    setSyncingJira(true);
+    const isCurrentUser = () => mounted.current && currentContext.current.userId === user.id;
+    try {
+      const res = await api<{
+        identity: { displayName?: string; name?: string } | null;
+        importedCount: number; updatedCount: number; removedCount: number; unassignedCount: number;
+      }>('jira/tasks/sync-mine', {});
+      if (!isCurrentUser()) return;
+      jiraTasksRefreshPending.current = true;
+      const parts = [
+        res.importedCount ? `新接入 ${res.importedCount} 项` : '',
+        res.updatedCount ? `更新 ${res.updatedCount} 项` : '',
+        res.removedCount ? `清理非本人/已结项 ${res.removedCount} 项` : '',
+        res.unassignedCount ? `解绑已转交任务 ${res.unassignedCount} 项` : '',
+      ].filter(Boolean);
+      const who = res.identity?.displayName || res.identity?.name || '';
+      void message.success(parts.length ? `已按${who ? `「${who}」` : ''}最新 Jira 同步：${parts.join('，')}。` : `已按${who ? `「${who}」` : ''}最新 Jira 校验，当前待办已是最新。`);
+    } catch (error) {
+      if (isCurrentUser()) handleError(error);
+    } finally {
+      jiraSyncInFlight.current = false;
+      if (mounted.current) setSyncingJira(false);
+    }
+  };
   const isTaskDetail = section === 'tasks' && !!selectedTaskId;
   const scoped = ['tasks', 'todos', 'reports', 'reviews', 'assets', 'sessions', 'deployments', 'knowledge', 'skills', 'members', 'accounts', 'connections'].includes(section) && !isTaskDetail;
   const navTaskPool = visibleTasks.some(item => item.id === selectedTaskId) ? visibleTasks : tasks;
@@ -643,7 +683,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   };
   const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button>{workbenchAvailable && <Tooltip title={workbenchMode === 'server' ? '打开服务器上的工作台（AI 与 git 在你电脑上执行，需 Bridge 在运行）' : '在浏览器中打开你电脑上的工作台（需本机工作台与 Bridge 在运行）'}><Button icon={<MonitorSmartphone size={16} />} onClick={openWorkbench}>我的工作台</Button></Tooltip>}<Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
   const taskList = <>
-      <Card title={<Space size={8}><h2 className="tf-section-heading">任务列表</h2><Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text></Space>} extra={<Space wrap size={8}><Segmented<TaskViewMode> aria-label="任务视图切换" value={viewMode} onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }} options={[{ value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> }, { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> }]} />{hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={busy} onClick={() => void syncMyJiraTasks(false)}>同步我的最新 Jira</Button>}<Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button></Space>} className="tf-task-list-card">
+      <Card title={<Space size={8}><h2 className="tf-section-heading">任务列表</h2><Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text></Space>} extra={<Space wrap size={8}><Segmented<TaskViewMode> aria-label="任务视图切换" value={viewMode} onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }} options={[{ value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> }, { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> }]} />{hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy || syncingJira} loading={syncingJira} onClick={() => void syncMyJiraTasks()}>同步我的最新 Jira</Button>}{hasBoundJira && <Button disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button>}<Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openManualTask}>新建本地任务</Button></Space>} className="tf-task-list-card">
         <div className="tf-task-quick-scopes">
           <Segmented<QuickTaskScope>
             aria-label="任务范围快捷筛选"
@@ -661,6 +701,15 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
         <div className="tf-task-toolbar">
           <Input ref={taskSearchRef} aria-label="搜索任务" prefix={<Search size={16} />} placeholder="搜索任务号或标题（按 / 聚焦，Esc 清空）" value={query} allowClear onChange={event => setQuery(event.target.value)} onKeyDown={clearSearchOnEscape(query, () => setQuery(''))} />
           <Select aria-label="Jira 状态" placeholder="Jira 状态：全部" allowClear value={jiraStatusFilter} options={options(jiraStatuses)} onChange={setJiraStatusFilter} disabled={!jiraStatuses.length} />
+          {viewMode === 'list' && (
+            <Segmented<TaskGroupMode>
+              size="small"
+              aria-label="任务分组方式"
+              value={groupMode}
+              onChange={val => { setGroupMode(val); writeStoredString(TASK_GROUP_MODE_KEY, val); setTaskPage(1); }}
+              options={[{ value: 'grouped', label: '按父任务分组' }, { value: 'flat', label: '平铺' }]}
+            />
+          )}
           {hasFilters && !savingViewOpen && (
             <Button size="small" icon={<Bookmark size={13} />} onClick={openSaveCurrentView}>
               保存视图
@@ -773,13 +822,15 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
             onBatchClaim={targets => void batchClaimSelected(targets)}
             onBatchStatus={(targets, nextStatus) => void batchSwitchStatus(targets, nextStatus)}
             onBatchAssign={(targets, assigneeId) => void batchAssignSelected(targets, assigneeId)}
+            chainStatuses={chainStatuses}
+            groupByParent={groupMode === 'grouped'}
           />
         )}
       </Card>
 
   </>;
   let content: React.ReactNode;
-  if (section === 'overview') content = <WorkspaceOverview projects={projects} tasks={allTasks} user={user} onUnauthorized={clearSession} onSyncJira={hasBoundJira ? () => void syncMyJiraTasks(false) : undefined} syncingJira={busy} onApproved={() => void refreshTasksOnly()} openDigestTick={digestTick} />;
+  if (section === 'overview') content = <WorkspaceOverview projects={projects} tasks={allTasks} user={user} onUnauthorized={clearSession} onSyncJira={hasBoundJira ? () => void syncMyJiraTasks() : undefined} syncingJira={syncingJira} onApproved={() => void refreshTasksOnly()} openDigestTick={digestTick} />;
   else if (section === 'projects') content = <ProjectDirectory projects={projects} tasks={allTasks} onOpen={switchProject} onCreate={platformPermissions.createProjects ? openNewProject : undefined} onProjectRenamed={updated => setProjects(prev => prev.map(item => item.id === updated.id ? { ...item, name: updated.name } : item))} />;
   else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} onUnauthorized={clearSession} /></Suspense>;
@@ -817,14 +868,14 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
           currentProjectId={projectId}
           currentUserId={user.id}
           canIntake={!!projectId && !busy}
-          canSyncJira={hasBoundJira && !busy}
+          canSyncJira={hasBoundJira && !busy && !syncingJira}
           onClose={() => setQuickOpen(false)}
           onSelectTask={jumpToTaskFromCommand}
           onSelectProject={id => switchProject(id, scoped ? undefined : 'tasks')}
           onSelectSection={nextSection => navigateWorkspace(nextSection)}
           onTriggerAction={act => {
             if (act === 'intake') openCreateTask();
-            else if (act === 'sync-jira') void syncMyJiraTasks(false);
+            else if (act === 'sync-jira') void syncMyJiraTasks();
             else if (act === 'standup-digest') {
               if (section !== 'overview') navigateWorkspace('overview');
               setDigestTick(tick => tick + 1);
@@ -843,13 +894,12 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
         <JiraTaskIntake open={intakeOpen} user={user} projects={projects} existingTasks={allTasks} initialProjectId={projectId} onClose={() => setIntakeOpen(false)} onManual={openManualTask} onImported={taskImported} onUnauthorized={clearSession} onForbidden={reloadAccess} />
       </Suspense>
     )}
-    <Drawer forceRender title="手动登记任务" open={createOpen} onClose={closeCreateTask} closable={!busy} maskClosable={!busy} keyboard={!busy} size={640} className="tf-task-drawer" footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeCreateTask}>取消</Button><Button type="primary" loading={busy} disabled={!projectId} onClick={() => taskForm.submit()}>手动登记</Button></Flex>}>
+    <Drawer forceRender title="新建本地任务" open={createOpen} onClose={closeCreateTask} closable={!busy} maskClosable={!busy} keyboard={!busy} size={640} className="tf-task-drawer" footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeCreateTask}>取消</Button><Button type="primary" loading={busy} disabled={!projectId} onClick={() => taskForm.submit()}>创建任务</Button></Flex>}>
       <Form name="new-local-task" form={taskForm} layout="vertical" initialValues={{ type: 'TASK', assigneeId: members.some(member => member.id === user.id) ? user.id : undefined }} disabled={busy} onFinish={values => void createTask(values)} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && projectId) { event.preventDefault(); taskForm.submit(); } }}>
-        <div className="tf-form-two-columns"><Form.Item htmlFor="service-jira-key" label="Jira 任务号" name="jiraKey" rules={[{ required: true, message: '请输入 Jira 任务号。' }, { pattern: /^[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*$/, message: '请输入有效的 Jira 任务号。' }]}><Input id="service-jira-key" maxLength={48} placeholder={(project?.jira?.key || 'PROJ') + '-100'} /></Form.Item><Form.Item label="本地任务类型" name="type" rules={[{ required: true }]}><Select options={TASK_TYPE_OPTIONS} /></Form.Item></div>
+        <div className="tf-form-two-columns"><Form.Item label="任务类型" name="type" rules={[{ required: true }]}><Select options={TASK_TYPE_OPTIONS} /></Form.Item><Form.Item htmlFor="service-jira-key" label="Jira 任务号（可选）" name="jiraKey" rules={[{ pattern: /^[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*$/, message: '请输入有效的 Jira 任务号。' }]}><Input id="service-jira-key" maxLength={48} placeholder={(project?.jira?.key || 'PROJ') + '-100'} /></Form.Item></div>
         <Form.Item htmlFor="service-task-title" label="任务标题" name="title" rules={[{ required: true, whitespace: true, message: '请输入任务标题。' }]}><Input id="service-task-title" maxLength={200} /></Form.Item>
         <Form.Item label="父任务（可选）" name="parentId"><Select placeholder="无父任务" allowClear showSearch={{ optionFilterProp: 'label' }} options={tasks.map(task => ({ value: task.id, label: task.jiraKey + ' · ' + task.title + (task.status === 'DONE' ? ' · 已完成（需先重开）' : ''), disabled: task.status === 'DONE' }))} /></Form.Item>
         <Form.Item label="受理人" name="assigneeId"><Select placeholder="未指派" allowClear disabled={busy || !canAssign} options={members.map(member => ({ value: member.id, label: member.username }))} /></Form.Item>
-        <Text type="secondary" className="tf-form-note">{project?.jira ? '任务号需属于当前 Jira 项目 ' + project.jira.key + '。登记至本地任务空间，Jira 关联尚未验证；不会创建或修改外部 Jira 事项。' : '登记至本地任务空间，Jira 关联尚未验证；不会创建或修改外部 Jira 事项。'}</Text>
       </Form>
     </Drawer>
   </div>;

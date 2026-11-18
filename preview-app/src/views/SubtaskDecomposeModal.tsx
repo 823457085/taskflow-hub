@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, App as AntApp, Button, Checkbox, Flex, Input, Modal, Select, Space, Tag, Typography } from 'antd';
 import { Plus, Sparkles, Trash2 } from 'lucide-react';
-import { api, ApiError, type Asset, type User, type WorkTask } from './workspaceApi';
+import { api, ApiError, isLocalTaskKey, type Asset, type User, type WorkTask } from './workspaceApi';
 import { TASK_TYPE_OPTIONS } from './displayLabels';
 import {
   allocateNextJiraKeys,
@@ -46,6 +46,7 @@ export const SubtaskDecomposeModal: React.FC<{
   const [rows, setRows] = useState<DraftSubtaskRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
+  const localParent = isLocalTaskKey(parentTask.jiraKey);
   const defaultAssignee = canAssign
     ? (parentTask.assigneeId && members.some(m => m.id === parentTask.assigneeId) ? parentTask.assigneeId : currentUser.id)
     : currentUser.id;
@@ -105,7 +106,7 @@ export const SubtaskDecomposeModal: React.FC<{
       {
         rowId: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         enabled: true,
-        jiraKey: nextKey || `${parentTask.jiraKey.split('-')[0] || 'TASK'}-101`,
+        jiraKey: localParent ? '' : nextKey || `${parentTask.jiraKey.split('-')[0] || 'TASK'}-101`,
         title: '',
         type: 'TASK',
         assigneeId: defaultAssignee,
@@ -124,7 +125,7 @@ export const SubtaskDecomposeModal: React.FC<{
 
   const existingKeySet = new Set(existingTasks.map(t => t.jiraKey.toUpperCase()));
   const activeRows = rows.filter(r => r.enabled && !r.created);
-  const parentPrefix = parentTask.jiraKey.includes('-') ? `${parentTask.jiraKey.split('-')[0].toUpperCase()}-` : '';
+  const parentPrefix = !localParent && parentTask.jiraKey.includes('-') ? `${parentTask.jiraKey.split('-')[0].toUpperCase()}-` : '';
 
   const validateActiveRows = (): string | null => {
     if (!activeRows.length) return '请至少勾选一项待创建的子任务。';
@@ -132,6 +133,8 @@ export const SubtaskDecomposeModal: React.FC<{
     for (const row of activeRows) {
       const key = row.jiraKey.trim().toUpperCase();
       const title = row.title.trim();
+      if (!title) return key ? `请填写子任务「${key}」的标题。` : '请填写子任务标题。';
+      if (!key) continue;
       if (!VALID_JIRA_KEY_RE.test(key)) {
         return `子任务号「${row.jiraKey || '空'}」格式不正确（示例：${parentPrefix || 'TASK-'}101）。`;
       }
@@ -145,9 +148,6 @@ export const SubtaskDecomposeModal: React.FC<{
         return `批次内存在重复的子任务号「${key}」。`;
       }
       seenBatchKeys.add(key);
-      if (!title) {
-        return `请填写子任务「${key}」的标题。`;
-      }
     }
     return null;
   };
@@ -162,16 +162,17 @@ export const SubtaskDecomposeModal: React.FC<{
     let createdCount = 0;
     try {
       for (const row of activeRows) {
-        await api('tasks', {
+        const jiraKey = row.jiraKey.trim().toUpperCase();
+        const { task } = await api<{ task: WorkTask }>('tasks', {
           projectId: parentTask.projectId,
           parentId: parentTask.id,
-          jiraKey: row.jiraKey.trim().toUpperCase(),
+          ...(jiraKey ? { jiraKey } : {}),
           title: row.title.trim().slice(0, 200),
           type: row.type,
           assigneeId: canAssign ? (row.assigneeId || null) : currentUser.id,
         });
         createdCount += 1;
-        updateRow(row.rowId, { created: true, enabled: false });
+        updateRow(row.rowId, { jiraKey: task.jiraKey, created: true, enabled: false });
       }
       await onCreated();
       void message.success(`已为 ${parentTask.jiraKey} 批量创建 ${createdCount} 个子任务！`);
@@ -250,15 +251,15 @@ export const SubtaskDecomposeModal: React.FC<{
               <Checkbox
                 checked={row.enabled}
                 disabled={submitting || row.created}
-                aria-label={`勾选子任务 ${row.jiraKey}`}
+                aria-label={`勾选子任务 ${row.jiraKey || row.title}`}
                 onChange={e => updateRow(row.rowId, { enabled: e.target.checked })}
               />
               <Input
                 size="small"
                 value={row.jiraKey}
                 disabled={submitting || row.created}
-                aria-label="子任务编号"
-                placeholder="DEMO-101"
+                aria-label="Jira 任务号（可选）"
+                placeholder="留空自动编号"
                 maxLength={48}
                 onChange={e => updateRow(row.rowId, { jiraKey: e.target.value.toUpperCase() })}
               />

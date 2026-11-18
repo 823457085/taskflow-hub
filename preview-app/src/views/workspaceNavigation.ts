@@ -5,7 +5,7 @@ export const SECTION_LABELS: Record<WorkspaceSection, string> = {
   overview: '工作台', projects: '项目空间', tasks: '任务中心', todos: '团队待办', reports: '工作报告', reviews: '评审中心',
   assets: '材料中心', sessions: 'Agent 记录', deployments: '部署记录', knowledge: '知识库', skills: '团队 Skill', members: '成员与权限', accounts: '账号管理', connections: '平台连接', local: '本地 AI 接入',
 };
-export const TASK_PANELS = ['overview', 'assets', 'reviews', 'release', 'activity'] as const;
+export const TASK_PANELS = ['chain', 'overview', 'assets', 'reviews', 'release', 'activity'] as const;
 export type TaskPanel = typeof TASK_PANELS[number];
 export interface TaskDestination { tab?: TaskPanel; jobId?: string; from?: WorkspaceSection }
 export function currentWorkspaceSection(): WorkspaceSection {
@@ -14,7 +14,7 @@ export function currentWorkspaceSection(): WorkspaceSection {
   const view = route.get('view');
   return view && Object.prototype.hasOwnProperty.call(SECTION_LABELS, view) ? view as WorkspaceSection : 'overview';
 }
-const REVIEW_STAGE_VALUES: readonly Stage[] = ['PRD', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
+const REVIEW_STAGE_VALUES: readonly Stage[] = ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
 const ASSET_KIND_VALUES: readonly AssetKind[] = ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE', 'RELEASE_PLAN'];
 function routeFilter<T extends string>(hash: string, view: WorkspaceSection, name: string, values: readonly T[]): T | undefined {
   const route = new URLSearchParams(hash.replace(/^#/, ''));
@@ -47,7 +47,7 @@ export function clearTaskRoute() {
   history.replaceState(history.state, '', location.pathname + location.search + '#' + route.toString());
   window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
-export function openTaskRoute(taskId: string, { tab = 'overview', jobId, from = 'tasks' }: TaskDestination = {}) {
+export function openTaskRoute(taskId: string, { tab = 'chain', jobId, from = 'tasks' }: TaskDestination = {}) {
   const route = new URLSearchParams({ view: 'tasks', task: taskId, tab, from });
   const inherited = taskReturnFilters();
   const stage = reviewStageFromRoute() || inherited.stage;

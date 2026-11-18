@@ -2,7 +2,10 @@ import type { Role, ProjectPermissions } from './workspacePermissions.ts';
 import type { OverviewFlowTelemetry } from './deliveryMetrics.ts';
 export * from './workspacePermissions.ts';
 export type { OverviewFlowTelemetry } from './deliveryMetrics.ts';
-export type Stage = 'PRD' | 'TECH_SPEC' | 'CODE_REVIEW' | 'TEST_CASE' | 'RELEASE';
+/** Five completion-gate stages. */
+export type GateStage = 'PRD' | 'TECH_SPEC' | 'CODE_REVIEW' | 'TEST_CASE' | 'RELEASE';
+/** Review stages: the five gates plus the advisory 任务拆分审核 (TASK_BREAKDOWN). */
+export type Stage = GateStage | 'TASK_BREAKDOWN';
 export type AssetKind = 'PRD' | 'TECH_SPEC' | 'CODE' | 'TEST_CASE' | 'RELEASE_PLAN';
 export type TaskStatus = 'OPEN' | 'IN_PROGRESS' | 'IN_REVIEW' | 'DONE';
 export type ExecutionMode = 'HUMAN_REVIEW' | 'LOCAL_REPORT' | 'CLOUD_AI';
@@ -29,6 +32,7 @@ export interface JiraIssueMetadata {
   fixVersions?: { id: string; name: string; released?: boolean }[];
   labels?: string[]; assignee?: { id: string; name: string; displayName?: string } | null;
 }
+export const isLocalTaskKey = (value: string): boolean => /^LOCAL-T[0-9A-F]{32}$/.test(value);
 export interface WorkTask {
   id: string; jiraKey: string; title: string; projectId: string; parentId: string | null;
   type: 'STORY' | 'TASK' | 'BUG' | 'RELEASE'; assigneeId: string | null; ownerId: string;
@@ -48,7 +52,7 @@ export interface ReviewJob {
   id: string; taskId: string; projectId: string; stage: Stage; executionMode: ExecutionMode;
   status: string; actorId: string; createdAt: string; inputHash: string; persona: string;
   skills: string[]; executor: string; snapshot: Record<string, unknown>; stale: boolean; soloMode?: boolean;
-  report: null | { id: string; summary: string; source: string; tool: string | null; evidence: string | null; actorId: string; createdAt: string };
+  report: null | { id: string; summary: string; source: string; tool: string | null; evidence: string | null; actorId: string; createdAt: string; verdict?: ReportVerdict | null; score?: number | null; checklist?: ChecklistItem[] };
   findings: Finding[];
   decision: null | { id: string; decision: string; reason: string; actorId: string; createdAt: string };
 }
@@ -57,7 +61,7 @@ export interface CodeupMrItem {
   state: string; sourceBranch: string; targetBranch: string; repositoryName: string;
   authorName: string; updatedAt: string; detailUrl: string;
 }
-export interface Gates { overall: string; gates: { stage: Stage; status: string; jobId?: string; reason?: string }[] }
+export interface Gates { overall: string; gates: { stage: GateStage; status: string; jobId?: string; reason?: string }[] }
 export interface ProgressEvent { id: string; actorId: string; tool: string; deviceId?: string; progress: number; summary: string; branch?: string; createdAt: string }
 export interface TaskDetailBundle { task: WorkTask; context: TaskContext; assets: Asset[]; gates: Gates; jobs: ReviewJob[] }
 export interface Device { deviceId: string; taskId: string; actorId: string; tool: string; status: string; lastSeen: string; online: boolean }
@@ -106,6 +110,7 @@ export interface LocalAiRunDraft {
   summary: string; evidence?: string;
   findings: { severity: Finding['severity']; title: string; detail: string; location?: string }[];
   autoSubmitted?: boolean;
+  verdict?: ReportVerdict; score?: number; checklist?: ChecklistItem[];
 }
 export interface LocalAiRun {
   id: string; taskId: string; projectId: string; jobId: string | null; actorId: string;
@@ -122,17 +127,22 @@ export interface ConnectorSummary {
   selectionUnavailable?: boolean; lastError?: string; accountId?: string; accountName?: string;
 }
 export interface TaskContext { task: WorkTask; assets: Asset[]; progressEvents: ProgressEvent[]; devices: Device[]; integrationStatus: string; workspace?: ProjectWorkspace | null }
-export const STAGES: { value: Stage; label: string }[] = [
+export const STAGES: { value: GateStage; label: string }[] = [
   { value: 'PRD', label: '需求评审' }, { value: 'TECH_SPEC', label: '技术方案审核' },
   { value: 'CODE_REVIEW', label: '代码审核' }, { value: 'TEST_CASE', label: '测试用例评审' },
   { value: 'RELEASE', label: '上线审核' },
 ];
+/** Review stages in delivery-chain order (需求 → 任务拆分 → 方案 → 代码 → 测试 → 上线). */
+export const REVIEW_STAGE_OPTIONS: { value: Stage; label: string }[] = [
+  { value: 'PRD', label: '需求评审' }, { value: 'TASK_BREAKDOWN', label: '任务拆分审核' }, { value: 'TECH_SPEC', label: '技术方案审核' },
+  { value: 'CODE_REVIEW', label: '代码审核' }, { value: 'TEST_CASE', label: '测试用例评审' }, { value: 'RELEASE', label: '上线审核' },
+];
 export const REVIEW_ROLES: Record<Stage, Role[]> = {
-  PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'],
+  PRD: ['ADMIN', 'LEAD', 'PM'], TASK_BREAKDOWN: ['ADMIN', 'LEAD', 'DEV', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'],
   CODE_REVIEW: ['ADMIN', 'LEAD', 'DEV'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'],
 };
 export const APPROVE_ROLES: Record<Stage, Role[]> = {
-  PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD'],
+  PRD: ['ADMIN', 'LEAD', 'PM'], TASK_BREAKDOWN: ['ADMIN', 'LEAD'], TECH_SPEC: ['ADMIN', 'LEAD'],
   CODE_REVIEW: ['ADMIN', 'LEAD'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'],
 };
 export const ASSET_ROLES: Record<AssetKind, Role[]> = {
@@ -213,3 +223,35 @@ export function openWorkbench(path = '/agent') {
 }
 export const timeText = (value?: string) => value ? new Date(value).toLocaleString() : '—';
 export const memberName = (members: User[], id?: string | null) => id ? members.find(user => user.id === id)?.username || id : '未指派';
+
+export type ReportVerdict = 'PASS' | 'CONDITIONAL' | 'FAIL';
+export interface ChecklistItem { item: string; result: 'PASS' | 'WARN' | 'FAIL' | 'NA'; note: string; ref?: string }
+export type ChainLinkId = 'REQUIREMENT' | 'BREAKDOWN' | 'TECH_SPEC' | 'CODE' | 'TEST' | 'RELEASE';
+export type ChainLinkStatus = 'MISSING' | 'READY' | 'REVIEWING' | 'AWAITING_DECISION' | 'PASS' | 'CONDITIONAL' | 'CHANGES_REQUESTED' | 'BLOCKED' | 'STALE';
+export interface ChainObject { type: string; label: string; url?: string | null; meta?: string | null; key?: string; taskId?: string; assetId?: string; kind?: AssetKind; assignee?: string | null }
+export interface ChainCheck { id: string; label: string; ok: boolean | null; level: 'required' | 'advice'; detail: string }
+export interface ChainNextAction { type: 'ADD_INPUT' | 'ADD_SUBTASKS' | 'AI_REVIEW' | 'DECIDE' | 'FIX' | 'VIEW'; label: string; stage?: Stage; jobId?: string; assetKind?: AssetKind }
+export interface ChainReview {
+  jobId: string; status: string; stale: boolean; createdAt: string; executionMode: ExecutionMode;
+  verdict: ReportVerdict | null; score: number | null; summary: string; tool: string | null; reportedAt: string | null; checklist: ChecklistItem[];
+  findings: { critical: number; warn: number; info: number; waived: number; items: { id: string; severity: Finding['severity']; title: string; detail: string; location: string | null; waived: boolean }[] };
+  decision: { decision: string; reason: string; createdAt: string } | null;
+}
+export interface ChainLink {
+  id: ChainLinkId; index: number; stage: Stage; title: string; purpose: string; focus: string[]; advisory: boolean;
+  status: ChainLinkStatus; statusLabel: string; gateReason: string; missing: string[];
+  objects: ChainObject[]; checks: ChainCheck[]; review: ChainReview | null; next: ChainNextAction;
+}
+export type ChainStatusMap = Record<Stage, ChainLinkStatus>;
+export interface ChainChild { id: string; jiraKey: string; title: string; status: TaskStatus; jiraStatus: string | null; assignee: string | null; url: string | null; links: ChainStatusMap }
+export interface DeliveryChain {
+  generatedAt: string;
+  task: { id: string; jiraKey: string; title: string; url: string | null; status: TaskStatus; jiraStatus: string | null; assignee: string | null; projectId: string; fixVersions: string[] };
+  parent: { id: string; jiraKey: string; title: string } | null;
+  requirementKeys: string[];
+  overall: { status: 'PASS' | 'BLOCKED' | 'IN_PROGRESS'; passed: number; total: number; score: number | null; currentLinkId: ChainLinkId | null; blockers: { linkId: ChainLinkId; link: string; kind: string; title: string; detail: string }[] };
+  links: ChainLink[]; children: ChainChild[];
+  traceability: { point: string; result: ChecklistItem['result']; note: string; tasks: { key: string; title: string | null; taskId: string | null; links: ChainStatusMap | null }[] }[];
+}
+export const CHAIN_STAGE_ORDER: Stage[] = ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
+export const CHAIN_STAGE_SHORT: Record<Stage, string> = { PRD: '需求', TASK_BREAKDOWN: '拆分', TECH_SPEC: '方案', CODE_REVIEW: '代码', TEST_CASE: '测试', RELEASE: '上线' };

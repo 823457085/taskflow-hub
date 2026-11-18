@@ -120,7 +120,7 @@ export function createWorkflow(db, audit, transaction) {
   function createReview(task, user, role, body) {
     if (!REVIEW_STAGES.includes(body.stage)) fail(400, 'INVALID_STAGE', '评审阶段不受支持');
     if (!roleCanReview(role, body.stage)) fail(403, 'FORBIDDEN', '当前角色无权发起此阶段评审');
-    const mode = body.executionMode || 'CLOUD_AI';
+    const mode = body.executionMode || 'LOCAL_REPORT';
     if (!['CLOUD_AI', 'HUMAN_REVIEW', 'LOCAL_REPORT'].includes(mode)) fail(400, 'INVALID_MODE', '执行模式不受支持');
     const current = inputs(task, body.stage);
     if (current.missing.length && mode !== 'CLOUD_AI') fail(409, 'MISSING_INPUT', `缺少输入：${current.missing.join('、')}`);

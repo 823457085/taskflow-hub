@@ -1,4 +1,4 @@
-import type { Asset, WorkTask } from './workspaceApi.ts';
+import { isLocalTaskKey, type Asset, type WorkTask } from './workspaceApi.ts';
 
 export interface SubtaskCandidate {
   jiraKey: string;
@@ -36,7 +36,7 @@ export function allocateNextJiraKeys(
   existingKeys: Iterable<string>,
   count: number,
 ): string[] {
-  if (count <= 0) return [];
+  if (count <= 0 || isLocalTaskKey(parentKey)) return [];
   const { prefix, num } = parseJiraKeyParts(parentKey);
   const taken = new Set<string>();
   for (const key of existingKeys) {
@@ -220,7 +220,7 @@ export function extractSubtaskCandidatesFromSpecs(params: {
 
   return rawDrafts.map((item, idx) => ({
     ...item,
-    jiraKey: keys[idx],
+    jiraKey: keys[idx] ?? '',
   }));
 }
 
@@ -259,6 +259,6 @@ export function buildStandardDeliverySubtasks(
 
   return filtered.map((item, idx) => ({
     ...item,
-    jiraKey: keys[idx],
+    jiraKey: keys[idx] ?? '',
   }));
 }

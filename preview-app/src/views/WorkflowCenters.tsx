@@ -3,7 +3,7 @@ import { App, Button, Card, Checkbox, Drawer, Empty, Flex, Grid, Input, List, Pa
 import type { InputRef, TableColumnsType } from 'antd';
 import { ArrowRight, CheckCircle2, ExternalLink, Play, Plus, RefreshCw, Search } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
-import { api, ApiError, AssetKind, ReviewJob, Role, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
+import { api, ApiError, AssetKind, REVIEW_STAGE_OPTIONS, ReviewJob, Role, Stage, timeText, User, WorkTask } from './workspaceApi';
 import { assetKindFromRoute, navigateWorkspace, openTaskRoute, reviewStageFromRoute } from './workspaceNavigation';
 import { canQuickApproveReview, isTaskFrozen } from './taskAvailability';
 import { ASSET_KIND_OPTIONS, assetKindLabel, DEFAULT_APPROVE_REASON, reviewStatusLabel, stageLabel, taskStatusLabel } from './displayLabels';
@@ -208,7 +208,7 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
       setApprovingJobId('');
     }
   };
-  const stageOrderIndex = (value: Stage) => STAGES.findIndex(item => item.value === value);
+  const stageOrderIndex = (value: Stage) => REVIEW_STAGE_OPTIONS.findIndex(item => item.value === value);
   const quickApproveBatch = async (jobsToApprove: ReviewJob[]) => {
     if (!jobsToApprove.length || approvingJobId || batchApproving) return;
     setBatchApproving(true);
@@ -334,7 +334,7 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
         </Space>
       }
     >
-      <Tabs activeKey={stage} onChange={value => { const next = STAGES.find(item => item.value === value)?.value; setStage(next || 'all'); setPage(1); navigateWorkspace('reviews', { stage: next }); }} items={[{ key: 'all', label: '全部' }, ...STAGES.map(item => ({ key: item.value, label: item.label }))]} />
+      <Tabs activeKey={stage} onChange={value => { const next = REVIEW_STAGE_OPTIONS.find(item => item.value === value)?.value; setStage(next || 'all'); setPage(1); navigateWorkspace('reviews', { stage: next }); }} items={[{ key: 'all', label: '全部' }, ...REVIEW_STAGE_OPTIONS.map(item => ({ key: item.value, label: item.label }))]} />
       <Flex justify="space-between" align="center" gap={10} wrap style={{ marginBottom: 12 }}>
         <div style={{ overflowX: 'auto' }}>
           <Segmented<ReviewQuickScope>

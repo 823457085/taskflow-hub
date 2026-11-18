@@ -1,4 +1,4 @@
-const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'];
+const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom'];
 const CODE = /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i;
 const PROJECT_ID = /^[A-Za-z0-9_-]{1,80}$/;
 const MAX_BODY_BYTES = 16384;

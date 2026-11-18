@@ -14,7 +14,7 @@ const SKIP_DIRS = new Set(['node_modules', 'Library', 'Applications', 'Movies', 
 
 export const AI_ENGINES = [
   { id: 'codex', label: 'Codex', binary: 'codex', tool: 'codex-cli' },
-  { id: 'antigravity', label: 'Gemini / Antigravity', binary: 'agy', tool: 'custom' },
+  { id: 'antigravity', label: 'Gemini / Antigravity', binary: 'agy', tool: 'antigravity' },
   { id: 'cursor', label: 'Cursor Agent', binary: 'cursor-agent', tool: 'cursor' },
   { id: 'claude', label: 'Claude Code', binary: 'claude', tool: 'claude-code' },
 ];

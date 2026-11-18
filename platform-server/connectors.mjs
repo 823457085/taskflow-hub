@@ -720,7 +720,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     return task || null;
   }
   async function jiraIntake({ action, body, user, reauthorize }) {
-    const allowed = action === 'search' ? ['projectId', 'query', 'accountId'] : ['reference', 'projectId', 'accountId'];
+    const allowed = action === 'search' ? ['projectId', 'query', 'accountId'] : action === 'import' ? ['reference', 'projectId', 'accountId', 'parentTaskId'] : ['reference', 'projectId', 'accountId'];
     if (Object.keys(body).some(name => !allowed.includes(name))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
     let reference; let project;
     if (action === 'search') {
@@ -777,7 +777,24 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       db.prepare('INSERT INTO tasks (id,jira_key,title,owner_id,created_at,updated_at,project_id,parent_id,task_type,assignee_id,jira_verified,external_ref) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)').run(id, result.key, result.title, user.id, now, now, project.id, linkedParent?.id || null, 'TASK', assignee, JSON.stringify(jiraExternal(row, result, version)));
       bumpParentContexts(db, [linkedParent?.id]); audit(user.id, 'JIRA_IMPORT', id, project.id); task = getTask(id, user);
     });
-    return { task, existing, imported: !existing, project: currentProject(), externalUrl: result.externalUrl };
+    // Delivery chain: link a Jira work item declared by the dev task (交付物 / 相关开发事项) as its child.
+    let linkedToParent = false;
+    if (body.parentTaskId !== undefined) {
+      transaction(() => {
+        validate();
+        const parentTask = getTask(textField(body.parentTaskId, 'parentTaskId', { max: 64 }), user);
+        const current = getTask(task.id, user);
+        if (parentTask.projectId !== current.projectId) fail(400, 'INVALID_PARENT', '父任务必须属于同一项目');
+        if (current.parentId === parentTask.id) return;
+        if (current.parentId) fail(409, 'TASK_HAS_PARENT', `${current.jiraKey} 已关联其他父任务`);
+        for (let cursor = parentTask; cursor; cursor = cursor.parentId ? getTask(cursor.parentId, user) : null) if (cursor.id === current.id) fail(409, 'TASK_TREE_INVALID', '不能把上级任务关联为子任务');
+        assertWritable(parentTask, user); assertWritable(current, user);
+        db.prepare('UPDATE tasks SET parent_id=?,version=version+1,updated_at=? WHERE id=?').run(parentTask.id, new Date().toISOString(), current.id);
+        bumpParentContexts(db, [parentTask.id]); audit(user.id, 'TASK_LINK_PARENT', current.id, current.projectId);
+        linkedToParent = true; task = getTask(current.id, user);
+      });
+    }
+    return { task, existing, imported: !existing, linkedToParent, project: currentProject(), externalUrl: result.externalUrl };
   }
   async function syncMyJiraTasks({ body, user, reauthorize }) {
     const allowed = ['projectId', 'accountId', 'excludeRefactor'];

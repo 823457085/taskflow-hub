@@ -3,7 +3,7 @@ export const ROLES = ['ADMIN', 'DEV', 'QA', 'LEAD', 'SRE', 'PM'];
 export const PROJECT_ROLES = ['DEV', 'QA', 'LEAD', 'SRE', 'PM'];
 export const STAGES = ['PRD', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
 export const KINDS = ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE', 'RELEASE_PLAN'];
-export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'];
+export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom'];
 // Advisory review stages: reviewed and reported like gate stages, but never part of the five completion gates.
 export const ADVISORY_STAGES = ['TASK_BREAKDOWN'];
 export const REVIEW_STAGES = [...STAGES, ...ADVISORY_STAGES];

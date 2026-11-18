@@ -42,6 +42,7 @@ import {
   WAIVER_REASON_PRESETS,
 } from '../preview-app/src/views/displayLabels.ts';
 import { buildQuickCommandItems } from '../preview-app/src/views/quickCommandSearch.ts';
+import { buildTaskTree } from '../preview-app/src/views/taskTree.ts';
 import {
   clearSearchOnEscape,
   deleteSavedTaskView,
@@ -174,7 +175,10 @@ test('displayLabels maps technical enums to plain Chinese and falls back cleanly
   assert.equal(taskTypeLabel('RELEASE'), '版本发布');
 
   assert.equal(stageLabel('PRD'), '需求评审');
+  assert.equal(stageLabel('TASK_BREAKDOWN'), '任务拆分审核');
   assert.equal(stageLabel('TECH_SPEC'), '技术方案审核');
+  assert.equal(personaLabel('ai-delivery-lead'), 'AI 交付负责人');
+  assert.equal(skillLabel('requirement-coverage-map'), '需求点覆盖映射');
   assert.equal(stageLabel('CODE_REVIEW'), '代码审核');
   assert.equal(stageLabel('TEST_CASE'), '测试用例评审');
   assert.equal(stageLabel('RELEASE'), '上线审核');
@@ -990,6 +994,15 @@ test('subtaskDecomposer allocates collision-free Jira keys, skips non-goal secti
   assert.equal(std.length, 4);
   assert.equal(std[0].jiraKey, 'DEMO-902');
   assert.equal(std[3].type, 'RELEASE');
+
+  const localParent = { ...parentTask, jiraKey: 'LOCAL-T' + 'A'.repeat(32) };
+  const localExtracted = extractSubtaskCandidatesFromSpecs({ parentTask: localParent, assets, existingTasks: [existingChild] });
+  const localStandard = buildStandardDeliverySubtasks(localParent, [existingChild]);
+  for (const [local, jira] of [[localExtracted, extracted], [localStandard, std]]) {
+    assert.deepEqual(local.map(item => item.title), jira.map(item => item.title));
+    assert.ok(local.every(item => item.jiraKey === ''), '本地子任务编号应由服务端生成');
+  }
+  assert.deepEqual(allocateNextJiraKeys(localParent.jiraKey, [], 1), []);
 });
 
 test('assetDiff Side-by-Side pairs deletions with additions, tracks dual line numbers, and handles revision diffs', () => {
@@ -1544,4 +1557,17 @@ test('deliveryMetrics formats hours and grades DORA lead time, review turnaround
   assert.equal(gradeFirstTimePassRate(75).tier, 'HIGH');
   assert.equal(gradeFirstTimePassRate(60).tier, 'MEDIUM');
   assert.equal(gradeFirstTimePassRate(40).tier, 'LOW');
+});
+
+test('buildTaskTree groups children under present parents and keeps filtered orphans or cycles safe', () => {
+  const mk = (id, parentId = null) => ({
+    id, jiraKey: id, title: id, projectId: 'p1', parentId, type: 'TASK',
+    assigneeId: null, ownerId: 'u1', status: 'OPEN', version: 1, progress: 0, lastSummary: '', updatedAt: '',
+  });
+  const tree = buildTaskTree([mk('P1'), mk('C1', 'P1'), mk('C2', 'P1'), mk('ORPHAN', 'MISSING'), mk('CYC-A', 'CYC-B'), mk('CYC-B', 'CYC-A')]);
+  assert.deepEqual(tree.map(row => row.id), ['P1', 'ORPHAN', 'CYC-A', 'CYC-B']);
+  assert.deepEqual(tree[0].subtasks?.map(row => row.id), ['C1', 'C2']);
+  assert.equal(tree[1].subtasks, undefined);
+  assert.equal(tree[2].subtasks, undefined);
+  assert.equal(tree[3].subtasks, undefined);
 });

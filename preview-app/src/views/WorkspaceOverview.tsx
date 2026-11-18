@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { App, Button, Card, Col, Empty, Flex, Input, List, Row, Select, Skeleton, Space, Statistic, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
 import { ArrowRight, Check, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, FileSpreadsheet, FileText, FolderKanban, FolderOpen, ListTodo, Pencil, RefreshCw, Search, Terminal, X } from 'lucide-react';
-import { api, ApiError, APPROVE_ROLES, OverviewStageStat, OverviewSummary, OverviewSummaryJob, Project, projectGroup, ProjectWorkspace, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
+import { api, ApiError, APPROVE_ROLES, OverviewStageStat, OverviewSummary, OverviewSummaryJob, Project, projectGroup, ProjectWorkspace, REVIEW_STAGE_OPTIONS, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
 import { navigateWorkspace, openTaskRoute, WorkspaceSection } from './workspaceNavigation';
 import { isTaskFrozen } from './taskAvailability';
@@ -110,7 +110,7 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
     if (!jobsToApprove.length || approvingJobId || batchApproving) return;
     setBatchApproving(true);
     let approvedCount = 0;
-    const stageOrder = (stage: string) => STAGES.findIndex(item => item.value === stage);
+    const stageOrder = (stage: string) => REVIEW_STAGE_OPTIONS.findIndex(item => item.value === stage);
     const ordered = [...jobsToApprove].sort((a, b) => stageOrder(a.stage) - stageOrder(b.stage));
     try {
       for (const job of ordered) {

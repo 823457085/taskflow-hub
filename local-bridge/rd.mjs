@@ -28,7 +28,7 @@ const allowed = {
   'sync-delivery': ['config', 'data-dir', 'project', 'match'],
   'skills-sync': ['config', 'target'],
 };
-export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'];
+export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom'];
 const HEARTBEAT_STATUSES = ['IDLE', 'WORKING', 'WAITING', 'OFFLINE'];
 const MAX_REPORT_BYTES = 65_536;
 const usage = `TaskFlow 本地进度桥接（Node.js 24）

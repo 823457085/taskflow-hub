@@ -24,20 +24,6 @@ import { ThemePicker } from './ThemePicker';
 
 const DemoApp = lazy(() => import('./DemoApp'));
 
-const TOP_NAV_SECTIONS: { key: WorkspaceSection; shortLabel: string; icon: React.ReactNode }[] = [
-  { key: 'overview', shortLabel: '工作台', icon: <LayoutDashboard size={14} /> },
-  { key: 'projects', shortLabel: '项目', icon: <FolderKanban size={14} /> },
-  { key: 'tasks', shortLabel: '任务', icon: <ListTodo size={14} /> },
-  { key: 'todos', shortLabel: '待办', icon: <ListChecks size={14} /> },
-  { key: 'reports', shortLabel: '日报', icon: <NotebookText size={14} /> },
-  { key: 'reviews', shortLabel: '评审', icon: <ClipboardCheck size={14} /> },
-  { key: 'assets', shortLabel: '材料', icon: <FileText size={14} /> },
-  { key: 'members', shortLabel: '成员', icon: <Users size={14} /> },
-  { key: 'accounts', shortLabel: '账号', icon: <KeyRound size={14} /> },
-  { key: 'connections', shortLabel: '连接', icon: <Blocks size={14} /> },
-  { key: 'local', shortLabel: '本地 AI', icon: <Laptop size={14} /> },
-];
-
 export const App: React.FC<{
   themeId?: TaskFlowThemeId;
   onThemeChange?: (next: TaskFlowThemeId) => void;
@@ -87,22 +73,22 @@ export const App: React.FC<{
   };
   const sectionLabel = (key: WorkspaceSection) => key === 'members' && !access.manageMembers ? '项目成员' : key === 'connections' && !access.manageConnections ? '平台读取' : SECTION_LABELS[key];
   const menuItems: MenuProps['items'] = [
-    { type: 'group', label: railCollapsed ? '·' : '工作空间', children: [
+    { type: 'group', label: railCollapsed ? '·' : '交付', children: [
       { key: 'overview', icon: <LayoutDashboard size={14} />, label: SECTION_LABELS.overview },
       { key: 'projects', icon: <FolderKanban size={14} />, label: SECTION_LABELS.projects },
       { key: 'tasks', icon: <ListTodo size={14} />, label: SECTION_LABELS.tasks },
-      { key: 'todos', icon: <ListChecks size={14} />, label: SECTION_LABELS.todos },
-      { key: 'reports', icon: <NotebookText size={14} />, label: SECTION_LABELS.reports },
-    ] },
-    { type: 'group', label: railCollapsed ? '·' : '交付协作', children: [
       { key: 'reviews', icon: <ClipboardCheck size={14} />, label: SECTION_LABELS.reviews },
       { key: 'assets', icon: <FileText size={14} />, label: SECTION_LABELS.assets },
-      { key: 'sessions', icon: <Bot size={14} />, label: SECTION_LABELS.sessions },
       { key: 'deployments', icon: <Rocket size={14} />, label: SECTION_LABELS.deployments },
+    ] },
+    { type: 'group', label: railCollapsed ? '·' : '协作', children: [
+      { key: 'todos', icon: <ListChecks size={14} />, label: SECTION_LABELS.todos },
+      { key: 'reports', icon: <NotebookText size={14} />, label: SECTION_LABELS.reports },
+      { key: 'sessions', icon: <Bot size={14} />, label: SECTION_LABELS.sessions },
       { key: 'knowledge', icon: <BookOpen size={14} />, label: SECTION_LABELS.knowledge },
       { key: 'skills', icon: <Sparkles size={14} />, label: SECTION_LABELS.skills },
     ] },
-    { type: 'group', label: railCollapsed ? '·' : '平台与本机', children: [
+    { type: 'group', label: railCollapsed ? '·' : '设置', children: [
       { key: 'members', icon: <Users size={14} />, label: sectionLabel('members') },
       { key: 'accounts', icon: <KeyRound size={14} />, label: SECTION_LABELS.accounts },
       { key: 'connections', icon: <Blocks size={14} />, label: sectionLabel('connections') },
@@ -159,22 +145,6 @@ export const App: React.FC<{
               <span>{themeId.toUpperCase()} // {location.host}</span>
             </span>
           </button>
-          {authenticated && desktop && (
-            <nav className="tf-top-nav" aria-label="顶部快捷切换">
-              {TOP_NAV_SECTIONS.map(item => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={`tf-top-nav-item${section === item.key ? ' is-active' : ''}`}
-                  aria-current={section === item.key ? 'page' : undefined}
-                  onClick={() => navigate(item.key)}
-                >
-                  {item.icon}
-                  <span>{item.key === 'members' || item.key === 'connections' ? sectionLabel(item.key) : item.shortLabel}</span>
-                </button>
-              ))}
-            </nav>
-          )}
         </div>
         <div className="tf-shell-header-end">
           {authenticated ? (
@@ -246,15 +216,6 @@ export const App: React.FC<{
           <span>{themeMeta.label} · {location.host}</span>
         </div>
         <div className="tf-statusbar-center">{themeMeta.telemetry}</div>
-        {authenticated && (
-          <div className="tf-statusbar-right">
-            <button type="button" onClick={() => navigate('overview')}>总览</button>
-            <button type="button" onClick={() => navigate('projects')}>项目</button>
-            <button type="button" onClick={() => navigate('tasks')}>任务</button>
-            <button type="button" onClick={() => navigate('reviews')}>评审</button>
-            <button type="button" onClick={() => navigate('local')}>本地 AI</button>
-          </div>
-        )}
       </footer>
 
       {authenticated && !desktop && (

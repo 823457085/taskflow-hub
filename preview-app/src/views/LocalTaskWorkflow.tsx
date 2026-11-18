@@ -3,7 +3,7 @@ import { Alert, App, Button, Card, Checkbox, Collapse, Descriptions, Drawer, Emp
 import { Check, Copy, ExternalLink, FileCheck2, FolderGit2, FolderOpen, Play, RefreshCw, Sparkles, Square, Terminal } from 'lucide-react';
 import {
   api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, TeamAgent,
-  ProjectWorkspace, REVIEW_ROLES, ReviewJob, Role, Stage, STAGES, timeText, WorkTask,
+  ProjectWorkspace, REVIEW_ROLES, REVIEW_STAGE_OPTIONS, ReviewJob, Role, Stage, STAGES, timeText, WorkTask,
 } from './workspaceApi';
 import { buildCompanionSyncCommand, buildLocalTaskPrompt, LOCAL_TASK_TARGETS, localReviewCandidates, LocalTaskMode, LocalTaskTarget } from './localTaskWorkflowPrompt';
 import { extractTaskSmartHints } from './taskSmartLinks';
@@ -11,6 +11,7 @@ import { aiRunModeLabel, aiRunStatusLabel, runLocationLabel, severityLabel, stag
 import { isSubmitShortcut, readStoredBool, readStoredChoice, writeStoredBool, writeStoredString } from './uiPreferences';
 import { StatusBadge } from '../components/Primitives';
 import { bridgeInstallCommand } from './bridgeInstall';
+import { ChecklistTable, draftExtras, VerdictTag } from './ChainReportBits';
 
 const AI_ENGINE_PREF_KEY = 'taskflow.ai.engine';
 const AI_AUTO_SUBMIT_KEY = 'taskflow.ai.autoSubmitReport';
@@ -94,7 +95,7 @@ export const LocalTaskWorkflow: React.FC<{
   try {
     prompt = buildLocalTaskPrompt({ task, jobs, mode: safeMode, target, selectedJobId: jobId, canDevelop: canDevelop || !task.assigneeId, frozen, allowedStages, repoPath: workspace?.repoPath });
   } catch { /* Unavailable or changed candidates leave manual copying disabled until selected again. */ }
-  const companionCommand = safeMode === 'develop' ? buildCompanionSyncCommand({ jiraKey: task.jiraKey, target, repoPath: workspace?.repoPath }) : '';
+  const companionCommand = safeMode === 'develop' ? buildCompanionSyncCommand({ task, target, repoPath: workspace?.repoPath }) : '';
   const scope = JSON.stringify([open, userId, task.id, task.projectId, task.version, task.status, role, canDevelop, frozen, canCreateLocalReview, safeMode, target, jobId, candidateScope, workspace?.repoPath || '', prompt]);
   const currentScope = useRef(scope);
   currentScope.current = scope;
@@ -107,7 +108,7 @@ export const LocalTaskWorkflow: React.FC<{
   const selectedEngine = workbench && engine !== 'cursor' ? 'codex' : engine;
   const engineOptions = workbench ? [{ value: 'codex', label: 'Codex CLI' }, { value: 'cursor', label: 'Cursor Agent' }] : (capabilities?.engines || [
     { id: 'codex' as const, label: 'Codex', tool: 'codex-cli', available: true },
-    { id: 'antigravity' as const, label: 'Gemini / Antigravity', tool: 'custom', available: true },
+    { id: 'antigravity' as const, label: 'Gemini / Antigravity', tool: 'antigravity', available: true },
     { id: 'cursor' as const, label: 'Cursor Agent', tool: 'cursor', available: true },
     { id: 'claude' as const, label: 'Claude Code', tool: 'claude-code', available: true },
   ]).map(item => ({
@@ -178,7 +179,8 @@ export const LocalTaskWorkflow: React.FC<{
     setRuns([]);
     setTarget('workbench');
     setEngine(storedEngine || 'codex');
-    setJobId(initialJobId || (open && candidates.length === 1 ? candidates[0].id : ''));
+    const stageCandidate = initialStage ? candidates.find(item => item.stage === initialStage)?.id : undefined;
+    setJobId(initialJobId || stageCandidate || (initialStage ? '__auto__' : open && candidates.length === 1 ? candidates[0].id : ''));
     setReviewStage(initialStage || allowedStages[0] || '');
     setAutoClaim(true);
     setAutoSubmitReport(readStoredBool(AI_AUTO_SUBMIT_KEY, false));
@@ -412,6 +414,7 @@ export const LocalTaskWorkflow: React.FC<{
         summary: run.draft.summary,
         ...(run.draft.evidence ? { evidence: run.draft.evidence } : {}),
         findings: run.draft.findings || [],
+        ...draftExtras(run.draft),
       });
       if (!mounted.current) return;
       void message.success('已一键提交本地 AI 评审报告，等待其他授权成员独立审批。');
@@ -613,7 +616,7 @@ export const LocalTaskWorkflow: React.FC<{
                     style={{ width: '100%' }}
                     value={reviewStage || undefined}
                     placeholder="选择评审阶段（自动冻结当前材料并创建申请）"
-                    options={STAGES.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
+                    options={REVIEW_STAGE_OPTIONS.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
                     onChange={val => setReviewStage(val)}
                   />
                 )}
@@ -627,7 +630,7 @@ export const LocalTaskWorkflow: React.FC<{
               <Select
                 style={{ width: '100%' }}
                 value={reviewStage || undefined}
-                options={STAGES.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
+                options={REVIEW_STAGE_OPTIONS.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
                 onChange={val => setReviewStage(val)}
               />
             </div>
@@ -734,10 +737,11 @@ export const LocalTaskWorkflow: React.FC<{
             )}
 
             {activeRun.mode === 'review' && activeRun.draft && (
-              <Card size="small" style={{ background: 'var(--tf-raised)', borderColor: 'var(--tf-border)' }} title={<Space size={6}><FileCheck2 size={15} /><span>结构化评审草稿预览</span></Space>}>
+              <Card size="small" style={{ background: 'var(--tf-raised)', borderColor: 'var(--tf-border)' }} title={<Space size={6}><FileCheck2 size={15} /><span>结构化评审草稿预览</span><VerdictTag verdict={activeRun.draft.verdict} score={activeRun.draft.score} /></Space>}>
                 <Flex vertical gap={8}>
                   <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>{activeRun.draft.summary}</Typography.Paragraph>
                   {activeRun.draft.evidence && <Typography.Text type="secondary" style={{ fontSize: 12 }}>核验依据：{activeRun.draft.evidence}</Typography.Text>}
+                  {!!activeRun.draft.checklist?.length && <ChecklistTable items={activeRun.draft.checklist} />}
                   {activeRun.draft.findings.length > 0 ? (
                     <Space orientation="vertical" size={4} style={{ width: '100%' }}>
                       {activeRun.draft.findings.map((finding, idx) => (

@@ -73,7 +73,7 @@ test('custom client pairs and collaborates within current project and device per
 });
 
 test('custom is a fixed source alongside legacy clients, not an arbitrary plugin executable', async t => {
-  assert.deepEqual(TOOLS, ['codex', 'codex-cli', 'claude-code', 'cursor', 'custom']);
+  assert.deepEqual(TOOLS, ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravity', 'custom']);
   assert.deepEqual(CLI_TOOLS, TOOLS);
   const app = createPlatform({ dbPath: ':memory:', logger: { error() {} } });
   app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); t.after(() => app.close());
@@ -82,5 +82,5 @@ test('custom is a fixed source alongside legacy clients, not an arbitrary plugin
   for (const tool of TOOLS) assert.equal((await pair({ deviceName: 'Compatibility fixture', tool })).status, 201);
   assert.equal((await pair({ deviceName: 'Invalid source', tool: 'arbitrary-plugin' })).status, 400);
   assert.equal((await pair({ deviceName: 'Injected executable', tool: 'custom', command: 'arbitrary-command' })).status, 400);
-  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM local_authorizations').get().n, 5);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM local_authorizations').get().n, TOOLS.length);
 });

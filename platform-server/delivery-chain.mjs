@@ -278,7 +278,10 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
 
     const childRows = children.map(child => ({ id: child.id, jiraKey: child.jiraKey, title: child.title, status: child.status, jiraStatus: child.externalRef?.status || null, assignee: userName(child.assigneeId), url: jiraUrl(child.jiraKey), links: statusesFor(child, memo) }));
     const breakdown = links.find(link => link.id === 'BREAKDOWN');
-    const traceability = (breakdown.review?.checklist || []).filter(item => jiraKeysIn(item.ref).length || /需求点|AC|验收/.test(item.item)).map(item => ({
+    const checklist = breakdown.review?.checklist || [];
+    const reqPoints = checklist.filter(item => /PRD|需求点|验收|\bAC\b|§/i.test(item.item));
+    const traceRows = reqPoints.length ? reqPoints : checklist.filter(item => jiraKeysIn(item.ref).length);
+    const traceability = traceRows.map(item => ({
       point: item.item, result: item.result, note: item.note,
       tasks: jiraKeysIn(item.ref).map(key => { const child = childRows.find(row => row.jiraKey === key); return { key, title: child?.title || null, taskId: child?.id || null, links: child?.links || null }; }),
     }));
