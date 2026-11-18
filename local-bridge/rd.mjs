@@ -23,7 +23,8 @@ const allowed = {
   pair: ['url', 'web-url', 'name', 'tool'], doctor: ['project', 'adapter'],
   connect: ['url', 'web-url', 'name', 'tool', 'projects'],
   'install-mcp': ['client', 'adapter', 'project'], 'adapter-template': [], 'export-mcp': ['adapter'],
-  worker: ['config', 'once'], 'worker-init': ['config'], service: ['action', 'config'],
+  worker: ['config', 'once'], 'worker-init': ['config', 'preset'], service: ['action', 'config'],
+  workbench: ['action', 'port', 'service'], update: [],
   'sync-delivery': ['config', 'data-dir', 'project', 'match'],
   'skills-sync': ['config', 'target'],
 };
@@ -50,9 +51,11 @@ const usage = `TaskFlow 本地进度桥接（Node.js 24）
   sync --task <任务 UUID> --tool <codex|codex-cli|claude-code|cursor|custom> --progress <0..100> --summary <摘要> [--branch <分支>]
   heartbeat --task <任务 UUID> --tool <codex|codex-cli|claude-code|cursor|custom> --status <IDLE|WORKING|WAITING|OFFLINE>
   logout
-  worker-init [--config <配置文件>]  生成本机 Bridge 配置模板（项目仓库映射、执行器、是否允许开发类任务）
+  worker-init [--config <配置文件>] [--preset member]  生成本机 Bridge 配置模板；member 生成可直接运行的成员默认配置（不接开发任务，开启网页工作台转发）
   worker [--config <配置文件>] [--once yes]  常驻领取服务器派发给本设备的任务，在本机执行并回传结果
-  service --action <install|uninstall|status> [--config <配置文件>]  macOS 上把 worker 注册为登录后自动运行的后台服务（launchd）
+  service --action <install|uninstall|restart|status> [--config <配置文件>]  macOS 上把 worker 注册为登录后自动运行的后台服务（launchd）
+  workbench --action <install|run|status|restart|uninstall> [--port 5288] [--service <yes|no>]  从服务器安装本机工作台到 ~/.taskflow/workbench 并注册自动运行；新版本下载后在下次重启工作台时生效
+  update  立即检查服务器发布的新版本：Bridge 替换后需重启 worker，工作台新版本在下次重启时生效
   sync-delivery [--config <配置文件>] [--data-dir <Delivery/.local/data>] [--project <平台项目ID> --match <部署项目名,名>]  立即把 Delivery 的 Agent 会话（默认仅自己可见）和部署记录同步到平台
   skills-sync [--config <配置文件>] [--target <Skill 目录，如 ~/.codex/skills>]  把已授权项目中启用的团队 Skill 写入本机，并移除已下线的团队 Skill
 仅 install-mcp 写入指定项目的 taskflow MCP 配置；只有 worker 会在本机启动 AI，且只执行派发给本设备的任务。`;
@@ -103,7 +106,13 @@ export function parseArgs(args) {
     if (!['yes', 'no'].includes(options.claim)) fail('--claim 必须是 yes 或 no。');
   }
   if (['review-context', 'submit-report'].includes(command) && !/^[A-Za-z0-9_-]{1,80}$/.test(options.job || '')) fail('需要有效的 --job 评审 ID。');
-  if (command === 'service' && !['install', 'uninstall', 'status'].includes(options.action)) fail('--action 只能是 install、uninstall 或 status。');
+  if (command === 'service' && !['install', 'uninstall', 'restart', 'status'].includes(options.action)) fail('--action 只能是 install、uninstall、restart 或 status。');
+  if (command === 'worker-init' && options.preset !== undefined && options.preset !== 'member') fail('--preset 只支持 member。');
+  if (command === 'workbench') {
+    if (!['install', 'run', 'status', 'restart', 'uninstall'].includes(options.action)) fail('--action 只能是 install、run、status、restart 或 uninstall。');
+    if (options.port !== undefined && (!/^\d{2,5}$/.test(options.port) || Number(options.port) < 1024 || Number(options.port) > 65535)) fail('--port 必须是 1024..65535 的端口。');
+    if (options.service !== undefined && !['yes', 'no'].includes(options.service)) fail('--service 只能是 yes 或 no。');
+  }
   if (command === 'skills-sync' && options.target !== undefined && (!options.target.trim() || /[\x00\r\n]/.test(options.target))) fail('--target 目录不正确。');
   if (command === 'sync-delivery') {
     if (options['data-dir'] !== undefined && (!options['data-dir'].trim() || /[\x00\r\n]/.test(options['data-dir']))) fail('--data-dir 目录不正确。');
@@ -236,6 +245,31 @@ function printData(value) {
   // Server output is untrusted. Known secret fields are never printed.
   process.stdout.write(`${JSON.stringify(redactSecrets(value), null, 2)}\n`);
 }
+async function workbenchCommand(options) {
+  const { dirname, join } = await import('node:path');
+  const updater = await import('./updater.mjs');
+  const { stateDir } = await import('./api-client.mjs');
+  const root = dirname(stateDir);
+  const port = Number(options.port || updater.WORKBENCH_PORT);
+  if (options.action === 'run') { process.exitCode = await updater.runWorkbench(root); return; }
+  const { manageService } = await import('./service.mjs');
+  if (options.action === 'status') { printData({ ...await updater.workbenchVersion(root), service: process.platform === 'darwin' ? await manageService('status', { kind: 'workbench' }) : null }); return; }
+  if (options.action === 'restart') { printData(await manageService('restart', { kind: 'workbench' })); return; }
+  if (options.action === 'uninstall') { printData({ ...await manageService('uninstall', { kind: 'workbench' }), kept: updater.workbenchPaths(root).base }); return; }
+  const session = await loadSession();
+  const installed = await updater.workbenchVersion(root);
+  if (!installed.current && await updater.portInUse(port)) {
+    printData({ status: 'SKIPPED', message: `本机 ${port} 端口已有工作台或其他程序在运行，未重复安装；网页工作台会转发到它。`, port });
+  } else {
+    const result = await updater.installWorkbench({ root, hub: session.url, release: await updater.fetchRelease(session.url), port, log: line => process.stderr.write(`${line}\n`) });
+    const service = options.service !== 'no' && process.platform === 'darwin' && result.active ? await manageService('install', { kind: 'workbench' }) : null;
+    printData({ status: result.changed ? (result.active ? 'INSTALLED' : 'STAGED') : 'UP_TO_DATE', version: result.version, ...(service ? { service: service.status } : {}),
+      ...(result.changed && !result.active ? { message: '新版本已下载，下次重启工作台时生效：taskflow-bridge workbench --action restart' } : {}) });
+  }
+  const { workerConfigPath } = await import('./worker.mjs');
+  if (await updater.enableWorkbenchRelay(workerConfigPath, port).catch(() => false)) process.stderr.write(`已在 ${join(stateDir, 'worker.json')} 开启网页工作台转发，重启 Bridge 后生效\n`);
+}
+
 export async function main(args) {
   const { command, options } = parseArgs(args);
   if (command === 'help') { process.stdout.write(`${usage}\n`); return; }
@@ -249,13 +283,14 @@ export async function main(args) {
   if (command === 'pair') { await pairDevice(options); return; }
   if (command === 'connect') { await connectDevice(options); return; }
   if (command === 'worker-init') {
-    const { workerConfigPath, workerConfigTemplate } = await import('./worker.mjs');
+    const { workerConfigPath, workerConfigTemplate, memberWorkerConfig } = await import('./worker.mjs');
     const target = options.config ? resolve(options.config) : workerConfigPath;
     const { mkdir, writeFile } = await import('node:fs/promises');
     await mkdir(resolve(target, '..'), { recursive: true, mode: 0o700 });
-    try { await writeFile(target, `${JSON.stringify(workerConfigTemplate(), null, 2)}\n`, { mode: 0o600, flag: 'wx' }); }
+    const member = options.preset === 'member';
+    try { await writeFile(target, `${JSON.stringify(member ? memberWorkerConfig() : workerConfigTemplate(), null, 2)}\n`, { mode: 0o600, flag: 'wx' }); }
     catch (error) { if (error.code === 'EEXIST') fail(`配置已存在，未覆盖：${target}`); throw error; }
-    printData({ status: '已生成 Bridge 配置模板，请填写项目仓库映射', config: target });
+    printData({ status: member ? '已生成成员默认配置，可直接运行；接收开发任务前再填写项目仓库映射' : '已生成 Bridge 配置模板，请填写项目仓库映射', config: target });
     return;
   }
   if (command === 'service') {
@@ -267,7 +302,14 @@ export async function main(args) {
     const { runWorker } = await import('./worker.mjs');
     const controller = new AbortController();
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => { controller.abort(); process.exit(0); });
-    await runWorker({ config: options.config && resolve(options.config), once: options.once === 'yes' }, { signal: controller.signal });
+    const result = await runWorker({ config: options.config && resolve(options.config), once: options.once === 'yes' }, { signal: controller.signal });
+    if (result?.restart) process.exit(0);
+    return;
+  }
+  if (command === 'workbench') { await workbenchCommand(options); return; }
+  if (command === 'update') {
+    const { checkForUpdates } = await import('./worker.mjs');
+    printData(await checkForUpdates({ url: (await loadSession()).url, log: line => process.stderr.write(`${line}\n`) }));
     return;
   }
   if (command === 'doctor') {

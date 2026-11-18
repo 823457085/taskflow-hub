@@ -1,0 +1,41 @@
+# 服务器托管工作台：每个 TaskFlow 用户一个实例（%i 为槽位号），由 taskflow-api 按需启动、空闲停止。
+# 文件访问与 AI 命令经个人 Agent 在该用户自己的电脑上执行；数据与凭据留在 /var/lib/taskflow-wb/%i。
+[Unit]
+Description=TaskFlow 服务器工作台实例 %i
+After=network-online.target taskflow-api.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 必须带固定 User 名：仅 DynamicUser=yes 时每次启动可能换 UID，旧 StateDirectory 文件会 EACCES（如 workbench-dismissals）。
+DynamicUser=yes
+User=taskflow-workbench
+StateDirectory=taskflow-wb/%i
+StateDirectoryMode=0700
+EnvironmentFile=/var/lib/taskflow/wb-env/%i.env
+Environment=DELIVERY_WORKSPACE_SUPERVISOR=systemd
+WorkingDirectory=/opt/taskflow/workbench/current
+ExecStart=/usr/local/bin/node --max-old-space-size=640 --import ./server/plugins/bootstrap.mjs --import tsx server/index.ts
+Restart=on-failure
+# 安全关闭完成后用退出码 75 请求 systemd 重启当前实例。
+SuccessExitStatus=75
+RestartForceExitStatus=75
+RestartSec=5
+TimeoutStopSec=20
+# 2 GB 内存的服务器：MemoryLimit 用于 cgroup v1，MemoryHigh/MemoryMax 用于 v2；内存不足时先杀工作台、保住 taskflow-api。
+MemoryLimit=900M
+MemoryHigh=800M
+MemoryMax=900M
+OOMScoreAdjust=500
+# systemd 239 按此 umask 在沙箱里建 root 所属的中间目录 taskflow-wb/；0077 会让实例用户进不去自己的目录。
+UMask=0066
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+InaccessiblePaths=-/etc/taskflow -/var/lib/taskflow -/root

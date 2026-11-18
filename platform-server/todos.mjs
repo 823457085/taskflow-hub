@@ -23,7 +23,12 @@ const detailsField = value => value === undefined || value === '' ? '' : textFie
 
 export function createTodos({ db, transaction, audit, projectRole, visibleProjects }) {
   const iso = () => new Date().toISOString();
-  const requireUser = user => { if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权管理待办'); };
+  // A paired device acts for its owner's own workbench: personal todos only, no delegation or task links.
+  const deviceLimits = (user, body, row) => {
+    if (!user.localDevice) return;
+    if (body && ['projectId', 'assigneeId', 'taskId'].some(name => body[name] !== undefined)) fail(403, 'LOCAL_DEVICE_SCOPE', '本机工作台只能管理个人待办内容，项目指派请在任务中心操作');
+    if (row && row.project_id && row.owner_id !== user.id && row.assignee_id !== user.id) fail(403, 'LOCAL_DEVICE_SCOPE', '本机工作台只能修改自己的待办');
+  };
   const access = (user, row) => {
     if (!row.project_id) return { edit: row.owner_id === user.id, remove: row.owner_id === user.id, assign: row.owner_id === user.id };
     const permissions = projectPermissions(user, projectRole(user, row.project_id));
@@ -75,6 +80,7 @@ export function createTodos({ db, transaction, audit, projectRole, visibleProjec
 
   function create(user, body) {
     known(body, ['projectId', ...EDITABLE]);
+    deviceLimits(user, body);
     const projectId = body.projectId ? textField(body.projectId, 'projectId', { max: 64 }) : null;
     if (projectId) projectRole(user, projectId);
     const assigneeId = assigneeField(projectId, body.assigneeId);
@@ -96,6 +102,7 @@ export function createTodos({ db, transaction, audit, projectRole, visibleProjec
   function update(user, id, body) {
     known(body, ['expectedVersion', ...EDITABLE]);
     const row = load(user, id);
+    deviceLimits(user, body, row);
     const can = access(user, row);
     if (!can.edit) fail(403, 'FORBIDDEN', '只有创建人、负责人或项目负责人可以修改该待办');
     if (!Number.isInteger(body.expectedVersion) || body.expectedVersion < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
@@ -122,6 +129,7 @@ export function createTodos({ db, transaction, audit, projectRole, visibleProjec
 
   function remove(user, id, url) {
     const row = load(user, id);
+    if (user.localDevice && row.project_id) fail(403, 'LOCAL_DEVICE_SCOPE', '本机工作台不能删除项目待办，请在任务中心操作');
     if (!access(user, row).remove) fail(403, 'FORBIDDEN', '只有创建人或项目负责人可以删除该待办');
     const expected = Number(url.searchParams.get('expectedVersion'));
     if (!Number.isInteger(expected) || expected < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
@@ -156,19 +164,19 @@ export function createTodos({ db, transaction, audit, projectRole, visibleProjec
 
   return function handle({ method, path, url, user, body, send }) {
     if (path === '/api/todos') {
-      requireUser(user);
-      if (method === 'GET') { send(200, { todos: list(user, url) }); return true; }
+      if (method === 'GET') {
+        if (user.localDevice && (url.searchParams.get('scope') || 'mine') !== 'mine') fail(403, 'LOCAL_DEVICE_SCOPE', '本机工作台只能读取自己的待办');
+        send(200, { todos: list(user, url) }); return true;
+      }
       if (method === 'POST') { send(201, { todo: create(user, body) }); return true; }
       fail(405, 'METHOD_NOT_ALLOWED', '该操作不支持');
     }
     if (path === '/api/todos/import') {
-      requireUser(user);
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
       send(200, importPersonal(user, body)); return true;
     }
     const match = path.match(/^\/api\/todos\/([^/]+)$/);
     if (!match) return false;
-    requireUser(user);
     if (method === 'PATCH') { send(200, { todo: update(user, match[1], body) }); return true; }
     if (method === 'DELETE') { remove(user, match[1], url); send(204); return true; }
     fail(405, 'METHOD_NOT_ALLOWED', '该操作不支持');

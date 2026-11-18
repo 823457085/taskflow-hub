@@ -17,6 +17,7 @@ import {
   Users,
 } from 'lucide-react';
 import { PlatformServiceView } from './views/PlatformServiceView';
+import { openWorkbench } from './views/workspaceApi';
 import { currentWorkspaceSection, navigateWorkspace, SECTION_LABELS, WorkspaceSection } from './views/workspaceNavigation';
 import { DEFAULT_TASKFLOW_THEME, resolveTaskFlowTheme, type TaskFlowThemeId } from './theme';
 import { ThemePicker } from './ThemePicker';
@@ -176,15 +177,12 @@ export const App: React.FC<{
           )}
         </div>
         <div className="tf-shell-header-end">
-          <a
-            href="http://127.0.0.1:5288/agent"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="tf-companion-pill"
-          >
-            <span>5288 Agent 工作台</span>
-            <ExternalLink size={12} />
-          </a>
+          {authenticated ? (
+            <button type="button" className="tf-companion-pill" onClick={() => openWorkbench()}>
+              <span>我的工作台</span>
+              <ExternalLink size={12} />
+            </button>
+          ) : null}
           {authenticated && desktop && (
             <Button
               size="small"

@@ -36,7 +36,7 @@ ssh root@taskflow.example.com 'grep ^TASKFLOW_SETUP_TOKEN= /etc/taskflow/taskflo
 ```bash
 # 本地仓库根目录
 npm --prefix preview-app run build && npm run pack:bridge   # 网页 + 成员一键安装用的客户端包与脚本
-tar czf /tmp/tf.tgz --exclude='*.test.mjs' platform-server/*.mjs platform-server/*.d.mts platform-server/package.json deploy -C preview-app dist
+tar czf /tmp/tf.tgz --exclude='*.test.mjs' --exclude='*.fixture.mjs' platform-server/*.mjs platform-server/*.d.mts platform-server/package.json platform-server/workbench-remote deploy -C preview-app dist
 scp /tmp/tf.tgz root@taskflow.example.com:/tmp/
 ssh root@taskflow.example.com 'set -e; systemctl start taskflow-backup.service
   rm -rf /tmp/tf && mkdir /tmp/tf && tar xzf /tmp/tf.tgz -C /tmp/tf
@@ -56,6 +56,34 @@ ssh root@taskflow.example.com 'set -e; systemctl start taskflow-backup.service
 - `TASKFLOW_BRIDGE_MODES` 控制允许派发的处理方式。当前实例为 `read,review,develop`；开发类派发还需成员本机显式开启并逐次确认。
 - 每人同时最多 2 个进行中的派发；排队超过 30 分钟未领取、或领取后 60 秒无心跳，会标记为中断。
 
+### 网页工作台（多人）
+
+成员在浏览器打开 `https://taskflow.example.com:80`（或任务中心顶栏「我的工作台」），使用 `https://taskflow.example.com`（443 端口）的任务中心账号登录。转发模式下，工作台的执行、数据和凭据留在本人电脑，服务器负责登录和转发。
+
+```
+浏览器 ──HTTPS──▶ Nginx(80) ──▶ 工作台网关(127.0.0.1:5189) ──┐ 仅派给本人名下设备
+成员电脑：Bridge ──HTTPS 长轮询 /api/bridge/tunnel──────────────────────────┘ ──▶ 本机工作台(127.0.0.1:5288)
+```
+
+- 登录交接：网关没有会话时跳到任务中心，网页用已登录会话换取 60 秒一次性票据，在工作台端口换成 `__Host-tfwb` Cookie。退出任务中心或会话过期，工作台会话同时失效。
+- 隔离：请求只派给当前用户本人配对且未撤销的设备；别人的设备领不到、也无法回传。工作台会话 Cookie 不会转发到本机工作台。
+- 写请求须带完整工作台 Origin（含端口）。网关核验来源，并在转发前移除任务中心和网关的会话 Cookie。同一 IP 的浏览器 Cookie 会发到两个端口。
+- 设置 `TASKFLOW_WORKBENCH_HOST=taskflow.example.com:80`、`TASKFLOW_WORKBENCH_PORT=5189`、`TASKFLOW_PUBLIC_ORIGIN=https://taskflow.example.com`。Nginx 的两个入口复用证书，证书须覆盖实际公网主机名或 IP。将 `nginx/taskflow.conf` 中工作台的监听地址替换为公网 IP 映射的服务器网卡 IPv4。为工作台开放 TCP 80，工作台在该端口使用 TLS，明文 HTTP 仍跳转至任务中心。5187 和 5189 仅监听回环。
+- 成员电脑：在 `worker.json` 加 `"workbench": { "url": "http://127.0.0.1:5288" }` 并重启 Bridge 服务；本机工作台需在运行。电脑离线时页面显示「你的电脑未连接」。
+- 暂不支持 WebSocket（终端、浏览器远程控制等依赖 WebSocket 的功能在网页工作台中不可用）。
+
+#### 服务器托管模式（`TASKFLOW_WORKBENCH_MODE=server`）
+
+工作台按用户运行在服务器上（`systemd/taskflow-workbench@.service`，槽位 `%i`，端口 5300+槽位），AI 命令行与 git 仍经个人 Agent 在本人电脑执行。
+
+- 服务器实例的发布目录只读。切换 `/opt/taskflow/workbench/current` 前，在待发布版本中完成构建并核对 `dist/workspace-version.json` 与源码。实例启动时校验随包的页面产物，工作台配套运行版本须支持 `DELIVERY_WORKSPACE_SUPERVISOR=systemd`。页面「设置 → 状态与存储 → 重启服务器工作台」会等待任务空闲并备份状态，退出码 `75` 由 systemd 重启当前实例。
+- 每个实例常驻约 650–700 MB。2 核 2 GB 的服务器只够 1 个实例，需先加交换空间：`fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile`，写入 `/etc/fstab`，并设 `vm.swappiness=10`。多人使用至少 4 核 8 GB。
+- 单元已限制实例内存（V8 堆 640 MB、cgroup 900 MB），OOM 时优先杀工作台（`OOMScoreAdjust=500`），`taskflow-api` 为 `-500`；5 分钟内失败 5 次即停止重启。
+- 迁移本机数据到 `/var/lib/private/taskflow-wb/<槽位>/data` 时不要带 `node_modules`、`dist`、`.vite`、`.state-backups`、`.state-access.json.stale-*`，属主改为实例目录属主。
+- 公司内网的 Jira / Confluence：服务器访问不到时，会经个人 Agent 从你电脑转发（需 Bridge 在线）。
+- 中间目录权限须为 `711`：`chmod 711 /var/lib/private/taskflow-wb`。若为 `700`，实例能启动但读不到 `plugins.json`，页面提示「部分来源尚未就绪」。单元 `UMask=0066` 后新建目录会是 `711`；从旧版升级时需手动执行一次上述 chmod。
+- 单元须带固定名 `User=taskflow-workbench`（配合 `DynamicUser=yes`）。若只有 DynamicUser、无 User，重启后 UID 可能变化，`/var/lib/private/taskflow-wb/%i` 仍属旧 UID，会出现 `workbench-dismissals` EACCES，页面同样显示「部分来源尚未就绪」。修复：`chown -R taskflow-workbench:taskflow-workbench /var/lib/private/taskflow-wb/%i` 后 `systemctl restart taskflow-workbench@%i`。
+
 ## 二、成员电脑接入 Bridge
 
 前提：Node.js 24+，以及本机已登录的 `codex` 或 `cursor-agent`（或本机运行中的 Delivery 5288）。不需要 TaskFlow 源码。
@@ -66,14 +94,27 @@ ssh root@taskflow.example.com 'set -e; systemctl start taskflow-backup.service
 curl -fsSk https://taskflow.example.com/install-bridge.sh -o /tmp/taskflow-install.sh && sh /tmp/taskflow-install.sh https://taskflow.example.com '张三的MacBook'
 ```
 
-脚本会：下载服务器证书并请你核对指纹（也可预先设置 `TASKFLOW_CA_SHA256`），用该证书校验并下载客户端到 `~/.taskflow/app`，发起配对（在网页「本机接入」确认并勾选项目），生成 `~/.taskflow/state/worker.json`。重复运行即升级，配对与配置保留。
+脚本会：下载服务器证书并请你核对指纹（也可预先设置 `TASKFLOW_CA_SHA256`），用该证书校验并下载 Bridge 到 `~/.taskflow/app`，发起配对（在网页「本机接入」确认并勾选项目），生成可直接运行的成员默认配置 `~/.taskflow/state/worker.json`（不接开发任务、开启网页工作台转发），再安装本机工作台到 `~/.taskflow/workbench`，并在 macOS 上把 Bridge 与工作台都注册为登录自动运行。重复运行即升级，配对与配置保留。
 
-之后编辑 `worker.json`（字段见下文第 3 步），再执行：
+- 本机 5288 端口已有工作台在运行时不会重复安装，网页工作台直接转发到它。只装 Bridge：命令前加 `TASKFLOW_SKIP_WORKBENCH=1`。
+- 工作台代码按版本放在 `workbench/releases/`，`workbench/.env`（含集成凭据）和 `workbench/data/` 升级时保留。
+- 自动更新：Bridge 每 6 小时读取服务器的 `taskflow-release.json`，安装包按 SHA-256 校验。Bridge 在空闲时替换并由 launchd 重启；工作台新版本只下载就绪，下次重启工作台时生效（`taskflow-bridge workbench --action restart`），不会打断正在执行的会话。关闭：`worker.json` 加 `"autoUpdate": false`；立即检查：`taskflow-bridge update`。
+
+要接收开发任务时，编辑 `worker.json`（字段见下文第 3 步），然后：
 
 ```bash
-~/.taskflow/bin/taskflow-bridge worker                      # 前台试运行
-~/.taskflow/bin/taskflow-bridge service --action install    # macOS：登录后自动后台运行（launchd）
+~/.taskflow/bin/taskflow-bridge service --action restart    # 重启 Bridge 使配置生效
 ~/.taskflow/bin/taskflow-bridge service --action status     # 状态；日志在 ~/.taskflow/state/worker.log
+~/.taskflow/bin/taskflow-bridge workbench --action status   # 工作台版本与服务状态；日志在 ~/.taskflow/workbench/workbench.log
+```
+
+### 发布成员客户端（管理员）
+
+构建任务中心网页后打包，随网页一起部署；内容不变时版本号不变，成员端不会重复更新：
+
+```bash
+npm --prefix preview-app run build
+node scripts/pack-release.mjs --workbench /path/to/delivery-workspace   # 工作台目录需已执行 pnpm build；不带 --workbench 则只发布 Bridge
 ```
 
 ### 团队派发
@@ -146,6 +187,14 @@ Delivery 更新到包含 `server/taskflow-bridge.ts` 的版本并重启后，会
   "delivery": { "url": "http://127.0.0.1:5288", "tokenFile": "/Delivery数据目录绝对路径/taskflow-bridge/token" }
 }
 ```
+
+macOS 后台服务通过 `launchd` 启动时，访问位于「桌面」等受保护目录的令牌可能报 `EPERM`，即使文件权限是 `0600`。用当前用户的终端将同一份令牌复制到 `~/.taskflow/state/delivery-token`，将 `delivery.tokenFile` 改为该文件的绝对路径，再执行 `~/.taskflow/bin/taskflow-bridge service --action restart`：
+
+```bash
+install -m 600 "/Delivery数据目录绝对路径/taskflow-bridge/token" "$HOME/.taskflow/state/delivery-token"
+```
+
+Delivery 重新生成令牌后，同步更新这份副本。
 
 任务会在 Delivery 中以 TaskFlow 会话运行（可在 5288 的 Agent 页面查看过程），结果仍回传到服务器。Delivery 的该入口只接受本机回环请求并要求携带令牌，浏览器页面无法调用。
 

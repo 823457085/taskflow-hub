@@ -17,6 +17,9 @@ import { createDeployments } from './deployments.mjs';
 import { createKnowledge } from './knowledge.mjs';
 import { createTeamSkills } from './team-skills.mjs';
 import { createAccounts } from './accounts.mjs';
+import { createWorkbenchGateway, workbenchPublicUrl } from './workbench-gateway.mjs';
+import { createRemoteBroker } from './remote-broker.mjs';
+import { createWorkbenchInstances } from './workbench-instances.mjs';
 import { globalPermissions, projectPermissions, canEditMemberRole, assertMemberRoleChange } from './permissions.mjs';
 import { ApiError, ROLES, PROJECT_ROLES, STAGES, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
 const scrypt = promisify(scryptCallback);
@@ -50,7 +53,7 @@ function repoPathField(value) {
 }
 const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
 const LOCAL_ONLY_ROUTES = [/^\/api\/local-automation\//, /^\/api\/local-git\//, /^\/api\/projects\/[^/]+\/git-status$/, /^\/api\/tasks\/[^/]+\/assets\/from-git$/, /^\/api\/tasks\/[^/]+\/ai-runs$/, /^\/api\/ai-runs\//];
-export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186', deployment = 'local', trustProxy = false, cookieSecure = false, deviceSessionMs, setupToken = '', bridgeModes = ['read', 'review'] } = {}) {
+export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186', deployment = 'local', trustProxy = false, cookieSecure = false, deviceSessionMs, setupToken = '', bridgeModes = ['read', 'review'], workbenchHost = '', publicOrigin = '', workbenchMode = 'relay', workbenchInstanceOptions = {} } = {}) {
   if (!['local', 'server'].includes(deployment)) throw new Error('deployment must be local or server');
   const serverMode = deployment === 'server';
   // Behind a reverse proxy every socket is loopback, so loopback-gated local features must not exist in server mode.
@@ -108,6 +111,14 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
     workbenchBridge, canUseHostBridge: localDevices.canUseHostBridge,
   });
   const bridgeDispatch = serverMode ? createBridgeDispatch({ db, transaction, audit, projectRole, getTask, taskRole, assertWritable, assertAncestorsOpen, workflow, allowedModes: bridgeModes, now: deviceClock }) : null;
+  let workbenchInstances = null;
+  const remoteBroker = serverMode ? createRemoteBroker({ db, now: deviceClock, logger, instanceUser: token => workbenchInstances?.instanceUser(token) || null,
+    onAgent: (userId, info) => { workbenchInstances?.agentConnected(userId, info).catch(() => {}); } }) : null;
+  if (serverMode && workbenchHost && workbenchMode === 'server') {
+    workbenchInstances = createWorkbenchInstances({ db, audit, now: deviceClock, logger, broker: remoteBroker, apiUrl: hostBridgeApiUrl,
+      preload: resolve(import.meta.dirname, 'workbench-remote/preload.mjs'), ...workbenchInstanceOptions });
+  }
+  const workbenchGateway = serverMode && workbenchHost ? createWorkbenchGateway({ db, audit, host: workbenchHost, publicOrigin, now: deviceClock, logger, instances: workbenchInstances }) : null;
   const serverAutomation = async context => {
     const { method, path, send } = context;
     if (await bridgeDispatch.handle(context)) return true;
@@ -134,6 +145,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
     try {
       const url = new URL(req.url, 'http://localhost'); const path = url.pathname; const method = req.method;
       if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 5, deployment });
+      if (remoteBroker && await remoteBroker.instanceRoutes(req, res, path, method)) return;
       if (!['GET', 'HEAD'].includes(method) && req.headers.origin) {
         let origin; try { origin = new URL(req.headers.origin); } catch { fail(403, 'ORIGIN_REJECTED', '请求来源不受支持'); }
         if (origin.host !== req.headers.host || !['http:', 'https:'].includes(origin.protocol)) fail(403, 'ORIGIN_REJECTED', '请求来源不受支持');
@@ -173,11 +185,14 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         return send(200, workbenchBridge.exchange(req, await readBody(req)));
       }
       let user = auth(req);
+      if (workbenchGateway && await workbenchGateway.tunnelRoutes({ req, res, method, path, url, user, send })) return;
+      if (remoteBroker && await remoteBroker.bridgeRoutes({ req, res, method, path, url, user })) return;
       // Resolve mutable resources only after reading the body, so concurrent writes check current versions and membership.
       const requestBody = ['POST', 'PATCH', 'PUT'].includes(method) && path !== '/api/logout' ? await readBody(req) : null;
       if (requestBody) user = auth(req);
       localDevices.authorizeRequest({ method, path, body: requestBody, user });
       if (localDevices.authenticatedRoutes({ req, path, method, body: requestBody, user, send })) return;
+      if (workbenchGateway?.apiRoutes({ req, method, path, user, body: requestBody, send })) return;
       if (serverMode ? await serverAutomation({ req, method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })
         : await localAutomation.handle({ req, method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       if (accounts.handle({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
@@ -655,7 +670,18 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       logger.error('TaskFlow request failed'); send(500, { error: { code: 'INTERNAL_ERROR', message: '服务处理失败' } });
     }
   });
-  return { server, db, close: () => new Promise((resolveClose, reject) => { localAutomation?.closeAll(); server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); }) };
+  const workbenchServer = workbenchGateway?.server || null;
+  // Tunnel uploads carry long-lived SSE responses; Node's default 5-minute request timeout would cut them.
+  if (workbenchServer) { server.requestTimeout = 0; workbenchServer.requestTimeout = 0; }
+  if (remoteBroker) server.requestTimeout = 0;
+  const closeWorkbench = () => new Promise(resolveClose => {
+    workbenchGateway?.close();
+    remoteBroker?.close();
+    workbenchInstances?.close();
+    if (!workbenchServer?.listening) return resolveClose();
+    workbenchServer.close(() => resolveClose()); workbenchServer.closeAllConnections();
+  });
+  return { server, workbenchServer, db, close: () => closeWorkbench().then(() => new Promise((resolveClose, reject) => { localAutomation?.closeAll(); server.close(error => { db.close(); error ? reject(error) : resolveClose(); }); })) };
 }
 export function runtimeOptions(env = process.env) {
   const port = Number(env.TASKFLOW_PORT || 5187); if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('TASKFLOW_PORT must be 1..65535');
@@ -665,12 +691,27 @@ export function runtimeOptions(env = process.env) {
   const flag = (name, fallback) => env[name] === undefined ? fallback : env[name] === '1';
   const bridgeModes = (env.TASKFLOW_BRIDGE_MODES || 'read,review').split(',').map(item => item.trim()).filter(Boolean);
   if (!bridgeModes.length || bridgeModes.some(mode => !BRIDGE_MODES.includes(mode))) throw new Error('TASKFLOW_BRIDGE_MODES must list read, review and/or develop');
-  return { port, host: env.TASKFLOW_HOST || '127.0.0.1', deployment, trustProxy: flag('TASKFLOW_TRUST_PROXY', false), cookieSecure: flag('TASKFLOW_COOKIE_SECURE', deployment === 'server'), deviceSessionMs: hours && hours * 3_600_000, bridgeModes };
+  const workbenchHost = env.TASKFLOW_WORKBENCH_HOST || '';
+  const workbenchPort = Number(env.TASKFLOW_WORKBENCH_PORT || 5189);
+  if (workbenchHost) {
+    if (!/^https:\/\/[^/]+$/.test(env.TASKFLOW_PUBLIC_ORIGIN || '')) throw new Error('TASKFLOW_WORKBENCH_HOST requires TASKFLOW_PUBLIC_ORIGIN like https://hub.example.com');
+    if (workbenchPublicUrl(workbenchHost).origin === new URL(env.TASKFLOW_PUBLIC_ORIGIN).origin) throw new Error('TASKFLOW_WORKBENCH_HOST and TASKFLOW_PUBLIC_ORIGIN must be different origins');
+  }
+  if (!Number.isInteger(workbenchPort) || workbenchPort < 1 || workbenchPort > 65535) throw new Error('TASKFLOW_WORKBENCH_PORT must be 1..65535');
+  const workbenchMode = env.TASKFLOW_WORKBENCH_MODE || 'relay';
+  if (!['relay', 'server'].includes(workbenchMode)) throw new Error('TASKFLOW_WORKBENCH_MODE must be relay or server');
+  const workbenchInstanceOptions = {
+    apiUrl: `http://127.0.0.1:${port}`,
+    envDir: env.TASKFLOW_WORKBENCH_ENV_DIR || '/var/lib/taskflow/wb-env',
+    stateRoot: env.TASKFLOW_WORKBENCH_STATE_ROOT || '/var/lib/taskflow-wb',    maxSlots: Number(env.TASKFLOW_WORKBENCH_MAX_INSTANCES || 8),
+  };
+  return { workbenchMode, workbenchInstanceOptions, workbenchHost, workbenchPort, publicOrigin: env.TASKFLOW_PUBLIC_ORIGIN || '', port, host: env.TASKFLOW_HOST || '127.0.0.1', deployment, trustProxy: flag('TASKFLOW_TRUST_PROXY', false), cookieSecure: flag('TASKFLOW_COOKIE_SECURE', deployment === 'server'), deviceSessionMs: hours && hours * 3_600_000, bridgeModes };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { port, host, deployment, trustProxy, cookieSecure, deviceSessionMs, bridgeModes } = runtimeOptions();
-  const setupToken = process.env.TASKFLOW_SETUP_TOKEN || ''; delete process.env.TASKFLOW_SETUP_TOKEN; const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined, deployment, trustProxy, cookieSecure, deviceSessionMs, setupToken, bridgeModes });
+  const { port, host, deployment, trustProxy, cookieSecure, deviceSessionMs, bridgeModes, workbenchHost, workbenchPort, publicOrigin, workbenchMode, workbenchInstanceOptions } = runtimeOptions();
+  const setupToken = process.env.TASKFLOW_SETUP_TOKEN || ''; delete process.env.TASKFLOW_SETUP_TOKEN; const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined, deployment, trustProxy, cookieSecure, deviceSessionMs, setupToken, bridgeModes, workbenchHost, publicOrigin, workbenchMode, workbenchInstanceOptions });
   platform.server.once('error', error => { console.error(`TaskFlow API 启动失败 (${error.code || 'LISTEN_ERROR'})`); platform.db.close(); process.exitCode = 1; });
   platform.server.listen(port, host, () => console.log(`TaskFlow API http://${host}:${port}`));
+  platform.workbenchServer?.listen(workbenchPort, host, () => console.log(`TaskFlow 工作台网关 http://${host}:${workbenchPort} → https://${workbenchHost}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => platform.close().then(() => process.exit(0)));
 }

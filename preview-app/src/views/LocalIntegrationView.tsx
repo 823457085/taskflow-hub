@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { App, Alert, Button, Card, Collapse, Drawer, Flex, Form, Grid, Input, Segmented, Select, Space, Steps, Tag, Typography } from 'antd';
 import { Activity, ArrowLeft, ArrowRight, Check, Copy, Cpu, ExternalLink, FileCode2, FolderGit2, FolderOpen, LayoutDashboard, MousePointer2, RefreshCw, ShieldCheck, Sparkles, Terminal, Trash2, Zap } from 'lucide-react';
-import { api, ApiError, HostBridgeStatus, hubApiUrl, LocalAutomationCapabilities, LocalGitRepo, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
+import { api, ApiError, HostBridgeStatus, hubApiUrl, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
 import { LocalDeviceList, LocalDevicePairing } from './LocalDevicePairing';
 import { TeamAgentsCard } from './TeamAgents';
 import { bridgeInstallCommand } from './bridgeInstall';
@@ -308,12 +308,12 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                 <Typography.Text type={device.online ? 'success' : 'secondary'}>{device.online ? '在线' : device.lastSeenAt ? `最近在线 ${timeText(device.lastSeenAt)}` : '已配对，未启动 worker'} · 有效期至 {timeText(device.expiresAt)}</Typography.Text>
               </Flex>
             ))}
-            <Typography.Text>1. 在你的电脑终端运行一键安装（需要 Node.js 24+）。脚本会下载客户端到 ~/.taskflow，自签名证书时提示核对指纹，然后显示配对码，在本页「设备授权」中确认并勾选项目：</Typography.Text>
+            <Typography.Text>1. 在你的电脑终端运行一键安装（需要 Node.js 24+）。脚本会下载 Bridge 和工作台到 ~/.taskflow，自签名证书时提示核对指纹，然后显示配对码，在本页「设备授权」中确认并勾选项目。安装完成后两者都会在登录后自动运行，并自动更新：</Typography.Text>
             {commandBlock('bridge-install', bridgeInstallCommand(location.origin), '一键安装')}
-            <Typography.Text>2. 编辑 ~/.taskflow/state/worker.json，把「项目ID」映射到本机代码仓库绝对路径；要接收开发任务时把 allowDevelop 设为 true。</Typography.Text>
-            <Typography.Text>3. 设为登录后自动在后台运行（macOS），之后不用开着终端：</Typography.Text>
-            {commandBlock('bridge-service', '~/.taskflow/bin/taskflow-bridge service --action install', '后台运行')}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>想先前台试运行可执行 ~/.taskflow/bin/taskflow-bridge worker；查看后台状态用 service --action status，停止用 service --action uninstall。在「我的设备」中开启「允许团队派发」后，项目负责人也能把任务派到这台电脑。</Typography.Text>
+            <Typography.Text>2. 装好后点顶栏「我的工作台」即可在网页里使用工作台，AI 与 git 在你电脑上执行。</Typography.Text>
+            <Typography.Text>3. 要接收开发任务时，编辑 ~/.taskflow/state/worker.json，把「项目ID」映射到本机代码仓库绝对路径并把 allowDevelop 设为 true，然后重启 Bridge：</Typography.Text>
+            {commandBlock('bridge-service', '~/.taskflow/bin/taskflow-bridge service --action restart', '重启 Bridge')}
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>只装 Bridge 不装工作台：在命令前加 TASKFLOW_SKIP_WORKBENCH=1。查看状态用 service --action status 或 workbench --action status；立即检查更新用 update；关闭自动更新在 worker.json 加 "autoUpdate": false。在「我的设备」中开启「允许团队派发」后，项目负责人也能把任务派到这台电脑。</Typography.Text>
           </Flex>
         </Card>
       )}
@@ -421,7 +421,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                   {bridgeConnected ? '更新授权项目并续期' : '一键授权接通本机 AI'}
                 </Button>
                 <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心处理任务</Button>
-                <Button href="http://127.0.0.1:5288/agent" target="_blank" rel="noopener noreferrer" icon={<ExternalLink size={13} />}>打开 5288 工作台</Button>
+                <Button onClick={() => openWorkbench()} icon={<ExternalLink size={13} />}>打开工作台</Button>
               </Space>
             </Form>
 
@@ -493,7 +493,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
           </div>
           <Space wrap size={8} className="tf-local-workflow-actions">
             <Button type="primary" onClick={() => navigateWorkspace('tasks')}>进入任务中心体验全流程</Button>
-            <Button href="http://127.0.0.1:5288/agent" target="_blank" rel="noopener noreferrer" icon={<LayoutDashboard size={14} />}>打开当前工作台</Button>
+            <Button onClick={() => openWorkbench()} icon={<LayoutDashboard size={14} />}>打开工作台</Button>
           </Space>
         </Card>
       </div>
