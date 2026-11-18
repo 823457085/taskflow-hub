@@ -6,14 +6,24 @@ import { join } from 'node:path';
 import { createPlatform, runtimeOptions } from './server.mjs';
 const password = 'local-only-test-passphrase';
 test('runtime binding ignores inherited workspace PORT and HOST', () => {
-  const local = { deployment: 'local', trustProxy: false, cookieSecure: false, deviceSessionMs: undefined, bridgeModes: ['read', 'review'] };
+  const instanceOptions = port => ({ apiUrl: `http://127.0.0.1:${port}`, envDir: '/var/lib/taskflow/wb-env', stateRoot: '/var/lib/taskflow-wb', maxSlots: 8 });
+  const workbench = { workbenchHost: '', workbenchPort: 5189, publicOrigin: '', workbenchMode: 'relay', workbenchInstanceOptions: instanceOptions(5187) };
+  const local = { deployment: 'local', trustProxy: false, cookieSecure: false, deviceSessionMs: undefined, bridgeModes: ['read', 'review'], ...workbench };
   assert.deepEqual(runtimeOptions({ PORT: '5288', HOST: '0.0.0.0' }), { port: 5187, host: '127.0.0.1', ...local });
-  assert.deepEqual(runtimeOptions({ PORT: '5288', TASKFLOW_PORT: '5190', TASKFLOW_HOST: '127.0.0.2' }), { port: 5190, host: '127.0.0.2', ...local });
+  assert.deepEqual(runtimeOptions({ PORT: '5288', TASKFLOW_PORT: '5190', TASKFLOW_HOST: '127.0.0.2' }), { port: 5190, host: '127.0.0.2', ...local, workbenchInstanceOptions: instanceOptions(5190) });
+  assert.equal(runtimeOptions({ TASKFLOW_WORKBENCH_MODE: 'server' }).workbenchMode, 'server');
+  assert.throws(() => runtimeOptions({ TASKFLOW_WORKBENCH_MODE: 'cloud' }), /TASKFLOW_WORKBENCH_MODE/);
   assert.throws(() => runtimeOptions({ TASKFLOW_PORT: '0' }), /TASKFLOW_PORT/);
   assert.deepEqual(runtimeOptions({ TASKFLOW_DEPLOYMENT: 'server', TASKFLOW_TRUST_PROXY: '1', TASKFLOW_DEVICE_SESSION_HOURS: '168' }),
-    { port: 5187, host: '127.0.0.1', deployment: 'server', trustProxy: true, cookieSecure: true, deviceSessionMs: 168 * 3_600_000, bridgeModes: ['read', 'review'] });
+    { port: 5187, host: '127.0.0.1', deployment: 'server', trustProxy: true, cookieSecure: true, deviceSessionMs: 168 * 3_600_000, bridgeModes: ['read', 'review'], ...workbench });
   assert.deepEqual(runtimeOptions({ TASKFLOW_BRIDGE_MODES: 'read, review,develop' }).bridgeModes, ['read', 'review', 'develop']);
   assert.throws(() => runtimeOptions({ TASKFLOW_BRIDGE_MODES: 'read,shell' }), /TASKFLOW_BRIDGE_MODES/);
+  assert.deepEqual(runtimeOptions({ TASKFLOW_WORKBENCH_HOST: 'wb.example.com', TASKFLOW_PUBLIC_ORIGIN: 'https://hub.example.com' }).workbenchHost, 'wb.example.com');
+  assert.throws(() => runtimeOptions({ TASKFLOW_WORKBENCH_HOST: 'wb.example.com' }), /TASKFLOW_PUBLIC_ORIGIN/);
+  const sharedIp = { TASKFLOW_WORKBENCH_HOST: '192.0.2.1:8443', TASKFLOW_PUBLIC_ORIGIN: 'https://192.0.2.1' };
+  assert.equal(runtimeOptions(sharedIp).workbenchHost, '192.0.2.1:8443');
+  assert.throws(() => runtimeOptions({ ...sharedIp, TASKFLOW_WORKBENCH_HOST: '192.0.2.1:65536' }), /TASKFLOW_WORKBENCH_HOST port/);
+  assert.throws(() => runtimeOptions({ ...sharedIp, TASKFLOW_WORKBENCH_HOST: '192.0.2.1:443' }), /different origins/);
   assert.equal(runtimeOptions({ TASKFLOW_DEPLOYMENT: 'server', TASKFLOW_COOKIE_SECURE: '0' }).cookieSecure, false);
   assert.throws(() => runtimeOptions({ TASKFLOW_DEPLOYMENT: 'cloud' }), /TASKFLOW_DEPLOYMENT/);
   assert.throws(() => runtimeOptions({ TASKFLOW_DEVICE_SESSION_HOURS: '0' }), /TASKFLOW_DEVICE_SESSION_HOURS/);

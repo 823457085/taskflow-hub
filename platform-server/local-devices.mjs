@@ -123,7 +123,8 @@ export function createLocalDevices({ db, transaction, audit, projectRole, visibl
     const device = user.localDevice; if (!device) return;
     const read = method === 'GET' && (/^\/api\/(?:me|projects|tasks|jobs)$/.test(path) || /^\/api\/tasks\/[^/]+(?:\/(?:context|assets|gates|bundle))?$/.test(path) || /^\/api\/jobs\/[^/]+$/.test(path) || path === '/api/bridge/runs/next' || /^\/api\/knowledge(?:\/[^/]+)?$/.test(path) && path !== '/api/knowledge/import' || path === '/api/skills');
     const write = method === 'POST' && (path === '/api/logout' || /^\/api\/tasks\/[^/]+\/(?:claim|progress|heartbeat)$/.test(path) || /^\/api\/jobs\/[^/]+\/report$/.test(path) || /^\/api\/bridge\/runs\/[^/]+\/(?:claim|progress|result)$/.test(path) || ['/api/agent-sessions/sync', '/api/deployments/sync'].includes(path));
-    if (!read && !write) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备仅可读取已授权项目任务，提交认领、进度、心跳和报告，领取派发，同步 Agent 与部署记录，以及读取知识库和团队 Skill');
+    const todo = path === '/api/todos' && ['GET', 'POST'].includes(method) || path === '/api/todos/import' && method === 'POST' || /^\/api\/todos\/[0-9a-f-]{36}$/i.test(path) && ['PATCH', 'DELETE'].includes(method);
+    if (!read && !write && !todo) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备仅可读取已授权项目任务，提交认领、进度、心跳和报告，领取派发，同步 Agent 与部署记录，管理个人待办，以及读取知识库和团队 Skill');
     if (/^\/api\/tasks\/[^/]+\/(progress|heartbeat)$/.test(path) && body?.deviceId !== device.id) fail(403, 'DEVICE_ID_MISMATCH', '设备标识与当前配对会话不一致');
     db.prepare('UPDATE local_device_sessions SET last_seen_at=? WHERE id=?').run(new Date(now()).toISOString(), device.id);
   };

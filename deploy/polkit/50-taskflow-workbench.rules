@@ -1,0 +1,8 @@
+// 仅允许 taskflow-api 的运行用户启停服务器工作台实例单元。
+polkit.addRule(function (action, subject) {
+  if (action.id === "org.freedesktop.systemd1.manage-units" && subject.user === "taskflow") {
+    var unit = action.lookup("unit") || "";
+    var verb = action.lookup("verb") || "";
+    if (/^taskflow-workbench@[0-9]+\.service$/.test(unit) && ["start", "stop", "restart"].indexOf(verb) >= 0) return polkit.Result.YES;
+  }
+});

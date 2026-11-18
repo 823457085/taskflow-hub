@@ -2,7 +2,7 @@ import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
 import { App, Button, Card, Collapse, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
-import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, List, LogOut, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import { api, ApiError, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, User, WorkTask } from './workspaceApi';
 import { ProjectDirectory, WorkspaceOverview } from './WorkspaceOverview';
@@ -277,6 +277,25 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     return () => { active = false; mounted.current = false; refreshSequence.current += 1; taskCreateSequence.current += 1; };
   }, []);
   useEffect(() => { onSessionChange?.(!!user); }, [user?.id, onSessionChange]);
+  const [workbenchMode, setWorkbenchMode] = useState<'server' | 'relay' | null>(null);
+  const workbenchAvailable = !!workbenchMode;
+  useEffect(() => {
+    if (!user) { setWorkbenchMode(null); return; }
+    let active = true;
+    void api<{ url: string; online: boolean; mode?: 'server' | 'relay' }>('workbench/status').then(result => { if (active) setWorkbenchMode(result.mode === 'server' ? 'server' : 'relay'); }).catch(() => { if (active) setWorkbenchMode(null); });
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('workbench') === '1') {
+      const returnTo = params.get('return') || '/';
+      window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      void api<{ url: string }>('workbench/codes', { return: returnTo }).then(result => { if (active) window.location.replace(result.url); }).catch(handleError);
+    }
+    return () => { active = false; };
+  }, [user?.id]);
+  const openWorkbench = () => {
+    const tab = window.open('', '_blank');
+    if (tab) tab.opener = null;
+    void api<{ url: string }>('workbench/codes', { return: '/' }).then(result => { if (tab) tab.location.replace(result.url); else window.location.assign(result.url); }).catch(error => { tab?.close(); handleError(error); });
+  };
   useEffect(() => { closeCreateTask(); setIntakeOpen(false); setNewProjectOpen(false); }, [section]);
   useEffect(() => { closeCreateTask(); setIntakeOpen(false); setSelectedTaskIds([]); setSavedViews(readSavedTaskViews(projectId)); setSavingViewOpen(false); setSavingViewName(''); }, [projectId, user?.id]);
   useEffect(() => { setTaskPage(1); }, [projectId, query, quickScope, statusFilter, jiraTypeFilter, jiraStatusFilter, jiraVersionFilter]);
@@ -622,7 +641,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     setSavedViews(next);
     void message.info(`已移除视图「${view.name}」。`);
   };
-  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button><Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
+  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button>{workbenchAvailable && <Tooltip title={workbenchMode === 'server' ? '打开服务器上的工作台（AI 与 git 在你电脑上执行，需 Bridge 在运行）' : '在浏览器中打开你电脑上的工作台（需本机工作台与 Bridge 在运行）'}><Button icon={<MonitorSmartphone size={16} />} onClick={openWorkbench}>我的工作台</Button></Tooltip>}<Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
   const taskList = <>
       <Card title={<Space size={8}><h2 className="tf-section-heading">任务列表</h2><Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text></Space>} extra={<Space wrap size={8}><Segmented<TaskViewMode> aria-label="任务视图切换" value={viewMode} onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }} options={[{ value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> }, { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> }]} />{hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={busy} onClick={() => void syncMyJiraTasks(false)}>同步我的最新 Jira</Button>}<Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button></Space>} className="tf-task-list-card">
         <div className="tf-task-quick-scopes">

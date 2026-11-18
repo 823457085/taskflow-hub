@@ -250,3 +250,37 @@ test('worker config rejects unsafe files, unknown fields and relative repository
   writeConfig({ projects: { default: nested }, executor: 'cli', maxMinutes: 5 });
   assert.equal((await loadWorkerConfig(configPath)).projects.default, nested);
 });
+
+test('workbench relay config only accepts a loopback workbench origin', async () => {
+  const { workbenchConfig } = await import('./worker.mjs');
+  assert.equal(workbenchConfig(undefined), null);
+  assert.deepEqual(workbenchConfig({ url: 'http://127.0.0.1:5288' }), { url: 'http://127.0.0.1:5288' });
+  for (const url of ['http://example.com:5288', 'https://127.0.0.1:5288', 'http://127.0.0.1', 'http://127.0.0.1:5288/sub']) assert.throws(() => workbenchConfig({ url }), /本机回环地址/);
+  assert.throws(() => workbenchConfig({ url: 'http://127.0.0.1:5288', token: 'x' }), /仅支持字段 url/);
+});
+
+test('member preset runs without edits, and a supervised worker exits for restart only after an idle update check', async () => {
+  const { memberWorkerConfig } = await import('./worker.mjs');
+  writeConfig(memberWorkerConfig());
+  const loaded = await loadWorkerConfig(configPath);
+  assert.deepEqual({ projects: loaded.projects, allowDevelop: loaded.allowDevelop, workbench: loaded.workbench, autoUpdate: loaded.autoUpdate }, { projects: {}, allowDevelop: false, workbench: { url: 'http://127.0.0.1:5288' }, autoUpdate: true });
+  writeConfig({ ...memberWorkerConfig(), autoUpdate: 'yes' });
+  await assert.rejects(loadWorkerConfig(configPath), /autoUpdate/);
+
+  const hub = await startHub();
+  try {
+    writeConfig({ projects: {} });
+    let clock = 0, checks = 0;
+    const deps = { ...quiet, now: () => (clock += 3 * 3_600_000), supervised: true, executors: { cli: { start: async () => { throw new Error('no runs'); } } } };
+    const result = await runWorker({ config: configPath, waitSeconds: 1 }, { ...deps, update: async () => { checks++; return { restart: checks > 1 }; } });
+    assert.deepEqual(result, { restart: true });
+    assert.equal(checks, 2);
+
+    writeConfig({ projects: {}, autoUpdate: false });
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 2500);
+    let disabledChecks = 0;
+    await runWorker({ config: configPath, waitSeconds: 1 }, { ...deps, signal: controller.signal, update: async () => { disabledChecks++; return { restart: true }; } });
+    assert.equal(disabledChecks, 0);
+  } finally { await hub.close(); }
+});

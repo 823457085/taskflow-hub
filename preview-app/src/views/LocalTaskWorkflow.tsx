@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, App, Button, Card, Checkbox, Collapse, Descriptions, Drawer, Empty, Flex, Input, Segmented, Select, Space, Tag, Typography } from 'antd';
 import { Check, Copy, ExternalLink, FileCheck2, FolderGit2, FolderOpen, Play, RefreshCw, Sparkles, Square, Terminal } from 'lucide-react';
 import {
-  api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, TeamAgent,
+  api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, TeamAgent,
   ProjectWorkspace, REVIEW_ROLES, ReviewJob, Role, Stage, STAGES, timeText, WorkTask,
 } from './workspaceApi';
 import { buildCompanionSyncCommand, buildLocalTaskPrompt, LOCAL_TASK_TARGETS, localReviewCandidates, LocalTaskMode, LocalTaskTarget } from './localTaskWorkflowPrompt';
@@ -430,7 +430,7 @@ export const LocalTaskWorkflow: React.FC<{
       return route.get('task') === task.id && route.get('mode') !== 'demo';
     };
     if (!open || !prompt || pending.current || currentScope.current !== scope || !routeIsCurrent()) {
-      if (openWorkbenchAfter) window.open('http://127.0.0.1:5288/agent', '_blank', 'noopener,noreferrer');
+      if (openWorkbenchAfter) openWorkbench();
       return;
     }
     const ownerRoute = location.hash;
@@ -444,7 +444,7 @@ export const LocalTaskWorkflow: React.FC<{
         setCopied(true);
         void message.success(openWorkbenchAfter ? '指令已复制，正在打开工作台。' : '指令已复制。');
       }
-      if (openWorkbenchAfter) window.open('http://127.0.0.1:5288/agent', '_blank', 'noopener,noreferrer');
+      if (openWorkbenchAfter) openWorkbench();
     } catch {
       if (current()) void message.warning('复制未完成，请展开下方高级面板复制。');
     } finally {
@@ -792,7 +792,7 @@ export const LocalTaskWorkflow: React.FC<{
             <Flex gap={8} align="center" wrap>
               <Select aria-label="目标工具" style={{ flex: '1 1 240px' }} value={target} options={LOCAL_TASK_TARGETS} onChange={value => { targetTouched.current = true; setTarget(value); setEngine(targetToEngine(value)); }} />
               <Button icon={copied ? <Check size={15} /> : <Copy size={15} />} disabled={!prompt} loading={copying} onClick={() => void copy(false)}>{copied ? '已复制' : '复制处理指令'}</Button>
-              <Button href="http://127.0.0.1:5288/agent" target="_blank" rel="noopener noreferrer" icon={<ExternalLink size={15} />}>打开工作台</Button>
+              <Button onClick={() => openWorkbench()} icon={<ExternalLink size={15} />}>打开工作台</Button>
             </Flex>
             {prompt ? (
               <Input.TextArea aria-label="将复制的指令" readOnly value={prompt} autoSize={{ minRows: 5, maxRows: 12 }} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />

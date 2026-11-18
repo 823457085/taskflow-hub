@@ -199,5 +199,17 @@ export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...
   };
 }
 export const api = createApiClient();
+// 已登录时经登录交接打开网页工作台；仅本地预览（localhost）在失败时退回本机 5288。
+export function openWorkbench(path = '/agent') {
+  const tab = window.open('', '_blank');
+  if (tab) tab.opener = null;
+  const go = (url: string) => { if (tab) tab.location.replace(url); else window.location.assign(url); };
+  void api<{ url: string }>('workbench/codes', { return: path })
+    .then(result => go(result.url))
+    .catch(() => {
+      if (['localhost', '127.0.0.1'].includes(location.hostname)) return go(`http://127.0.0.1:5288${path}`);
+      tab?.close();
+    });
+}
 export const timeText = (value?: string) => value ? new Date(value).toLocaleString() : '—';
 export const memberName = (members: User[], id?: string | null) => id ? members.find(user => user.id === id)?.username || id : '未指派';

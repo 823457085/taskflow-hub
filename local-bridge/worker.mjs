@@ -8,6 +8,9 @@ import { createInterface } from 'node:readline';
 import { loadSession, request, stateDir } from './api-client.mjs';
 import { syncDelivery } from './delivery-sync.mjs';
 import { syncSkills } from './skills-sync.mjs';
+import { runWorkbenchTunnel } from './workbench-tunnel.mjs';
+import { runRemoteAgent } from './remote-agent.mjs';
+import { fetchRelease, installWorkbench, installedRoot, updateBridge, workbenchVersion } from './updater.mjs';
 
 export const workerConfigPath = join(stateDir, 'worker.json');
 export const deliverySyncStatePath = join(stateDir, 'delivery-sync.json');
@@ -16,7 +19,9 @@ const PROGRESS_MS = 3000;
 const RETRY_MS = 5000;
 const CONFIRM_MS = 120_000;
 const INLINE_CONTEXT_MAX = 190_000;
-const CONFIG_KEYS = ['projects', 'executor', 'engines', 'allowDevelop', 'maxMinutes', 'delivery', 'deliverySync', 'skillSync'];
+const UPDATE_FIRST_MS = 2 * 60_000;
+const UPDATE_EVERY_MS = 6 * 60 * 60_000;
+const CONFIG_KEYS = ['projects', 'executor', 'engines', 'allowDevelop', 'maxMinutes', 'delivery', 'deliverySync', 'skillSync', 'workbench', 'autoUpdate', 'remoteAgent'];
 const EXECUTORS = ['cli', 'delivery'];
 const ENGINE_BINARIES = { codex: 'codex', cursor: 'cursor-agent' };
 
@@ -29,7 +34,41 @@ export function workerConfigTemplate() {
     delivery: { url: 'http://127.0.0.1:5288', tokenFile: '/绝对路径/Delivery数据目录/taskflow-bridge/token（executor 为 delivery 时必填）' },
     deliverySync: { dataDir: '/绝对路径/Delivery/.local/data（可选：定时同步 Agent 记录与部署记录，不需要可删除此项）', deployments: { '<平台项目ID>': ['Delivery 部署项目名，* 表示全部'] }, intervalMinutes: 10 },
     skillSync: { targets: ['/绝对路径/.codex/skills（可选：定时把团队 Skill 同步到本机，不需要可删除此项）'], intervalMinutes: 30 },
+    workbench: { url: 'http://127.0.0.1:5288（可选：让你在网页工作台访问本机工作台，不需要可删除此项）' },
   };
+}
+
+export function memberWorkerConfig() {
+  return { projects: {}, executor: 'cli', allowDevelop: false, maxMinutes: 60, workbench: { url: 'http://127.0.0.1:5288' }, remoteAgent: true };
+}
+
+/** Bring the installed Bridge and workbench to the server's published release. Returns whether the Bridge must restart. */
+export async function checkForUpdates({ url, root = installedRoot(), log = () => {}, fetchImpl = fetch }) {
+  if (!root) return { status: 'SKIPPED', message: '当前 Bridge 不是通过一键安装运行的，不自动更新' };
+  const release = await fetchRelease(url, fetchImpl);
+  const bridge = await updateBridge({ root, hub: url, release, fetchImpl, log });
+  if (bridge.updated) log(`Bridge 已更新到 ${bridge.version}`);
+  let workbench = null;
+  if (release.workbench && (await workbenchVersion(root)).current) {
+    try {
+      workbench = await installWorkbench({ root, hub: url, release, fetchImpl, log });
+      if (workbench.changed) log(`工作台新版本 ${workbench.version} 已下载，下次重启工作台时生效`);
+    } catch (error) { log(`工作台更新失败：${error.message}`); }
+  }
+  return { status: 'CHECKED', bridge, workbench, restart: bridge.updated };
+}
+
+function loopbackOrigin(value, label) {
+  let url;
+  try { url = new URL(value || 'http://127.0.0.1:5288'); } catch { throw new Error(`${label} 不正确。`); }
+  if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new Error(`${label} 必须是带端口的本机回环地址，例如 http://127.0.0.1:5288`);
+  return url.origin;
+}
+
+export function workbenchConfig(value) {
+  if (value === undefined) return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => key !== 'url')) throw new Error('workbench 仅支持字段 url。');
+  return { url: loopbackOrigin(value.url, 'workbench.url') };
 }
 
 function realDirectory(value, label) {
@@ -67,13 +106,13 @@ export async function loadWorkerConfig(path = workerConfigPath) {
   if (raw.delivery !== undefined || executor === 'delivery') {
     const value = raw.delivery || {};
     if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !['url', 'tokenFile'].includes(key))) throw new Error('delivery 仅支持字段 url、tokenFile。');
-    let url;
-    try { url = new URL(value.url || 'http://127.0.0.1:5288'); } catch { throw new Error('delivery.url 不正确。'); }
-    if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || !url.port || url.pathname !== '/' || url.search || url.hash || url.username || url.password) throw new Error('delivery.url 必须是带端口的本机回环地址，例如 http://127.0.0.1:5288');
+    const url = loopbackOrigin(value.url, 'delivery.url');
     if (typeof value.tokenFile !== 'string' || !isAbsolute(value.tokenFile)) throw new Error('delivery.tokenFile 必须是 Delivery 数据目录下 taskflow-bridge/token 的绝对路径。');
-    delivery = { url: url.origin, tokenFile: value.tokenFile };
+    delivery = { url, tokenFile: value.tokenFile };
   }
-  return { projects, executor, engines, allowDevelop: raw.allowDevelop === true, maxMinutes, delivery, deliverySync: deliverySyncConfig(raw.deliverySync), skillSync: skillSyncConfig(raw.skillSync) };
+  if (raw.autoUpdate !== undefined && typeof raw.autoUpdate !== 'boolean') throw new Error('autoUpdate 必须是 true 或 false。');
+  if (raw.remoteAgent !== undefined && typeof raw.remoteAgent !== 'boolean') throw new Error('remoteAgent 必须是 true 或 false。');
+  return { projects, executor, engines, allowDevelop: raw.allowDevelop === true, maxMinutes, delivery, deliverySync: deliverySyncConfig(raw.deliverySync), skillSync: skillSyncConfig(raw.skillSync), workbench: workbenchConfig(raw.workbench), autoUpdate: raw.autoUpdate !== false, remoteAgent: raw.remoteAgent === true };
 }
 
 export function deliverySyncConfig(value) {
@@ -220,6 +259,8 @@ export async function runWorker(options = {}, deps = {}) {
     now = Date.now,
     executors = { cli: cliExecutor(), delivery: deliveryExecutor() },
     signal,
+    update = checkForUpdates,
+    supervised = process.env.TASKFLOW_SERVICE === '1',
   } = deps;
   const waitSeconds = options.waitSeconds ?? 25;
   const config = await loadWorkerConfig(options.config || workerConfigPath);
@@ -228,7 +269,19 @@ export async function runWorker(options = {}, deps = {}) {
   const session = await loadSession();
   const call = (path, body, timeoutMs) => request(session.url, path, { token: session.token, ...(body ? { method: 'POST', body } : {}), ...(timeoutMs ? { timeoutMs } : {}) });
   log(`Bridge 已启动：平台 ${session.url}，项目映射 ${Object.keys(config.projects).length} 个，执行器 ${config.executor}，开发类任务${config.allowDevelop ? '需本机确认' : '已关闭'}${config.deliverySync ? `，每 ${config.deliverySync.intervalMinutes} 分钟同步 Delivery 记录` : ''}${config.skillSync ? `，每 ${config.skillSync.intervalMinutes} 分钟同步团队 Skill` : ''}`);
-  let nextSyncAt = 0, nextSkillSyncAt = 0;
+  if (config.workbench && !options.once) {
+    void runWorkbenchTunnel({ apiUrl: session.url, token: session.token, target: config.workbench.url, log, signal, ...deps.tunnel }).catch(error => log(`工作台转发异常退出：${error.message}`));
+  }
+  if (config.remoteAgent && !options.once) {
+    void (deps.remoteAgent || runRemoteAgent)({ apiUrl: session.url, token: session.token, log, signal }).catch(error => log(`个人 Agent 异常退出：${error.message}`));
+  }
+  let nextSyncAt = 0, nextSkillSyncAt = 0, nextUpdateAt = now() + UPDATE_FIRST_MS;
+  async function maybeUpdate() {
+    if (!supervised || !config.autoUpdate || options.once || now() < nextUpdateAt) return false;
+    nextUpdateAt = now() + UPDATE_EVERY_MS;
+    try { return (await update({ url: session.url, log })).restart === true; }
+    catch (error) { log(`检查更新失败：${error.message}`); return false; }
+  }
   async function maybeSync() {
     if (!config.deliverySync || now() < nextSyncAt) return;
     nextSyncAt = now() + config.deliverySync.intervalMinutes * 60_000;
@@ -316,6 +369,7 @@ export async function runWorker(options = {}, deps = {}) {
 
   for (;;) {
     if (signal?.aborted) return;
+    if (await maybeUpdate()) { log('Bridge 已更新，正在重启以加载新版本'); return { restart: true }; }
     await maybeSync();
     await maybeSyncSkills();
     let next;
