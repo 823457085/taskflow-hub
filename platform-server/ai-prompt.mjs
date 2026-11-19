@@ -112,6 +112,20 @@ export function buildAiPrompt({
 
   const snapshotPlugins = Array.isArray(job?.snapshot?.plugins) ? job.snapshot.plugins : [];
   const policyLine = formatPluginsSection(snapshotPlugins, job?.snapshot?.policyHash);
+  const scopeAndSeverityGuide = [
+    '【评审分级与交付边界校准准则】',
+    '1. 交付边界隔离：先依据 task.title / task.externalRef 识别当前任务自身交付范围（例如单端前端、后端或独立模块）与关联端/兄弟任务依赖；对跨端对接契约、权限与异常口径应严格核查，但不因兄弟团队内部固件或下游未在本材料展开的底层实现而将跨团队待对齐事项一律升格为本任务 CRITICAL。',
+    '2. 严格区分 CRITICAL 与 WARN：仅在出现明确安全/合规红线（如明文存储或导出敏感凭据、鉴权绕过）、文档内部直接互斥冲突、核心验收标准完全缺失且无可执行契约、或违反 BLOCK 门禁规则时判定为 CRITICAL；其余待确认参数、跨端联调对齐项、或可在后续技术方案/测试用例细化的细节记为 WARN，并将 PRD 待澄清问题放入 meta.clarifyQuestions。',
+    ...(job?.stage === 'PRD'
+      ? ['3. 需求阶段层次约束：PRD 评审聚焦业务目标、范围边界、角色权限、可测 AC 与异常预期，不要求在 PRD 正文中提前写入浏览器 API 定时公式或底层硬件锁机制等 TECH_SPEC 级实现代码细节。']
+      : []),
+    ...(job?.stage === 'TEST_CASE'
+      ? ['3. 测试用例评审目标隔离：本阶段审查对象是「测试用例集本身」的设计完备性、可执行性与 AC/分支覆盖度，而非重复阻断已审批或已豁免的 CODE/TECH_SPEC 代码实现；若测试用例准确设计了能检出当前冻结代码潜在缺陷的断言，应肯定其测试覆盖度并在 findings 中用 WARN/INFO 提醒线下联调修复或回归关注，严禁仅因“待测代码当前实现会测不过某条好用例”而将该用例反判为 CRITICAL 阻断用例阶段通过；仅当测试用例本身遗漏核心 AC、存在自相矛盾或步骤不可判定时才判 CRITICAL。']
+      : []),
+    ...(job?.stage === 'RELEASE'
+      ? ['3. 上线准出评审目标隔离：本阶段聚焦上线依赖顺序、灰度范围、监控告警、止血开关与可执行回滚方案；对前序 TECH_SPEC/CODE_REVIEW 已审签或豁免放行的已知事项，只要上线方案中具备对应前置校验、开关或监控回滚兜底即可记为 WARN 提醒发布值班，不得直接以旧代码缺陷替代上线方案审查重复阻断；仅当上线方案自身缺少关键前置依赖控制、监控或可执行回滚步骤时判为 CRITICAL。']
+      : []),
+  ].join('\n');
   const codeScopeGuard = job?.stage === 'CODE_REVIEW'
     ? [
         '【Diff-First 收敛范围指令（防超时与防偏题）】',
@@ -125,6 +139,7 @@ export function buildAiPrompt({
     ...header,
     `本次为阶段【${job.stage}】的本地工具评审（Job ID: ${job.id}，冻结输入哈希: ${job.inputHash}）。`,
     ...(rubricPrompt(job.stage) ? [rubricPrompt(job.stage)] : []),
+    scopeAndSeverityGuide,
     ...(codeScopeGuard ? [codeScopeGuard] : []),
     ...(job.stage === 'TASK_BREAKDOWN' ? ['子任务清单在 reviewSnapshot.children 中，需求文档（如有）在 reviewSnapshot.assets 中；请先从需求中提炼需求点，再逐条映射到承接的子任务 Jira 号（checklist 的 ref 字段填写子任务号）。'] : []),
     ...(policyLine ? [policyLine] : []),
