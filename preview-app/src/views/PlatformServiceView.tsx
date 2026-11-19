@@ -1,16 +1,17 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
-import { App, Button, Card, Collapse, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
-import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, Columns2, KeyRound, Keyboard, LayoutGrid, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
-import { api, ApiError, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, User, WorkTask } from './workspaceApi';
+import { api, ApiError, CHAIN_STAGE_SHORT, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, Stage, TaskStatus, User, WorkTask } from './workspaceApi';
 import type { ChainStatusMap } from './workspaceApi';
 import { ProjectDirectory, WorkspaceOverview } from './WorkspaceOverview';
 import { clearTaskRoute, navigateWorkspace, openTaskRoute, SECTION_LABELS, taskReturnFilters, WorkspaceSection } from './workspaceNavigation';
 import { ChangePasswordDrawer } from './PasswordDrawers';
 import { roleLabel, TASK_STATUS_OPTIONS, TASK_TYPE_OPTIONS, taskStatusLabel } from './displayLabels';
 import { TaskListTable } from './TaskListTable';
+import { ChainStagePipelineBar, TaskSplitChainView } from './TaskSplitChainView';
 import {
   clearSearchOnEscape,
   deleteSavedTaskView,
@@ -49,11 +50,11 @@ const KeyboardShortcutsModal = lazy(() => import('./KeyboardShortcutsModal').the
 const { Text, Title, Paragraph } = Typography;
 const FILTERS_OPEN_KEY = 'taskflow.tasks.filtersOpen';
 const TASK_SCOPE_KEY = 'taskflow.tasks.quickScope';
-const TASK_VIEW_MODE_KEY = 'taskflow.tasks.viewMode';
+const TASK_VIEW_MODE_KEY = 'taskflow.tasks.viewMode.v2';
 const TASK_GROUP_MODE_KEY = 'taskflow.tasks.groupMode';
 const QUICK_SCOPES = ['all', 'mine', 'unclaimed', 'active', 'done'] as const;
 type QuickTaskScope = typeof QUICK_SCOPES[number];
-const VIEW_MODES = ['list', 'board'] as const;
+const VIEW_MODES = ['split', 'list', 'board'] as const;
 type TaskViewMode = typeof VIEW_MODES[number];
 const GROUP_MODES = ['grouped', 'flat'] as const;
 type TaskGroupMode = typeof GROUP_MODES[number];
@@ -87,6 +88,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [jiraTypeFilter, setJiraTypeFilter] = useState<string>();
   const [jiraStatusFilter, setJiraStatusFilter] = useState<string>();
   const [jiraVersionFilter, setJiraVersionFilter] = useState<string>();
+  const [stageFilter, setStageFilter] = useState<Stage | undefined>();
+  const [splitFocusTaskId, setSplitFocusTaskId] = useState('');
   const [filtersOpen, setFiltersOpen] = useState(() => readStoredBool(FILTERS_OPEN_KEY, false));
   const [createOpen, setCreateOpen] = useState(false);
   const [intakeOpen, setIntakeOpen] = useState(false);
@@ -99,7 +102,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [shortcutsEverOpened, setShortcutsEverOpened] = useState(false);
   const [digestTick, setDigestTick] = useState(0);
-  const [viewMode, setViewMode] = useState<TaskViewMode>(() => readStoredChoice(TASK_VIEW_MODE_KEY, VIEW_MODES, 'list'));
+  const [viewMode, setViewMode] = useState<TaskViewMode>(() => readStoredChoice(TASK_VIEW_MODE_KEY, VIEW_MODES, 'split'));
   const [groupMode, setGroupMode] = useState<TaskGroupMode>(() => readStoredChoice(TASK_GROUP_MODE_KEY, GROUP_MODES, 'grouped'));
   const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
   const [savedViews, setSavedViews] = useState<SavedTaskFilterView[]>([]);
@@ -171,6 +174,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     setJiraTypeFilter(undefined);
     setJiraStatusFilter(undefined);
     setJiraVersionFilter(undefined);
+    setStageFilter(undefined);
   };
   const closeCreateTask = () => { taskCreateSequence.current += 1; setCreateOpen(false); if (createOpen) taskForm.resetFields(); };
   const clearTaskSelection = () => {
@@ -322,7 +326,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       .catch(() => { if (alive) setChainStatuses({}); });
     return () => { alive = false; };
   }, [section, projectId, user?.id, tasks]);
-  useEffect(() => { setTaskPage(1); }, [projectId, query, quickScope, statusFilter, jiraTypeFilter, jiraStatusFilter, jiraVersionFilter]);
+  useEffect(() => { setTaskPage(1); }, [projectId, query, quickScope, statusFilter, jiraTypeFilter, jiraStatusFilter, jiraVersionFilter, stageFilter]);
+  useEffect(() => { setSplitFocusTaskId(''); }, [projectId, user?.id]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!user) return;
@@ -358,7 +363,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       } else if (event.key.toLowerCase() === 'v' && !event.shiftKey) {
         event.preventDefault();
         setViewMode(prev => {
-          const next = prev === 'list' ? 'board' : 'list';
+          const next = prev === 'split' ? 'list' : prev === 'list' ? 'board' : 'split';
           writeStoredString(TASK_VIEW_MODE_KEY, next);
           return next;
         });
@@ -516,7 +521,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const jiraStatuses = [...new Set(tasks.map(task => task.externalRef?.status).filter((value): value is string => !!value))];
   const jiraVersions = [...new Set(tasks.flatMap(task => task.externalRef?.fixVersions?.map(version => version.name) || []))];
   const filterCount = [statusFilter, jiraTypeFilter, jiraVersionFilter].filter(Boolean).length;
-  const hasFilters = !!query || quickScope !== 'all' || !!jiraStatusFilter || filterCount > 0;
+  const hasFilters = !!query || quickScope !== 'all' || !!jiraStatusFilter || !!stageFilter || filterCount > 0;
   const myTaskCount = tasks.filter(task => task.assigneeId === user?.id && task.status !== 'DONE').length;
   const unclaimedCount = tasks.filter(task => !task.assigneeId && task.status !== 'DONE').length;
   const activeCount = tasks.filter(task => task.status === 'IN_PROGRESS' || task.status === 'IN_REVIEW').length;
@@ -528,7 +533,13 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     if (quickScope === 'done') return task.status === 'DONE';
     return true;
   };
-  const visibleTasks = tasks.filter(task => matchesQuickScope(task) &&
+  const matchesStageFilter = (task: WorkTask): boolean => {
+    if (!stageFilter) return true;
+    const targetId = task.parentId && chainStatuses[task.parentId] ? task.parentId : task.id;
+    const st = chainStatuses[targetId]?.[stageFilter];
+    return st !== 'PASS' && st !== 'CONDITIONAL';
+  };
+  const visibleTasks = tasks.filter(task => matchesQuickScope(task) && matchesStageFilter(task) &&
     (!query.trim() || (task.jiraKey + ' ' + task.title).toLowerCase().includes(query.trim().toLowerCase())) &&
     (!statusFilter || task.status === statusFilter) && (!jiraTypeFilter || task.externalRef?.type === jiraTypeFilter) &&
     (!jiraStatusFilter || task.externalRef?.status === jiraStatusFilter) && (!jiraVersionFilter || task.externalRef?.fixVersions?.some(version => version.name === jiraVersionFilter)));
@@ -683,22 +694,53 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   };
   const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button>{workbenchAvailable && <Tooltip title={workbenchMode === 'server' ? '打开服务器上的工作台（AI 与 git 在你电脑上执行，需 Bridge 在运行）' : '在浏览器中打开你电脑上的工作台（需本机工作台与 Bridge 在运行）'}><Button icon={<MonitorSmartphone size={16} />} onClick={openWorkbench}>我的工作台</Button></Tooltip>}<Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
   const taskList = <>
-      <Card title={<Space size={8}><h2 className="tf-section-heading">任务列表</h2><Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text></Space>} extra={<Space wrap size={8}><Segmented<TaskViewMode> aria-label="任务视图切换" value={viewMode} onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }} options={[{ value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> }, { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> }]} />{hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy || syncingJira} loading={syncingJira} onClick={() => void syncMyJiraTasks()}>同步我的最新 Jira</Button>}{hasBoundJira && <Button disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button>}<Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openManualTask}>新建本地任务</Button></Space>} className="tf-task-list-card">
-        <div className="tf-task-quick-scopes">
+      <ChainStagePipelineBar
+        tasks={tasks}
+        chainStatuses={chainStatuses}
+        activeStage={stageFilter}
+        onSelectStage={setStageFilter}
+      />
+      <Card
+        title={<Space size={10} wrap>
+          <h2 className="tf-section-heading">交付工作台</h2>
+          <Text type="secondary" className="tf-table-secondary">{visibleTasks.length} / {tasks.length}</Text>
+          {stageFilter && (
+            <Tag color="processing" closable onClose={() => setStageFilter(undefined)} style={{ marginInlineEnd: 0 }}>
+              环节：{CHAIN_STAGE_SHORT[stageFilter]}
+            </Tag>
+          )}
+        </Space>}
+        extra={<Space wrap size={8}>
+          <Segmented<TaskViewMode>
+            aria-label="任务视图切换"
+            value={viewMode}
+            onChange={val => { setViewMode(val); writeStoredString(TASK_VIEW_MODE_KEY, val); }}
+            options={[
+              { value: 'split', label: <Space size={4}><Columns2 size={14} /><span>链路工作台</span></Space> },
+              { value: 'list', label: <Space size={4}><List size={14} /><span>列表</span></Space> },
+              { value: 'board', label: <Space size={4}><LayoutGrid size={14} /><span>看板</span></Space> },
+            ]}
+          />
+          {hasBoundJira && <Button icon={<RefreshCw size={15} />} disabled={busy || syncingJira} loading={syncingJira} onClick={() => void syncMyJiraTasks()}>同步 Jira</Button>}
+          {hasBoundJira && <Button disabled={!projectId || busy} onClick={openCreateTask}>接入 Jira 任务</Button>}
+          <Button type="primary" icon={<Plus size={16} />} disabled={!projectId || busy} onClick={openManualTask}>新建本地任务</Button>
+        </Space>}
+        className="tf-task-list-card"
+      >
+        <div className="tf-task-toolbar">
           <Segmented<QuickTaskScope>
+            size="small"
             aria-label="任务范围快捷筛选"
             value={quickScope}
             onChange={val => { setQuickScope(val); writeStoredString(TASK_SCOPE_KEY, val); }}
             options={[
               { value: 'all', label: `全部 (${tasks.length})` },
-              { value: 'mine', label: `我负责的 (${myTaskCount})` },
+              { value: 'mine', label: `我负责 (${myTaskCount})` },
               { value: 'unclaimed', label: `待认领 (${unclaimedCount})` },
               { value: 'active', label: `推进中 (${activeCount})` },
               { value: 'done', label: `已完成 (${doneCount})` },
             ]}
           />
-        </div>
-        <div className="tf-task-toolbar">
           <Input ref={taskSearchRef} aria-label="搜索任务" prefix={<Search size={16} />} placeholder="搜索任务号或标题（按 / 聚焦，Esc 清空）" value={query} allowClear onChange={event => setQuery(event.target.value)} onKeyDown={clearSearchOnEscape(query, () => setQuery(''))} />
           <Select aria-label="Jira 状态" placeholder="Jira 状态：全部" allowClear value={jiraStatusFilter} options={options(jiraStatuses)} onChange={setJiraStatusFilter} disabled={!jiraStatuses.length} />
           {viewMode === 'list' && (
@@ -710,12 +752,25 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
               options={[{ value: 'grouped', label: '按父任务分组' }, { value: 'flat', label: '平铺' }]}
             />
           )}
+          <Button
+            size="small"
+            icon={<SlidersHorizontal size={14} />}
+            type={filtersOpen || filterCount > 0 ? 'primary' : 'default'}
+            ghost={filtersOpen || filterCount > 0}
+            onClick={() => {
+              const next = !filtersOpen;
+              setFiltersOpen(next);
+              writeStoredBool(FILTERS_OPEN_KEY, next);
+            }}
+          >
+            更多筛选{filterCount > 0 ? ` (${filterCount})` : ''}
+          </Button>
           {hasFilters && !savingViewOpen && (
             <Button size="small" icon={<Bookmark size={13} />} onClick={openSaveCurrentView}>
               保存视图
             </Button>
           )}
-          {hasFilters && <Button type="text" onClick={resetFilters}>重置筛选</Button>}
+          {hasFilters && <Button type="text" size="small" onClick={resetFilters}>重置筛选</Button>}
         </div>
         {savingViewOpen && (
           <Flex gap={8} align="center" wrap style={{ marginTop: 8 }}>
@@ -768,22 +823,34 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
             })}
           </Flex>
         )}
-        <Collapse
-          ghost
-          className="tf-task-filter-collapse"
-          activeKey={filtersOpen ? ['filters'] : []}
-          onChange={keys => {
-            const next = keys.includes('filters');
-            setFiltersOpen(next);
-            writeStoredBool(FILTERS_OPEN_KEY, next);
-          }}
-          items={[{ key: 'filters', label: <Space size={8}><SlidersHorizontal size={15} />更多筛选{filterCount > 0 && <Text type="secondary">({filterCount})</Text>}</Space>, children: <div className="tf-task-advanced-filters">
+        {filtersOpen && (
+          <div className="tf-task-advanced-filters" style={{ marginTop: 10 }}>
             <Form.Item layout="vertical" label="Jira 类型"><Select aria-label="Jira 类型" placeholder="全部类型" allowClear value={jiraTypeFilter} options={options(jiraTypes)} onChange={setJiraTypeFilter} disabled={!jiraTypes.length} /></Form.Item>
             <Form.Item layout="vertical" label="Jira 修复版本"><Select aria-label="Jira 修复版本" placeholder="全部版本" showSearch={{ optionFilterProp: 'label' }} allowClear value={jiraVersionFilter} options={options(jiraVersions)} onChange={setJiraVersionFilter} disabled={!jiraVersions.length} /></Form.Item>
             <Form.Item layout="vertical" label="本地状态"><Select aria-label="本地状态" placeholder="全部状态" allowClear value={statusFilter} options={TASK_STATUS_OPTIONS} onChange={setStatusFilter} /></Form.Item>
-          </div> }]}
-        />
-        {viewMode === 'board' ? (
+          </div>
+        )}
+        <div style={{ marginTop: 12 }}>
+        {viewMode === 'split' ? (
+          <TaskSplitChainView
+            tasks={visibleTasks}
+            projectTasks={tasks}
+            allTasks={allTasks}
+            members={members}
+            user={user}
+            role={role || 'DEV'}
+            permissions={permissions}
+            chainStatuses={chainStatuses}
+            selectedTaskId={splitFocusTaskId}
+            onSelectTask={setSplitFocusTaskId}
+            onOpenFullTask={openTask}
+            onChanged={refreshTasksOnly}
+            onUnauthorized={clearSession}
+            onForbidden={reloadAccess}
+            onResetFilters={hasFilters ? resetFilters : undefined}
+            onCreateTask={openManualTask}
+          />
+        ) : viewMode === 'board' ? (
           <Suspense fallback={<Skeleton active paragraph={{ rows: 4 }} />}>
             <TaskKanbanBoard
               tasks={visibleTasks}
@@ -826,6 +893,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
             groupByParent={groupMode === 'grouped'}
           />
         )}
+        </div>
       </Card>
 
   </>;

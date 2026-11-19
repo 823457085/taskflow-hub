@@ -66,6 +66,20 @@ export const App: React.FC<{
     });
   };
 
+  const sectionGroup = (target: WorkspaceSection): string | undefined => {
+    if (['todos', 'reports', 'deployments', 'sessions', 'knowledge', 'skills'].includes(target)) return 'group:collab';
+    if (['members', 'accounts', 'connections', 'local'].includes(target)) return 'group:settings';
+    return undefined;
+  };
+  const [openMenuKeys, setOpenMenuKeys] = useState<string[]>(() => {
+    const g = sectionGroup(currentWorkspaceSection());
+    return g ? [g] : [];
+  });
+  useEffect(() => {
+    const g = sectionGroup(section);
+    if (g) setOpenMenuKeys(prev => (prev.includes(g) ? prev : [...prev, g]));
+  }, [section]);
+
   const navigate = (next: WorkspaceSection) => {
     navigateWorkspace(next);
     setNavigationOpen(false);
@@ -73,27 +87,35 @@ export const App: React.FC<{
   };
   const sectionLabel = (key: WorkspaceSection) => key === 'members' && !access.manageMembers ? '项目成员' : key === 'connections' && !access.manageConnections ? '平台读取' : SECTION_LABELS[key];
   const menuItems: MenuProps['items'] = [
-    { type: 'group', label: railCollapsed ? '·' : '交付', children: [
-      { key: 'overview', icon: <LayoutDashboard size={14} />, label: SECTION_LABELS.overview },
-      { key: 'projects', icon: <FolderKanban size={14} />, label: SECTION_LABELS.projects },
-      { key: 'tasks', icon: <ListTodo size={14} />, label: SECTION_LABELS.tasks },
-      { key: 'reviews', icon: <ClipboardCheck size={14} />, label: SECTION_LABELS.reviews },
-      { key: 'assets', icon: <FileText size={14} />, label: SECTION_LABELS.assets },
-      { key: 'deployments', icon: <Rocket size={14} />, label: SECTION_LABELS.deployments },
-    ] },
-    { type: 'group', label: railCollapsed ? '·' : '协作', children: [
-      { key: 'todos', icon: <ListChecks size={14} />, label: SECTION_LABELS.todos },
-      { key: 'reports', icon: <NotebookText size={14} />, label: SECTION_LABELS.reports },
-      { key: 'sessions', icon: <Bot size={14} />, label: SECTION_LABELS.sessions },
-      { key: 'knowledge', icon: <BookOpen size={14} />, label: SECTION_LABELS.knowledge },
-      { key: 'skills', icon: <Sparkles size={14} />, label: SECTION_LABELS.skills },
-    ] },
-    { type: 'group', label: railCollapsed ? '·' : '设置', children: [
-      { key: 'members', icon: <Users size={14} />, label: sectionLabel('members') },
-      { key: 'accounts', icon: <KeyRound size={14} />, label: SECTION_LABELS.accounts },
-      { key: 'connections', icon: <Blocks size={14} />, label: sectionLabel('connections') },
-      { key: 'local', icon: <Laptop size={14} />, label: SECTION_LABELS.local },
-    ] },
+    { key: 'overview', icon: <LayoutDashboard size={14} />, label: SECTION_LABELS.overview },
+    { key: 'projects', icon: <FolderKanban size={14} />, label: SECTION_LABELS.projects },
+    { key: 'tasks', icon: <ListTodo size={14} />, label: SECTION_LABELS.tasks },
+    { key: 'reviews', icon: <ClipboardCheck size={14} />, label: SECTION_LABELS.reviews },
+    { key: 'assets', icon: <FileText size={14} />, label: SECTION_LABELS.assets },
+    {
+      key: 'group:collab',
+      icon: <Sparkles size={14} />,
+      label: railCollapsed && desktop ? '协同' : '更多协同工具',
+      children: [
+        { key: 'todos', icon: <ListChecks size={14} />, label: SECTION_LABELS.todos },
+        { key: 'reports', icon: <NotebookText size={14} />, label: SECTION_LABELS.reports },
+        { key: 'deployments', icon: <Rocket size={14} />, label: SECTION_LABELS.deployments },
+        { key: 'sessions', icon: <Bot size={14} />, label: SECTION_LABELS.sessions },
+        { key: 'knowledge', icon: <BookOpen size={14} />, label: SECTION_LABELS.knowledge },
+        { key: 'skills', icon: <Sparkles size={14} />, label: SECTION_LABELS.skills },
+      ],
+    },
+    {
+      key: 'group:settings',
+      icon: <Blocks size={14} />,
+      label: railCollapsed && desktop ? '设置' : '设置与规则',
+      children: [
+        { key: 'members', icon: <Users size={14} />, label: sectionLabel('members') },
+        { key: 'accounts', icon: <KeyRound size={14} />, label: SECTION_LABELS.accounts },
+        { key: 'connections', icon: <Blocks size={14} />, label: sectionLabel('connections') },
+        { key: 'local', icon: <Laptop size={14} />, label: SECTION_LABELS.local },
+      ],
+    },
   ];
   const navigation = (
     <nav aria-label="工作台导航">
@@ -102,8 +124,12 @@ export const App: React.FC<{
         mode="inline"
         inlineCollapsed={desktop && railCollapsed}
         selectedKeys={[section]}
+        openKeys={desktop && railCollapsed ? undefined : openMenuKeys}
+        onOpenChange={keys => setOpenMenuKeys(keys as string[])}
         items={menuItems}
-        onClick={({ key }) => navigate(key as WorkspaceSection)}
+        onClick={({ key }) => {
+          if (!String(key).startsWith('group:')) navigate(key as WorkspaceSection);
+        }}
       />
     </nav>
   );

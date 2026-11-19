@@ -105,11 +105,11 @@ export const TaskListTable: React.FC<{
       />;
     } },
     { title: '更新时间', key: 'updatedAt', width: 168, responsive: ['lg'], render: (_, task) => <Text type="secondary" className="tf-table-secondary">{timeText(task.updatedAt)}</Text> },
-    { title: '操作', key: 'actions', width: 136, render: (_, task) => {
+    { title: '操作', key: 'actions', width: 172, render: (_, task) => {
       const canClaim = isProjectMember && !task.assigneeId && task.status !== 'DONE';
       const canRemove = canAssign || task.ownerId === userId;
-      if (!canClaim && !canRemove) return <Text type="secondary">—</Text>;
       return <Space size={2} wrap>
+        <Button type="link" size="small" disabled={busy} onClick={() => onOpenTask(task.id)}>查看链路</Button>
         {canClaim && <Button type="link" size="small" icon={<UserCheck size={14} />} disabled={busy} onClick={() => props.onClaim(task)}>认领</Button>}
         {canRemove && <Button type="text" danger size="small" icon={<Trash2 size={14} />} disabled={busy} aria-label={`移出任务 ${task.jiraKey}`} onClick={() => props.onRemove(task)}>移出</Button>}
       </Space>;

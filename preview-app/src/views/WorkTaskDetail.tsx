@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Drawer, Dropdown, Flex, Form, Grid, Input, Progress, Segmented, Select, Skeleton, Space, Spin, Steps, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { DescriptionsProps, MenuProps, TableColumnsType } from 'antd';
-import { Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, ExternalLink, FileCheck2, FileText, FolderGit2, FolderOpen, GitBranch, Laptop, Link2, MoreHorizontal, Package, Pencil, RefreshCw, Sparkles, Terminal, Trash2, X } from 'lucide-react';
+import { Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, ExternalLink, FileCheck2, FileText, FolderGit2, FolderOpen, GitBranch, Laptop, Link2, Maximize2, MoreHorizontal, Package, Pencil, RefreshCw, Sparkles, Terminal, Trash2, X } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import {
   api, ApiError, APPROVE_ROLES, ASSET_ROLES, Asset, AssetKind, CodeupMrItem, ConnectorSummary, ExecutionMode,
@@ -54,8 +54,9 @@ const STAGE_ASSET: Record<GateStage, AssetKind> = {
 
 export const WorkTaskDetail: React.FC<{
   taskId: string; user: User; role: Role; permissions: ProjectPermissions; members: User[]; tasks: WorkTask[]; allTasks?: WorkTask[];
+  embedded?: boolean; onOpenFullScreen?: () => void;
   onOpenTask: (id: string) => void; onChanged: () => Promise<void>; onUnauthorized: () => void; onForbidden?: () => void;
-}> = ({ taskId, user, role, permissions, members, tasks, allTasks, onOpenTask, onChanged, onUnauthorized, onForbidden }) => {
+}> = ({ taskId, user, role, permissions, members, tasks, allTasks, embedded = false, onOpenFullScreen, onOpenTask, onChanged, onUnauthorized, onForbidden }) => {
   const { message, modal } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -163,10 +164,11 @@ export const WorkTaskDetail: React.FC<{
 
   useEffect(() => {
     if (!navigationTarget) return;
+    if (embedded && navigationTarget !== 'review') { setNavigationTarget(null); return; }
     const target = navigationTarget === 'review' ? document.getElementById('workspace-review-detail') : panelRef.current;
     target?.scrollIntoView({ block: 'start', behavior: 'instant' });
     setNavigationTarget(null);
-  }, [navigationTarget, tab, selectedJobId]);
+  }, [navigationTarget, tab, selectedJobId, embedded]);
 
   const children = tasks.filter(item => item.parentId === taskId);
   const doneAncestor = (() => {
@@ -1320,7 +1322,7 @@ export const WorkTaskDetail: React.FC<{
     assetForm.submit();
   };
 
-  return <Spin spinning={busy}><div className="tf-task-detail">
+  return <Spin spinning={busy}><div className={`tf-task-detail${embedded ? ' tf-task-detail-embedded' : ''}`}>
     <Card className="tf-task-summary">
       <Flex justify="space-between" align="start" gap={16} className="tf-task-summary-layout">
         <div className="tf-task-heading">
@@ -1433,6 +1435,9 @@ export const WorkTaskDetail: React.FC<{
           </Flex>
         </div>
         <Space size={4}>
+          {embedded && onOpenFullScreen && (
+            <Button type="text" icon={<Maximize2 size={15} />} onClick={onOpenFullScreen}>全屏详情</Button>
+          )}
           <Button type="text" icon={<RefreshCw size={16} />} disabled={busy} onClick={() => void run(refresh)}>刷新</Button>
           {(permissions.assignTasks || task.ownerId === user.id) && (
             <Button
