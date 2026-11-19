@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Col, Empty, Flex, Input, List, Row, Select, Skeleton, Space, Statistic, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Col, Drawer, Empty, Flex, Input, List, Row, Select, Skeleton, Space, Statistic, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
 import { ArrowRight, Check, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, FileSpreadsheet, FileText, FolderKanban, FolderOpen, ListTodo, Pencil, RefreshCw, Search, Terminal, X } from 'lucide-react';
 import { api, ApiError, APPROVE_ROLES, OverviewStageStat, OverviewSummary, OverviewSummaryJob, Project, projectGroup, ProjectWorkspace, REVIEW_STAGE_OPTIONS, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
@@ -14,6 +14,7 @@ import { clearSearchOnEscape, isEditableTarget, readStoredStringList, writeStore
 import './WorkspaceOverview.css';
 
 const StandupDigestModal = lazy(() => import('./StandupDigestModal').then(mod => ({ default: mod.StandupDigestModal })));
+const ReviewDetail = lazy(() => import('./ReviewDetail').then(mod => ({ default: mod.ReviewDetail })));
 
 const COLLAPSED_GROUPS_KEY = 'taskflow.projects.collapsedGroups';
 
@@ -35,6 +36,7 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
   const [reloadTick, setReloadTick] = useState(0);
   const [digestOpen, setDigestOpen] = useState(false);
   const [digestEverOpened, setDigestEverOpened] = useState(false);
+  const [activePendingJob, setActivePendingJob] = useState<OverviewSummaryJob | null>(null);
   const openDigest = () => { setDigestEverOpened(true); setDigestOpen(true); };
   useEffect(() => {
     if (openDigestTick) {
@@ -227,7 +229,7 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
             return <List.Item>
               <Flex justify="space-between" align="center" gap={8} style={{ width: '100%' }} wrap>
                 <Space size={6} wrap>
-                  <Button type="link" className="tf-overview-task-title" onClick={() => openTaskRoute(job.taskId, { tab: 'reviews', jobId: job.id, from: 'overview' })}>
+                  <Button type="link" className="tf-overview-task-title" onClick={() => setActivePendingJob(job)}>
                     {jobTask?.jiraKey || job.taskId} · {stageLabel(job.stage)}
                   </Button>
                   <Tag color={sla.tagColor} style={{ marginInlineEnd: 0 }}>{sla.label}</Tag>
@@ -245,8 +247,8 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
                       一键批准
                     </Button>
                   )}
-                  <Button size="small" onClick={() => openTaskRoute(job.taskId, { tab: 'reviews', jobId: job.id, from: 'overview' })}>
-                    {canQuickApprove ? '查看' : '前往审批'}
+                  <Button size="small" onClick={() => setActivePendingJob(job)}>
+                    {canQuickApprove ? '查看' : '查看并处理'}
                   </Button>
                 </Space>
               </Flex>
@@ -409,6 +411,56 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
         />
       </Suspense>
     )}
+    <Drawer
+      title={
+        activePendingJob ? (
+          <Flex justify="space-between" align="center" gap={8} wrap>
+            <span>{`${visibleTasks.find(t => t.id === activePendingJob.taskId)?.jiraKey || activePendingJob.taskId} · ${stageLabel(activePendingJob.stage)}`}</span>
+            <Button
+              size="small"
+              type="link"
+              onClick={() => {
+                const target = activePendingJob;
+                setActivePendingJob(null);
+                openTaskRoute(target.taskId, { tab: 'reviews', jobId: target.id, from: 'overview' });
+              }}
+            >
+              前往所属任务链路 →
+            </Button>
+          </Flex>
+        ) : '评审报告详情'
+      }
+      size={920}
+      open={!!activePendingJob}
+      onClose={() => setActivePendingJob(null)}
+      destroyOnHidden
+    >
+      {activePendingJob && (() => {
+        const jobTask = visibleTasks.find(t => t.id === activePendingJob.taskId);
+        if (!jobTask) return <Empty description="该任务当前不可见或已移出。" />;
+        const projRole = projects.find(p => p.id === activePendingJob.projectId)?.role || user.role;
+        const ws = workspaceByProject.get(activePendingJob.projectId);
+        return (
+          <Suspense fallback={<Skeleton active paragraph={{ rows: 6 }} />}>
+            <ReviewDetail
+              key={activePendingJob.id}
+              jobId={activePendingJob.id}
+              task={jobTask}
+              user={user}
+              role={projRole}
+              members={[user]}
+              repoPath={ws?.repoPath || null}
+              onChanged={async () => {
+                setReloadTick(tick => tick + 1);
+                onApproved?.();
+              }}
+              onUnauthorized={onUnauthorized}
+              onForbidden={onUnauthorized}
+            />
+          </Suspense>
+        );
+      })()}
+    </Drawer>
   </div>;
 };
 

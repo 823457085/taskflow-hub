@@ -408,7 +408,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
         taskForm.resetFields(); setCreateOpen(false); void message.success('任务已登记。');
         await refresh(projectId, isCurrent);
         if (!isCurrent()) return;
-        openTask(result.task.id);
+        if (section === 'tasks' && viewMode === 'split' && !selectedTaskId) setSplitFocusTaskId(result.task.id);
+        else openTask(result.task.id);
       } catch (error) { if (isCurrent()) throw error; }
     });
   };
@@ -512,8 +513,12 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     await perform(async () => {
       await refresh(targetProjectId, isCurrent);
       if (scopeMatches() && refreshSequence.current === refreshRequest && projectIdRef.current === targetProjectId) {
-        openTaskRoute(task.id, { from: section });
-        setSelectedTaskId(task.id);
+        if (section === 'tasks' && viewMode === 'split' && !selectedTaskId) {
+          setSplitFocusTaskId(task.id);
+        } else {
+          openTaskRoute(task.id, { from: section });
+          setSelectedTaskId(task.id);
+        }
       }
     });
   };
@@ -900,8 +905,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   let content: React.ReactNode;
   if (section === 'overview') content = <WorkspaceOverview projects={projects} tasks={allTasks} user={user} onUnauthorized={clearSession} onSyncJira={hasBoundJira ? () => void syncMyJiraTasks() : undefined} syncingJira={syncingJira} onApproved={() => void refreshTasksOnly()} openDigestTick={digestTick} />;
   else if (section === 'projects') content = <ProjectDirectory projects={projects} tasks={allTasks} onOpen={switchProject} onCreate={platformPermissions.createProjects ? openNewProject : undefined} onProjectRenamed={updated => setProjects(prev => prev.map(item => item.id === updated.id ? { ...item, name: updated.name } : item))} />;
-  else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} /></Suspense>;
-  else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} members={members} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense>;
+  else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'members') content = project ? <Suspense fallback={routeFallback}><MembersAccessView key={projectId} projectId={projectId} projectKey={project.key} user={user} role={role || 'DEV'} members={members} users={users} tasks={tasks} candidates={candidates} permissions={permissions} canManageUsers={platformPermissions.manageUsers} onChanged={() => refresh()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense> : <Card><Empty description="尚无可访问的项目" /></Card>;
   else if (section === 'connections') content = <Suspense fallback={routeFallback}><ConnectionsView projectId={projectId} project={project} projects={projects} role={role || 'DEV'} user={user} platformPermissions={platformPermissions} onUnauthorized={clearSession} onForbidden={reloadAccess} onProjectsChanged={async id => { await refresh(id); }} /></Suspense>;
   else if (section === 'todos') content = <Suspense fallback={routeFallback}><TeamTodosView key={user.id} user={user} projects={projects} projectId={projectId} members={members} tasks={tasks} canAssign={permissions.assignTasks} onUnauthorized={clearSession} /></Suspense>;

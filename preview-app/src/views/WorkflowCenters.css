@@ -17,6 +17,8 @@
 .tf-workflow-center .ant-table-wrapper, .tf-workflow-center .ant-card-body { min-width: 0; }
 .tf-workflow-center .ant-table-cell { overflow-wrap: anywhere; }
 .tf-workflow-task-picker .ant-select { width: 100%; }
+.tf-code-panel { width: 100%; max-height: 520px; overflow: auto; margin: 0; padding: 14px 16px; background: var(--tf-raised); border: 1px solid var(--tf-border); color: var(--tf-text); border-radius: var(--tf-control-radius, 8px); font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tf-code-input { font-family: var(--font-mono, ui-monospace, monospace); }
 .tf-workflow-mobile-list .ant-list-item { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--tf-space-3, 12px); padding-block: var(--tf-space-4, 16px); min-width: 0; }
 .tf-workflow-mobile-list .ant-list-item:first-child { padding-top: 0; }
 .tf-workflow-mobile-list .ant-list-item:last-child { padding-bottom: 0; }
