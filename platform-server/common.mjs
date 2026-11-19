@@ -22,6 +22,9 @@ export const REVIEW_ROLES = { ADMIN: REVIEW_STAGES, LEAD: ['PRD', 'TASK_BREAKDOW
 export const APPROVAL_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TASK_BREAKDOWN: ['ADMIN', 'LEAD'], TECH_SPEC: ['ADMIN', 'LEAD'], CODE_REVIEW: ['ADMIN', 'LEAD'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'] };
 export const REPORT_VERDICTS = ['PASS', 'CONDITIONAL', 'FAIL'];
 export const CHECKLIST_RESULTS = ['PASS', 'WARN', 'FAIL', 'NA'];
+export const FINDING_CATEGORIES = ['CORRECTNESS', 'SECURITY', 'SPEC_ALIGN', 'CONTRACT', 'TESTS', 'MAINTAINABILITY'];
+export const RISK_LEVELS = ['low', 'medium', 'high'];
+export const RULE_ENFORCEMENTS = ['WARN', 'BLOCK'];
 export const ASSET_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'], CODE: ['ADMIN', 'LEAD', 'DEV'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE_PLAN: ['ADMIN', 'LEAD', 'SRE'] };
 export const STAGE_AGENTS = {
   PRD: { persona: 'ai-pm', skills: ['prd-completeness-audit', 'state-machine-validator'] },

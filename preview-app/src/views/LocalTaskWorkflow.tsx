@@ -49,6 +49,7 @@ export const LocalTaskWorkflow: React.FC<{
   const [jobId, setJobId] = useState('');
   const [reviewStage, setReviewStage] = useState<Stage | ''>('');
   const [autoClaim, setAutoClaim] = useState(true);
+  const [useWorktree, setUseWorktree] = useState(false);
   const [autoSubmitReport, setAutoSubmitReport] = useState(() => readStoredBool(AI_AUTO_SUBMIT_KEY, false));
   const [customInstruction, setCustomInstruction] = useState('');
   const [copied, setCopied] = useState(false);
@@ -357,6 +358,9 @@ export const LocalTaskWorkflow: React.FC<{
       if (safeMode === 'develop' && !task.assigneeId && autoClaim && !selectedDevice?.owner) {
         payload.autoClaim = true;
       }
+      if (safeMode === 'develop' && !workbench && !serverMode && useWorktree) {
+        payload.useWorktree = true;
+      }
       if (safeMode === 'review') {
         const chosenCandidate = candidates.find(item => item.id === jobId);
         if (chosenCandidate) {
@@ -636,6 +640,12 @@ export const LocalTaskWorkflow: React.FC<{
             </div>
           )}
 
+          {safeMode === 'develop' && !workbench && !serverMode && (
+            <Checkbox checked={useWorktree} onChange={e => setUseWorktree(e.target.checked)}>
+              使用独立 <code>git worktree</code> 沙盒分支执行（推荐，避免干扰主工作区未提交代码）
+            </Checkbox>
+          )}
+
           {safeMode === 'develop' && !task.assigneeId && !frozenTask && (
             <Checkbox checked={autoClaim} onChange={e => setAutoClaim(e.target.checked)}>
               启动前自动认领此任务并将本地状态切换为「进行中」
@@ -691,6 +701,7 @@ export const LocalTaskWorkflow: React.FC<{
               {aiRunStatusLabel(activeRun.status)}
             </StatusBadge>
             <Tag>{runLocationLabel(activeRun)}{toolLabel(activeRun.engine)} · {aiRunModeLabel(activeRun.mode)}</Tag>
+            {activeRun.worktreeBranch && <Tag color="cyan">Worktree 分支：{activeRun.worktreeBranch}</Tag>}
           </Space>}
           extra={(runs.length > 1 || !!activeRun.output || activeRun.workbenchUrl) ? (
             <Space size={6} wrap>

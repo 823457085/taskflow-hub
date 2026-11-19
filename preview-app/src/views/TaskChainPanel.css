@@ -79,3 +79,8 @@
 .tf-verdict { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .tf-checklist-table { margin-top: 4px; }
 .tf-chain-object-action.ant-btn { padding: 0 4px; height: auto; margin-inline-start: auto; flex: 0 0 auto; }
+.tf-chain-metrics { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tf-chain-delta { margin-top: 8px; padding: 6px 10px; border-radius: 6px; background: var(--tf-raised); border: 1px dashed var(--tf-border); font-size: 12px; }
+.tf-chain-delta-lines { margin: 6px 0 0; padding: 6px 8px; border-radius: 6px; background: var(--tf-surface); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; max-height: 180px; overflow: auto; }
+.tf-chain-delta-add { color: var(--tf-success, #16a34a); white-space: pre-wrap; word-break: break-word; }
+.tf-chain-delta-del { color: var(--tf-error, #dc2626); white-space: pre-wrap; word-break: break-word; }

@@ -22,7 +22,7 @@ import { createWorkbenchGateway, workbenchPublicUrl } from './workbench-gateway.
 import { createRemoteBroker } from './remote-broker.mjs';
 import { createWorkbenchInstances } from './workbench-instances.mjs';
 import { globalPermissions, projectPermissions, canEditMemberRole, assertMemberRoleChange } from './permissions.mjs';
-import { ApiError, ROLES, PROJECT_ROLES, STAGES, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
+import { ApiError, ROLES, PROJECT_ROLES, STAGES, CHAIN_STAGES, RULE_ENFORCEMENTS, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
 const scrypt = promisify(scryptCallback);
 const SESSION_MS = 8 * 60 * 60 * 1000;
 function credentials(body) {
@@ -383,12 +383,16 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           return send(201, { task: getTask(id, user) });
         }
       }
-      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle|chain|chain-report))?$/);
+      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle|chain|chain-report|chain-analyze))?$/);
       if (taskRoute) {
         const task = getTask(taskRoute[1], user); const role = taskRole(task, user); const action = taskRoute[2];
         if (method === 'GET' && !action) return send(200, { task });
         if (method === 'GET' && action === 'chain') return send(200, { chain: deliveryChain.chainFor(task, user) });
         if (method === 'GET' && action === 'chain-report') return send(200, { markdown: chainReportMarkdown(deliveryChain.chainFor(task, user)) });
+        if (method === 'GET' && action === 'chain-analyze') {
+          const chain = deliveryChain.chainFor(task, user);
+          return send(200, { analysis: chain.analysis, deltas: chain.deltas });
+        }
         if (method === 'GET' && action === 'bundle') {
           const memo = workflow.createMemo();
           const assets = workflow.assetsFor(task.id);
@@ -668,11 +672,26 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         if (method === 'POST') {
           const body = requestBody; const projectId = body.projectId || 'default'; if (!projectPermissions(user, projectRole(user, projectId)).registerPlugins) fail(403, 'FORBIDDEN', '当前角色无权登记项目插件');
           const id = textField(body.id, 'id', { max: 64 }); const name = textField(body.name, 'name', { max: 100 }); const version = textField(body.version, 'version', { max: 32 });
-          if (!/^[a-z][a-z0-9-]*$/.test(id) || !/^\d+\.\d+\.\d+$/.test(version) || !Array.isArray(body.stages) || !body.stages.length || body.stages.length > 5 || body.stages.some(stage => !STAGES.includes(stage))) fail(400, 'INVALID_PLUGIN', '插件声明格式不正确');
-          const plugin = { id, name, version, stages: [...new Set(body.stages)], status: 'REGISTERED_NOT_EXECUTABLE' };
+          if (!/^[a-z][a-z0-9-]*$/.test(id) || !/^\d+\.\d+\.\d+$/.test(version) || !Array.isArray(body.stages) || !body.stages.length || body.stages.length > CHAIN_STAGES.length || body.stages.some(stage => !CHAIN_STAGES.includes(stage))) fail(400, 'INVALID_PLUGIN', '插件声明格式不正确');
+          const rawRule = body.rule ?? body.description;
+          const rule = typeof rawRule === 'string' && rawRule.trim() ? textField(rawRule, 'rule', { max: 1000, preserve: true }).trim() : '';
+          const enforcement = body.enforcement === undefined ? 'WARN' : RULE_ENFORCEMENTS.includes(body.enforcement) ? body.enforcement : fail(400, 'INVALID_PLUGIN', '规则强度仅支持 WARN 或 BLOCK');
+          const plugin = { id, name, version, stages: [...new Set(body.stages)], status: 'REGISTERED_NOT_EXECUTABLE', ...(rule ? { rule } : {}), ...(body.enforcement !== undefined || rule ? { enforcement } : {}) };
           transaction(() => { if (db.prepare('SELECT id FROM plugins WHERE id=?').get(id)) fail(409, 'PLUGIN_EXISTS', '该插件已登记'); db.prepare('INSERT INTO plugins (id,manifest,created_by,project_id) VALUES (?,?,?,?)').run(id, JSON.stringify(plugin), user.id, projectId); audit(user.id, 'PLUGIN_REGISTER', id, projectId); });
           return send(201, { plugin: { ...plugin, projectId } });
         }
+      }
+      const pluginDeleteMatch = path.match(/^\/api\/plugins\/([^/]+)$/);
+      if (pluginDeleteMatch && method === 'DELETE') {
+        if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权移除项目插件');
+        const row = db.prepare('SELECT * FROM plugins WHERE id=?').get(decodeURIComponent(pluginDeleteMatch[1]));
+        if (!row) fail(404, 'PLUGIN_NOT_FOUND', '门禁规则不存在');
+        if (!projectPermissions(user, projectRole(user, row.project_id)).registerPlugins) fail(403, 'FORBIDDEN', '当前角色无权移除项目插件');
+        transaction(() => {
+          db.prepare('DELETE FROM plugins WHERE id=?').run(row.id);
+          audit(user.id, 'PLUGIN_REMOVE', row.id, row.project_id);
+        });
+        return send(200, { deletedId: row.id, projectId: row.project_id });
       }
       if (method === 'GET' && path === '/api/audit') {
         const projectId = url.searchParams.get('projectId'); if (projectId && !projectPermissions(user, projectRole(user, projectId)).viewAudit) fail(403, 'FORBIDDEN', '当前角色无权查看审计');

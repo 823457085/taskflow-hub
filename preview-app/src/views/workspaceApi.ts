@@ -44,15 +44,30 @@ export interface Asset {
   title: string; content: string; sourceUrl: string | null; revision: number; sha256: string;
   actorId: string; createdAt: string;
 }
+export type FindingCategory = 'CORRECTNESS' | 'SECURITY' | 'SPEC_ALIGN' | 'CONTRACT' | 'TESTS' | 'MAINTAINABILITY';
+export type RiskLevel = 'low' | 'medium' | 'high';
+export type RuleEnforcement = 'WARN' | 'BLOCK';
+export interface WalkthroughItem { file: string; summary: string; risk?: RiskLevel }
+export interface ClarifyQuestion { id: string; question: string; impact?: string; owner?: string; resolved?: boolean }
+export interface ReportMeta {
+  riskLevel?: RiskLevel;
+  effortScore?: number;
+  coverageMetrics?: { coveragePrd?: number; traceAc?: number };
+  walkthrough?: WalkthroughItem[];
+  compliance?: { compliant: string[]; missing: string[]; manualCheck: string[] };
+  clarifyQuestions?: ClarifyQuestion[];
+}
 export interface Finding {
   id: string; severity: 'CRITICAL' | 'WARN' | 'INFO'; title: string; detail: string; location: string | null;
+  category?: FindingCategory; confidence?: number; ruleId?: string;
+  suggestedPatch?: { before: string; after: string };
   waiver: null | { id: string; reason: string; actorId: string; createdAt: string };
 }
 export interface ReviewJob {
   id: string; taskId: string; projectId: string; stage: Stage; executionMode: ExecutionMode;
   status: string; actorId: string; createdAt: string; inputHash: string; persona: string;
   skills: string[]; executor: string; snapshot: Record<string, unknown>; stale: boolean; soloMode?: boolean;
-  report: null | { id: string; summary: string; source: string; tool: string | null; evidence: string | null; actorId: string; createdAt: string; verdict?: ReportVerdict | null; score?: number | null; checklist?: ChecklistItem[] };
+  report: null | { id: string; summary: string; source: string; tool: string | null; evidence: string | null; actorId: string; createdAt: string; verdict?: ReportVerdict | null; score?: number | null; checklist?: ChecklistItem[]; meta?: ReportMeta };
   findings: Finding[];
   decision: null | { id: string; decision: string; reason: string; actorId: string; createdAt: string };
 }
@@ -106,15 +121,25 @@ export interface ProjectGitStatus {
   constitutionFiles?: string[];
   reason?: string;
 }
+export interface SubtaskDraftItem {
+  title: string; type: WorkTask['type']; roleHint?: string; estimateDays?: number; after?: string[]; covers?: string[];
+}
 export interface LocalAiRunDraft {
   summary: string; evidence?: string;
-  findings: { severity: Finding['severity']; title: string; detail: string; location?: string }[];
+  findings: {
+    severity: Finding['severity']; title: string; detail: string; location?: string;
+    category?: FindingCategory; confidence?: number; ruleId?: string;
+    suggestedPatch?: { before: string; after: string };
+  }[];
   autoSubmitted?: boolean;
-  verdict?: ReportVerdict; score?: number; checklist?: ChecklistItem[];
+  verdict?: ReportVerdict; score?: number; checklist?: ChecklistItem[]; meta?: ReportMeta;
+  subtasks?: SubtaskDraftItem[]; rationale?: string; answer?: string;
 }
 export interface LocalAiRun {
   id: string; taskId: string; projectId: string; jobId: string | null; actorId: string;
   mode: 'read' | 'develop' | 'review'; engine: LocalAiEngineId; tool: string; repoPath: string | null;
+  actionType?: 'DEFAULT' | 'CHAIN_ANALYZE' | 'REVIEW_ASK' | 'SUBTASK_DRAFT';
+  askFindingId?: string; askQuestion?: string; worktreeBranch?: string; worktreePath?: string;
   runner?: LocalAiRunner; workbenchUrl?: string;
   deviceId?: string; deviceName?: string | null; deviceOwner?: { id: string; username: string } | null; bridgePhase?: 'QUEUED' | 'CLAIMED' | 'EXECUTING' | null; cancelRequested?: boolean;
   status: 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'INTERRUPTED'; exitCode: number | null;
@@ -233,14 +258,27 @@ export interface ChainCheck { id: string; label: string; ok: boolean | null; lev
 export interface ChainNextAction { type: 'ADD_INPUT' | 'ADD_SUBTASKS' | 'AI_REVIEW' | 'DECIDE' | 'FIX' | 'VIEW'; label: string; stage?: Stage; jobId?: string; assetKind?: AssetKind }
 export interface ChainReview {
   jobId: string; status: string; stale: boolean; createdAt: string; executionMode: ExecutionMode;
-  verdict: ReportVerdict | null; score: number | null; summary: string; tool: string | null; reportedAt: string | null; checklist: ChecklistItem[];
-  findings: { critical: number; warn: number; info: number; waived: number; items: { id: string; severity: Finding['severity']; title: string; detail: string; location: string | null; waived: boolean }[] };
+  verdict: ReportVerdict | null; score: number | null; summary: string; tool: string | null; reportedAt: string | null; checklist: ChecklistItem[]; meta?: ReportMeta;
+  findings: { critical: number; warn: number; info: number; waived: number; items: { id: string; severity: Finding['severity']; title: string; detail: string; location: string | null; waived: boolean; category?: FindingCategory; confidence?: number; ruleId?: string; suggestedPatch?: { before: string; after: string } }[] };
   decision: { decision: string; reason: string; createdAt: string } | null;
+}
+export interface ChainDelta {
+  assetId: string; kind: AssetKind; linkId: ChainLinkId | null; title: string;
+  fromRevision: number; toRevision: number; additions: number; deletions: number;
+  changedHeadings: string[]; previewLines: { kind: '+' | '-'; text: string }[];
+}
+export interface ChainConflict {
+  id: string; severity: Finding['severity']; category?: FindingCategory; title: string; detail: string; linkIds: ChainLinkId[];
+}
+export interface ChainAnalysis {
+  metrics: { coveragePrd: number | null; traceAc: number | null; clarifyOpenCount: number; constitutionCount: number; customRuleCount: number; conflictCount: number };
+  constitutionFiles: string[];
+  conflicts: ChainConflict[];
 }
 export interface ChainLink {
   id: ChainLinkId; index: number; stage: Stage; title: string; purpose: string; focus: string[]; advisory: boolean;
   status: ChainLinkStatus; statusLabel: string; gateReason: string; missing: string[];
-  objects: ChainObject[]; checks: ChainCheck[]; review: ChainReview | null; next: ChainNextAction;
+  objects: ChainObject[]; checks: ChainCheck[]; delta?: ChainDelta | null; review: ChainReview | null; next: ChainNextAction;
 }
 export type ChainStatusMap = Record<Stage, ChainLinkStatus>;
 export interface ChainChild { id: string; jiraKey: string; title: string; status: TaskStatus; jiraStatus: string | null; assignee: string | null; url: string | null; links: ChainStatusMap }
@@ -252,6 +290,8 @@ export interface DeliveryChain {
   overall: { status: 'PASS' | 'BLOCKED' | 'IN_PROGRESS'; passed: number; total: number; score: number | null; currentLinkId: ChainLinkId | null; blockers: { linkId: ChainLinkId; link: string; kind: string; title: string; detail: string }[] };
   links: ChainLink[]; children: ChainChild[];
   traceability: { point: string; result: ChecklistItem['result']; note: string; tasks: { key: string; title: string | null; taskId: string | null; links: ChainStatusMap | null }[] }[];
+  deltas?: ChainDelta[];
+  analysis?: ChainAnalysis;
 }
 export const CHAIN_STAGE_ORDER: Stage[] = ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE'];
 export const CHAIN_STAGE_SHORT: Record<Stage, string> = { PRD: '需求', TASK_BREAKDOWN: '拆分', TECH_SPEC: '方案', CODE_REVIEW: '代码', TEST_CASE: '测试', RELEASE: '上线' };

@@ -1,4 +1,4 @@
-import type { AssetKind, ExecutionMode, Finding, Role, Stage, TaskStatus, WorkTask } from './workspaceApi.ts';
+import type { AssetKind, ExecutionMode, Finding, FindingCategory, RiskLevel, Role, Stage, TaskStatus, WorkTask } from './workspaceApi.ts';
 
 const TASK_STATUS_MAP: Record<TaskStatus, string> = {
   OPEN: '待开始',
@@ -252,6 +252,27 @@ export const WAIVER_REASON_PRESETS: readonly string[] = [
   '属存量兼容逻辑限制，已补充监控告警并登记跟进任务',
   '仅影响内部低频管理路径，已确认应急回滚步骤，同意本轮豁免',
 ];
+
+const FINDING_CATEGORY_MAP: Record<FindingCategory, string> = {
+  CORRECTNESS: '逻辑正确性',
+  SECURITY: '安全合规',
+  SPEC_ALIGN: '需求对齐',
+  CONTRACT: '接口契约',
+  TESTS: '测试覆盖',
+  MAINTAINABILITY: '可维护性',
+};
+
+const RISK_LEVEL_MAP: Record<RiskLevel, string> = {
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+};
+
+export const findingCategoryLabel = (category?: string | null): string =>
+  category ? FINDING_CATEGORY_MAP[category as FindingCategory] || category : '';
+
+export const riskLevelLabel = (risk?: string | null): string =>
+  risk ? RISK_LEVEL_MAP[risk as RiskLevel] || risk : '';
 
 export const taskStatusLabel = (status?: string | null): string =>
   status ? TASK_STATUS_MAP[status as TaskStatus] || status : '—';

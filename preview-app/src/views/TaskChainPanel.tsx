@@ -1,12 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Card, Collapse, Drawer, Empty, Flex, Skeleton, Space, Table, Tag, Tooltip, Typography } from 'antd';
-import { AlertTriangle, CheckCircle2, Copy, Download, ExternalLink, FileBarChart, GitBranch, ListTree, MinusCircle, RefreshCw, Sparkles, XCircle } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Copy, Download, ExternalLink, FileBarChart, GitBranch, ListTree, MinusCircle, RefreshCw, Sparkles, Square, XCircle } from 'lucide-react';
 import { api, ApiError, CHAIN_STAGE_ORDER, CHAIN_STAGE_SHORT } from './workspaceApi';
-import type { ChainCheck, ChainChild, ChainLink, ChainLinkStatus, ChainNextAction, ChainObject, ChainStatusMap, DeliveryChain } from './workspaceApi';
-import { ChecklistTable, LINK_STATUS_META, VerdictTag } from './ChainReportBits';
+import type {
+  ChainCheck, ChainChild, ChainLink, ChainLinkStatus, ChainNextAction, ChainObject,
+  ChainStatusMap, DeliveryChain, LocalAiEngineId, LocalAiRun, LocalAutomationCapabilities,
+} from './workspaceApi';
+import { ChecklistTable, FindingMetaBadges, LINK_STATUS_META, ReportMetaSummary, SuggestedPatchView, VerdictTag } from './ChainReportBits';
 import { MarkdownPreview } from './MarkdownPreview';
+import { readStoredChoice } from './uiPreferences';
 import './TaskChainPanel.css';
 
+const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
 const OVERALL_META: Record<DeliveryChain['overall']['status'], { label: string; color: string }> = {
   PASS: { label: '全链路通过', color: 'success' },
   BLOCKED: { label: '存在阻断', color: 'error' },
@@ -58,6 +63,7 @@ const LinkCard: React.FC<{
   const warnings = link.checks.filter(check => check.ok === false && check.level === 'advice').length;
   const actionDisabled = frozen && !['VIEW', 'DECIDE'].includes(link.next.type);
   const primary = ['AI_REVIEW', 'DECIDE', 'ADD_INPUT', 'ADD_SUBTASKS', 'FIX'].includes(link.next.type);
+  const openClarifies = (review?.meta?.clarifyQuestions || []).filter(q => !q.resolved).length;
   return <section id={`chain-link-${link.id}`} className={`tf-chain-link tone-${meta.tone} ${current ? 'is-current' : ''}`} aria-label={`${link.index}. ${link.title}`}>
     <div className="tf-chain-link-rail"><span className="tf-chain-link-index">{link.index}</span></div>
     <Card size="small" className="tf-chain-link-card">
@@ -96,7 +102,7 @@ const LinkCard: React.FC<{
           <Typography.Text strong className="tf-chain-col-title">AI 审核</Typography.Text>
           {review ? <div className="tf-chain-review">
             <Space size={4} wrap>
-              <VerdictTag verdict={review.verdict} score={review.score} />
+              <VerdictTag verdict={review.verdict} score={review.score} meta={review.meta} />
               {review.stale && <Tag color="warning">材料已变化</Tag>}
               {!review.reportedAt && <Tag color="processing">等待 AI 报告</Tag>}
             </Space>
@@ -105,14 +111,44 @@ const LinkCard: React.FC<{
               <Tag color={review.findings.critical ? 'error' : 'default'}>阻断 {review.findings.critical}</Tag>
               <Tag color={review.findings.warn ? 'warning' : 'default'}>警告 {review.findings.warn}</Tag>
               {review.findings.waived > 0 && <Tag>已豁免 {review.findings.waived}</Tag>}
+              {openClarifies > 0 && <Tag color="orange">待澄清 {openClarifies}</Tag>}
             </Space>}
             {review.decision && <Typography.Text type="secondary" className="tf-chain-decision">人工确认：{review.decision.decision === 'APPROVE' ? '批准' : '退回'} · {review.decision.reason}</Typography.Text>}
           </div> : <Typography.Text type="secondary">{link.status === 'MISSING' ? '资料齐备后可发起 AI 审核' : '尚未审核'}</Typography.Text>}
         </div>
       </div>
+      {link.delta && (
+        <div className="tf-chain-delta">
+          <Collapse
+            ghost
+            size="small"
+            items={[{
+              key: 'delta',
+              label: (
+                <Space size={6} wrap>
+                  <Tag color="blue" style={{ marginInlineEnd: 0 }}>变更增量 r{link.delta.fromRevision} → r{link.delta.toRevision}</Tag>
+                  <Typography.Text type="success">+{link.delta.additions}</Typography.Text>
+                  <Typography.Text type="danger">-{link.delta.deletions}</Typography.Text>
+                  {link.delta.changedHeadings.length > 0 && <Typography.Text type="secondary">涉及章节：{link.delta.changedHeadings.join('、')}</Typography.Text>}
+                </Space>
+              ),
+              children: link.delta.previewLines.length ? (
+                <div className="tf-chain-delta-lines">
+                  {link.delta.previewLines.map((line, i) => (
+                    <div key={i} className={line.kind === '+' ? 'tf-chain-delta-add' : 'tf-chain-delta-del'}>
+                      {line.kind} {line.text}
+                    </div>
+                  ))}
+                </div>
+              ) : <Typography.Text type="secondary">内容字节重排，无增删行预览。</Typography.Text>,
+            }]}
+          />
+        </div>
+      )}
       <Collapse ghost size="small" className="tf-chain-link-more" items={[
+        ...(review?.meta ? [{ key: 'meta', label: '结构化洞察（Walkthrough / 需求对照 / 澄清清单）', children: <ReportMetaSummary meta={review.meta} /> }] : []),
         ...(review?.checklist.length ? [{ key: 'checklist', label: `AI 检查清单（${review.checklist.length} 项）`, children: <ChecklistTable items={review.checklist} /> }] : []),
-        ...(review?.findings.items.length ? [{ key: 'findings', label: `问题清单（${review.findings.items.length}）`, children: <ul className="tf-chain-findings">{review.findings.items.map(item => <li key={item.id}><Tag color={item.severity === 'CRITICAL' ? 'error' : item.severity === 'WARN' ? 'warning' : 'default'}>{item.severity}</Tag>{item.waived && <Tag>已豁免</Tag>}<Typography.Text strong>{item.title}</Typography.Text><Typography.Paragraph type="secondary" className="tf-preserve">{item.detail}{item.location ? `（${item.location}）` : ''}</Typography.Paragraph></li>)}</ul> }] : []),
+        ...(review?.findings.items.length ? [{ key: 'findings', label: `问题清单（${review.findings.items.length}）`, children: <ul className="tf-chain-findings">{review.findings.items.map(item => <li key={item.id}><Space size={6} wrap><Tag color={item.severity === 'CRITICAL' ? 'error' : item.severity === 'WARN' ? 'warning' : 'default'}>{item.severity}</Tag><FindingMetaBadges category={item.category} confidence={item.confidence} ruleId={item.ruleId} />{item.waived && <Tag>已豁免</Tag>}<Typography.Text strong>{item.title}</Typography.Text></Space><Typography.Paragraph type="secondary" className="tf-preserve">{item.detail}{item.location ? `（${item.location}）` : ''}</Typography.Paragraph><SuggestedPatchView patch={item.suggestedPatch} /></li>)}</ul> }] : []),
         { key: 'focus', label: '本环节审核要点', children: <ol className="tf-chain-focus">{link.focus.map(item => <li key={item}>{item}</li>)}</ol> },
       ]} />
     </Card>
@@ -157,13 +193,25 @@ export const TaskChainPanel: React.FC<{
   const [loading, setLoading] = useState(true);
   const [reportOpen, setReportOpen] = useState(false);
   const [linkingKey, setLinkingKey] = useState('');
+  const [analyzeRun, setAnalyzeRun] = useState<LocalAiRun | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeOpen, setAnalyzeOpen] = useState(false);
   const sequence = useRef(0);
+
   const load = useCallback(async () => {
     const current = ++sequence.current;
     setLoading(true);
     try {
-      const data = await api<{ chain: DeliveryChain }>(`tasks/${encodeURIComponent(taskId)}/chain`);
-      if (current === sequence.current) setChain(data.chain);
+      const [data, runsRes] = await Promise.all([
+        api<{ chain: DeliveryChain }>(`tasks/${encodeURIComponent(taskId)}/chain`),
+        api<{ runs: LocalAiRun[] }>(`tasks/${encodeURIComponent(taskId)}/ai-runs`).catch(() => ({ runs: [] as LocalAiRun[] })),
+      ]);
+      if (current === sequence.current) {
+        setChain(data.chain);
+        const latestAnalyze = (runsRes.runs || []).find(r => r.actionType === 'CHAIN_ANALYZE') || null;
+        setAnalyzeRun(latestAnalyze);
+        if (latestAnalyze?.status === 'RUNNING') setAnalyzeOpen(true);
+      }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       else if (error instanceof ApiError && error.status === 403) onForbidden?.();
@@ -171,6 +219,54 @@ export const TaskChainPanel: React.FC<{
     } finally { if (current === sequence.current) setLoading(false); }
   }, [taskId]);
   useEffect(() => { void load(); }, [load, refreshKey]);
+
+  useEffect(() => {
+    if (!analyzeRun || analyzeRun.status !== 'RUNNING') return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(analyzeRun.id)}`)
+        .then(res => setAnalyzeRun(res.run))
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [analyzeRun?.id, analyzeRun?.status]);
+
+  const startCrossAnalyze = async () => {
+    if (analyzing || analyzeRun?.status === 'RUNNING') return;
+    setAnalyzing(true);
+    try {
+      let engine = readStoredChoice('taskflow.ai.engine', ENGINE_IDS, 'codex');
+      try {
+        const caps = await api<LocalAutomationCapabilities>('local-automation/capabilities');
+        if (!caps.engines.some(e => e.id === engine && e.available)) {
+          engine = caps.engines.find(e => e.available)?.id || engine;
+        }
+      } catch { /* fallback to stored choice */ }
+      const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(taskId)}/ai-runs`, {
+        mode: 'read',
+        actionType: 'CHAIN_ANALYZE',
+        engine,
+      });
+      setAnalyzeRun(res.run);
+      setAnalyzeOpen(true);
+      void message.success('已发起跨环节 AI 一致性深度检查（/analyze）。');
+    } catch (error) {
+      void message.error(error instanceof Error ? error.message : '启动跨环节一致性检查失败。');
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const stopCrossAnalyze = async () => {
+    if (!analyzeRun) return;
+    try {
+      const res = await api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(analyzeRun.id)}/stop`, {});
+      setAnalyzeRun(res.run);
+    } catch (error) {
+      void message.error(error instanceof Error ? error.message : '停止执行失败。');
+    }
+  };
+
   // Import a Jira item declared in the dev task (交付物 / 相关开发事项) and link it as a child of this task.
   const linkChild = async (key: string) => {
     if (!chain) return;
@@ -189,6 +285,8 @@ export const TaskChainPanel: React.FC<{
   if (!chain) return <Card><Skeleton active paragraph={{ rows: 8 }} /></Card>;
   const overall = OVERALL_META[chain.overall.status];
   const currentLink = chain.links.find(link => link.id === chain.overall.currentLinkId) || null;
+  const metrics = chain.analysis?.metrics;
+  const conflicts = chain.analysis?.conflicts || [];
   const jumpTo = (id: string) => document.getElementById(`chain-link-${id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 
   return <div className="tf-chain-panel">
@@ -206,9 +304,28 @@ export const TaskChainPanel: React.FC<{
           <Typography.Text type="secondary" className="tf-chain-overview-hint">
             {currentLink ? <>下一步：<Typography.Text strong>{currentLink.index}. {currentLink.title}</Typography.Text> — {currentLink.next.label}</> : '全部环节已通过，可在顶部「一键完成核验」归档任务。'}
           </Typography.Text>
+          {metrics && (
+            <div className="tf-chain-metrics">
+              {metrics.coveragePrd !== null && <Tag color={metrics.coveragePrd >= 100 ? 'success' : 'warning'} style={{ marginInlineEnd: 0 }}>PRD 覆盖 {metrics.coveragePrd}%</Tag>}
+              {metrics.traceAc !== null && <Tag color={metrics.traceAc >= 100 ? 'success' : 'warning'} style={{ marginInlineEnd: 0 }}>AC 追溯 {metrics.traceAc}%</Tag>}
+              {metrics.clarifyOpenCount > 0 && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待澄清 {metrics.clarifyOpenCount} 项</Tag>}
+              {metrics.conflictCount > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>一致性冲突 {metrics.conflictCount} 项</Tag>}
+              {metrics.constitutionCount > 0 && (
+                <Tooltip title={`已识别仓库工程规范：${chain.analysis?.constitutionFiles.join('、')}`}>
+                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>规范 Constitution {metrics.constitutionCount}</Tag>
+                </Tooltip>
+              )}
+              {metrics.customRuleCount > 0 && <Tag color="purple" style={{ marginInlineEnd: 0 }}>项目规则 {metrics.customRuleCount}</Tag>}
+            </div>
+          )}
         </div>
         <Space size={6} wrap>
           <Button icon={<RefreshCw size={14} />} loading={loading} onClick={() => void load()}>刷新</Button>
+          {analyzeRun?.status === 'RUNNING' ? (
+            <Button danger icon={<Square size={13} />} onClick={() => void stopCrossAnalyze()}>停止交叉检查</Button>
+          ) : (
+            <Button icon={<Sparkles size={14} />} loading={analyzing} onClick={() => void startCrossAnalyze()}>AI 交叉检查</Button>
+          )}
           {currentLink && !frozen && <Button icon={currentLink.next.type === 'AI_REVIEW' ? <Sparkles size={14} /> : undefined} onClick={() => onAction(currentLink, currentLink.next)}>{currentLink.next.label}</Button>}
           <Button type="primary" icon={<FileBarChart size={14} />} onClick={() => setReportOpen(true)}>链路审核报告</Button>
         </Space>
@@ -222,6 +339,29 @@ export const TaskChainPanel: React.FC<{
         </li>)}
       </ol>
       {chain.overall.blockers.length > 0 && <Alert type="error" showIcon className="tf-chain-blockers" title={`${chain.overall.blockers.length} 项阻断需要处理`} description={<ul>{chain.overall.blockers.slice(0, 6).map((item, index) => <li key={index}><Typography.Link onClick={() => jumpTo(item.linkId)}>[{item.link}]</Typography.Link> <Typography.Text strong>{item.title}</Typography.Text> <Typography.Text type="secondary">{item.detail}</Typography.Text></li>)}{chain.overall.blockers.length > 6 && <li>… 其余 {chain.overall.blockers.length - 6} 项见链路审核报告</li>}</ul>} />}
+      {conflicts.length > 0 && <Alert type="warning" showIcon className="tf-chain-blockers" title={`跨环节一致性巡检（/analyze）发现 ${conflicts.length} 项偏差`} description={<ul>{conflicts.map(c => <li key={c.id}>{c.linkIds.map(lid => <Typography.Link key={lid} onClick={() => jumpTo(lid)} style={{ marginInlineEnd: 4 }}>[{chain.links.find(l => l.id === lid)?.title || lid}]</Typography.Link>)}<Typography.Text strong>{c.title}</Typography.Text> <Typography.Text type="secondary">{c.detail}</Typography.Text></li>)}</ul>} />}
+      {analyzeRun && (
+        <Collapse
+          activeKey={analyzeOpen ? ['analyze-ai'] : []}
+          onChange={keys => setAnalyzeOpen(keys.includes('analyze-ai'))}
+          size="small"
+          items={[{
+            key: 'analyze-ai',
+            label: (
+              <Space size={8} wrap>
+                <Sparkles size={14} />
+                <span>AI 全链路深度一致性报告（/analyze）</span>
+                <Tag color={analyzeRun.status === 'SUCCEEDED' ? 'success' : analyzeRun.status === 'RUNNING' ? 'processing' : 'error'}>
+                  {analyzeRun.status === 'RUNNING' ? '分析中…' : analyzeRun.status === 'SUCCEEDED' ? '已完成' : '执行异常'}
+                </Tag>
+              </Space>
+            ),
+            children: (analyzeRun.draft?.answer || analyzeRun.output)
+              ? <MarkdownPreview content={analyzeRun.draft?.answer || analyzeRun.output} />
+              : <Typography.Text type="secondary">{analyzeRun.error || '正在读取全链路 PRD / 方案 / 代码 / 测试快照对比一致性…'}</Typography.Text>,
+          }]}
+        />
+      )}
     </Card>
 
     <div className="tf-chain-links">

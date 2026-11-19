@@ -1,24 +1,81 @@
 import { randomUUID } from 'node:crypto';
-import { STAGES, REVIEW_STAGES, STAGE_INPUTS, REPORT_VERDICTS, CHECKLIST_RESULTS, KINDS, TOOLS, STAGE_AGENTS, REVIEW_ROLES, APPROVAL_ROLES, fail, sha, textField, assetRow } from './common.mjs';
+import { STAGES, REVIEW_STAGES, STAGE_INPUTS, REPORT_VERDICTS, CHECKLIST_RESULTS, FINDING_CATEGORIES, RISK_LEVELS, KINDS, TOOLS, STAGE_AGENTS, REVIEW_ROLES, APPROVAL_ROLES, fail, sha, textField, assetRow } from './common.mjs';
 const parseChecklist = value => { if (!value) return []; try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; } };
+const parseJson = value => { if (!value) return null; try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' ? parsed : null; } catch { return null; } };
+function normalizeReportMeta(raw, findings = []) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  if (RISK_LEVELS.includes(raw.riskLevel)) out.riskLevel = raw.riskLevel;
+  if (Number.isInteger(raw.effortScore) && raw.effortScore >= 1 && raw.effortScore <= 5) out.effortScore = raw.effortScore;
+  if (Array.isArray(raw.walkthrough)) {
+    const items = raw.walkthrough.slice(0, 60)
+      .filter(item => item && typeof item.file === 'string' && item.file.trim())
+      .map(item => ({
+        file: textField(item.file, 'meta.walkthrough.file', { max: 300 }),
+        summary: typeof item.summary === 'string' && item.summary.trim() ? item.summary.trim().slice(0, 600) : '',
+        ...(RISK_LEVELS.includes(item.risk) ? { risk: item.risk } : {}),
+      }));
+    if (items.length) out.walkthrough = items;
+  }
+  if (raw.compliance && typeof raw.compliance === 'object' && !Array.isArray(raw.compliance)) {
+    const pickList = val => Array.isArray(val) ? val.slice(0, 40).filter(s => typeof s === 'string' && s.trim()).map(s => s.trim().slice(0, 400)) : [];
+    const compliant = pickList(raw.compliance.compliant);
+    const missing = pickList(raw.compliance.missing);
+    const manualCheck = pickList(raw.compliance.manualCheck);
+    if (compliant.length || missing.length || manualCheck.length) out.compliance = { compliant, missing, manualCheck };
+  }
+  if (Array.isArray(raw.clarifyQuestions)) {
+    const qs = raw.clarifyQuestions.slice(0, 30)
+      .filter(item => item && typeof item.question === 'string' && item.question.trim())
+      .map((item, idx) => ({
+        id: typeof item.id === 'string' && item.id.trim() ? item.id.trim().slice(0, 32) : `Q-${String(idx + 1).padStart(3, '0')}`,
+        question: item.question.trim().slice(0, 600),
+        ...(typeof item.impact === 'string' && item.impact.trim() ? { impact: item.impact.trim().slice(0, 400) } : {}),
+        ...(typeof item.owner === 'string' && item.owner.trim() ? { owner: item.owner.trim().slice(0, 80) } : {}),
+        resolved: !!item.resolved,
+      }));
+    if (qs.length) out.clarifyQuestions = qs;
+  }
+  if (raw.coverageMetrics && typeof raw.coverageMetrics === 'object' && !Array.isArray(raw.coverageMetrics)) {
+    const m = {};
+    if (Number.isFinite(raw.coverageMetrics.coveragePrd)) m.coveragePrd = Math.max(0, Math.min(100, Math.round(raw.coverageMetrics.coveragePrd)));
+    if (Number.isFinite(raw.coverageMetrics.traceAc)) m.traceAc = Math.max(0, Math.min(100, Math.round(raw.coverageMetrics.traceAc)));
+    if (Object.keys(m).length) out.coverageMetrics = m;
+  }
+  if (findings.length && !out.riskLevel && findings.some(f => f.severity === 'CRITICAL')) out.riskLevel = 'high';
+  return Object.keys(out).length ? out : null;
+}
 export function createWorkflow(db, audit, transaction) {
   const assetsFor = taskId => db.prepare('SELECT * FROM assets WHERE task_id=? ORDER BY rowid DESC').all(taskId).map(assetRow);
   const reportFor = jobId => {
     const row = db.prepare('SELECT * FROM reports WHERE job_id=?').get(jobId);
-    return row ? { id: row.id, summary: row.summary, source: row.source, tool: row.tool, evidence: row.evidence, actorId: row.actor_id, createdAt: row.created_at, verdict: row.verdict || null, score: Number.isInteger(row.score) ? row.score : null, checklist: parseChecklist(row.checklist) } : null;
+    if (!row) return null;
+    const meta = parseJson(row.meta);
+    return {
+      id: row.id, summary: row.summary, source: row.source, tool: row.tool, evidence: row.evidence, actorId: row.actor_id, createdAt: row.created_at,
+      verdict: row.verdict || null, score: Number.isInteger(row.score) ? row.score : null, checklist: parseChecklist(row.checklist),
+      ...(meta ? { meta } : {}),
+    };
   };
   const decisionFor = jobId => {
     const row = db.prepare('SELECT * FROM decisions WHERE job_id=?').get(jobId);
     return row ? { id: row.id, decision: row.decision, reason: row.reason, actorId: row.actor_id, createdAt: row.created_at } : null;
   };
-  const findingsFor = jobId => db.prepare('SELECT f.id,f.severity,f.title,f.detail,f.location,w.id AS waiver_id,w.reason AS waiver_reason,w.actor_id AS waiver_actor_id,w.created_at AS waiver_created_at FROM findings f LEFT JOIN waivers w ON w.finding_id=f.id WHERE f.job_id=? ORDER BY f.rowid').all(jobId).map(row => ({
-    id: row.id,
-    severity: row.severity,
-    title: row.title,
-    detail: row.detail,
-    location: row.location,
-    waiver: row.waiver_id ? { id: row.waiver_id, reason: row.waiver_reason, actorId: row.waiver_actor_id, createdAt: row.waiver_created_at } : null,
-  }));
+  const findingsFor = jobId => db.prepare('SELECT f.id,f.severity,f.title,f.detail,f.location,f.category,f.confidence,f.rule_id,f.patch_json,w.id AS waiver_id,w.reason AS waiver_reason,w.actor_id AS waiver_actor_id,w.created_at AS waiver_created_at FROM findings f LEFT JOIN waivers w ON w.finding_id=f.id WHERE f.job_id=? ORDER BY f.rowid').all(jobId).map(row => {
+    const patch = parseJson(row.patch_json);
+    return {
+      id: row.id,
+      severity: row.severity,
+      title: row.title,
+      detail: row.detail,
+      location: row.location,
+      ...(row.category ? { category: row.category } : {}),
+      ...(Number.isInteger(row.confidence) ? { confidence: row.confidence } : {}),
+      ...(row.rule_id ? { ruleId: row.rule_id } : {}),
+      ...(patch ? { suggestedPatch: patch } : {}),
+      waiver: row.waiver_id ? { id: row.waiver_id, reason: row.waiver_reason, actorId: row.waiver_actor_id, createdAt: row.waiver_created_at } : null,
+    };
+  });
   const createMemo = () => ({ assets: new Map(), plugins: new Map(), inputs: new Map(), gate: new Map(), gates: new Map(), approver: new Map() });
   // Child tasks as a review input. Only fields that describe the breakdown itself are hashed, so Jira status churn does not invalidate the review.
   const childrenFor = taskId => db.prepare('SELECT id,jira_key,title,assignee_id,external_ref FROM tasks WHERE parent_id=? ORDER BY jira_key').all(taskId).map(row => {
@@ -147,10 +204,29 @@ export function createWorkflow(db, audit, transaction) {
     if (!Array.isArray(body.findings) || body.findings.length > 50) fail(400, 'INVALID_FINDINGS', 'findings必须为不超过50项的数组');
     const findings = body.findings.map(item => {
       if (!item || !['CRITICAL', 'WARN', 'INFO'].includes(item.severity)) fail(400, 'INVALID_FINDINGS', '问题严重程度不受支持');
-      return { severity: item.severity, title: textField(item.title, 'title', { max: 200, preserve: true }), detail: textField(item.detail, 'detail', { max: 4000, preserve: true }), location: item.location === undefined ? null : textField(item.location, 'location', { min: 0, max: 500, preserve: true }) };
+      const category = item.category === undefined || item.category === null || item.category === '' ? null
+        : FINDING_CATEGORIES.includes(item.category) ? item.category : fail(400, 'INVALID_FINDINGS', '问题分类不受支持');
+      const confidence = item.confidence === undefined || item.confidence === null ? null
+        : Number.isInteger(item.confidence) && item.confidence >= 0 && item.confidence <= 10 ? item.confidence : fail(400, 'INVALID_FINDINGS', '问题置信度必须为 0 至 10 的整数');
+      const ruleId = item.ruleId === undefined || item.ruleId === null || item.ruleId === '' ? null
+        : textField(item.ruleId, 'finding.ruleId', { max: 64 });
+      let patchJson = null;
+      if (item.suggestedPatch && typeof item.suggestedPatch === 'object' && !Array.isArray(item.suggestedPatch)) {
+        const before = typeof item.suggestedPatch.before === 'string' ? item.suggestedPatch.before.slice(0, 4000) : '';
+        const after = typeof item.suggestedPatch.after === 'string' ? item.suggestedPatch.after.slice(0, 4000) : '';
+        if (before || after) patchJson = JSON.stringify({ before, after });
+      }
+      return {
+        severity: item.severity,
+        title: textField(item.title, 'title', { max: 200, preserve: true }),
+        detail: textField(item.detail, 'detail', { max: 4000, preserve: true }),
+        location: item.location === undefined ? null : textField(item.location, 'location', { min: 0, max: 500, preserve: true }),
+        category, confidence, ruleId, patchJson,
+      };
     });
     const verdict = body.verdict === undefined || body.verdict === null ? null : body.verdict;
     if (verdict !== null && !REPORT_VERDICTS.includes(verdict)) fail(400, 'INVALID_VERDICT', '评审结论仅支持 PASS / CONDITIONAL / FAIL');
+    if (verdict === 'PASS' && findings.some(item => item.severity === 'CRITICAL')) fail(400, 'INVALID_VERDICT', '存在 CRITICAL 问题时不能将结论设为 PASS');
     const score = body.score === undefined || body.score === null ? null : body.score;
     if (score !== null && (!Number.isInteger(score) || score < 0 || score > 100)) fail(400, 'INVALID_SCORE', '评分必须是0至100的整数');
     if (body.checklist !== undefined && body.checklist !== null && (!Array.isArray(body.checklist) || body.checklist.length > 60)) fail(400, 'INVALID_CHECKLIST', 'checklist必须为不超过60项的数组');
@@ -158,9 +234,10 @@ export function createWorkflow(db, audit, transaction) {
       if (!item || !CHECKLIST_RESULTS.includes(item.result)) fail(400, 'INVALID_CHECKLIST', '检查项结果仅支持 PASS / WARN / FAIL / NA');
       return { item: textField(item.item, 'checklist.item', { max: 300, preserve: true }), result: item.result, note: item.note === undefined || item.note === null ? '' : textField(item.note, 'checklist.note', { min: 0, max: 2000, preserve: true }), ...(item.ref ? { ref: textField(item.ref, 'checklist.ref', { max: 500, preserve: true }) } : {}) };
     });
+    const meta = normalizeReportMeta(body.meta, findings);
     transaction(() => {
-      db.prepare('INSERT INTO reports (id,job_id,summary,source,tool,evidence,actor_id,created_at,verdict,score,checklist) VALUES (?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), row.id, summary, body.source, body.source === 'LOCAL_TOOL' ? body.tool : null, evidence, user.id, new Date().toISOString(), verdict, score, checklist.length ? JSON.stringify(checklist) : null);
-      for (const finding of findings) db.prepare('INSERT INTO findings VALUES (?,?,?,?,?,?)').run(randomUUID(), row.id, finding.severity, finding.title, finding.detail, finding.location);
+      db.prepare('INSERT INTO reports (id,job_id,summary,source,tool,evidence,actor_id,created_at,verdict,score,checklist,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), row.id, summary, body.source, body.source === 'LOCAL_TOOL' ? body.tool : null, evidence, user.id, new Date().toISOString(), verdict, score, checklist.length ? JSON.stringify(checklist) : null, meta ? JSON.stringify(meta) : null);
+      for (const finding of findings) db.prepare('INSERT INTO findings (id,job_id,severity,title,detail,location,category,confidence,rule_id,patch_json) VALUES (?,?,?,?,?,?,?,?,?,?)').run(randomUUID(), row.id, finding.severity, finding.title, finding.detail, finding.location, finding.category, finding.confidence, finding.ruleId, finding.patchJson);
       db.prepare("UPDATE jobs SET status='REPORT_SUBMITTED' WHERE id=?").run(row.id);
       audit(user.id, 'REVIEW_REPORT', row.id, task.projectId);
     });

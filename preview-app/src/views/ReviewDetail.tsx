@@ -1,16 +1,16 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
-import { CheckCircle2, Copy, Download, FileCheck2, Play, Plus, RefreshCw, Sparkles, Square, Trash2, Upload } from 'lucide-react';
+import { CheckCircle2, Copy, Download, FileCheck2, MessageSquare, Play, Plus, RefreshCw, Sparkles, Square, Trash2, Upload } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import {
-  api, ApiError, APPROVE_ROLES, Finding, LocalAiEngineId, LocalAiRun, LocalAutomationCapabilities,
+  api, ApiError, APPROVE_ROLES, Finding, FindingCategory, LocalAiEngineId, LocalAiRun, LocalAutomationCapabilities,
   memberName, REVIEW_ROLES, ReviewJob, Role, timeText, User, WorkTask,
 } from './workspaceApi';
 import { Empty } from './WorkspaceFields';
 import { readTogether } from './readTogether';
 import {
   APPROVAL_REASON_PRESETS, assetKindLabel, decisionLabel, DEFAULT_APPROVE_REASON,
-  executionModeLabel, formatSubmittedReportMarkdown, gateStatusLabel, personaLabel,
+  executionModeLabel, findingCategoryLabel, formatSubmittedReportMarkdown, gateStatusLabel, personaLabel,
   REJECTION_REASON_PRESETS, REPORT_SUMMARY_PRESETS, REPORT_TOOL_OPTIONS,
   reportSourceLabel, reviewStatusLabel, SEVERITY_OPTIONS, severityLabel,
   skillsLabel, stageLabel, toolLabel, WAIVER_REASON_PRESETS,
@@ -18,15 +18,25 @@ import {
 import { isSubmitShortcut, readStoredChoice, writeStoredString } from './uiPreferences';
 import { buildBatchFindingsFixPrompt, buildSingleFindingFixPrompt, sortActionableFindings } from './findingFixPrompt';
 import { buildSarifLogFromReview, parseSarifFindingsToDraft } from './sarifExport';
-import { ChecklistTable, draftExtras, VerdictTag } from './ChainReportBits';
+import { ChecklistTable, draftExtras, FindingMetaBadges, ReportMetaSummary, SuggestedPatchView, VerdictTag } from './ChainReportBits';
+import { MarkdownPreview } from './MarkdownPreview';
 import './WorkTaskDetail.css';
 
 const AI_ENGINE_PREF_KEY = 'taskflow.ai.engine';
 const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
+const ASK_PRESETS: readonly string[] = [
+  '请核实该问题在当前代码中是否真实可触发，并给出最小修复代码',
+  '本次改动还可能影响哪些边界场景或缺失什么回归测试？',
+  '对比 PRD 与技术方案，当前实现还有哪些偏差？',
+];
 
 interface ReportDraft {
   summary: string; tool?: string; evidence?: string;
-  findings?: { severity: Finding['severity']; title: string; detail: string; location?: string }[];
+  findings?: {
+    severity: Finding['severity']; title: string; detail: string; location?: string;
+    category?: FindingCategory; confidence?: number; ruleId?: string;
+    suggestedPatch?: { before: string; after: string };
+  }[];
 }
 
 const FindingWaiverForm: React.FC<{
@@ -85,6 +95,10 @@ export const ReviewDetail: React.FC<{
   const [jobRuns, setJobRuns] = useState<LocalAiRun[]>([]);
   const [startingAi, setStartingAi] = useState(false);
   const [findingFilter, setFindingFilter] = useState<'ALL' | 'UNWAIVED_CRITICAL' | 'ACTIONABLE'>('ALL');
+  const [categoryFilter, setCategoryFilter] = useState<'ALL' | FindingCategory>('ALL');
+  const [askTargetFindingId, setAskTargetFindingId] = useState<string>('');
+  const [askInput, setAskInput] = useState('');
+  const [askingAi, setAskingAi] = useState(false);
 
   const mounted = useRef(true);
   const accessLost = useRef(false);
@@ -115,6 +129,10 @@ export const ReviewDetail: React.FC<{
         title: f.title,
         detail: f.detail,
         location: f.location || '',
+        ...(f.category ? { category: f.category } : {}),
+        ...(typeof f.confidence === 'number' ? { confidence: f.confidence } : {}),
+        ...(f.ruleId ? { ruleId: f.ruleId } : {}),
+        ...(f.suggestedPatch ? { suggestedPatch: f.suggestedPatch } : {}),
       })),
     });
     void message.success('已自动填入 AI 评审草稿，核对无误后点击「提交评审报告」即可。');
@@ -127,7 +145,7 @@ export const ReviewDetail: React.FC<{
       const filtered = (data.runs || []).filter(r => r.jobId === jobId);
       setJobRuns(filtered);
       if (autoFillRunId) {
-        const finished = filtered.find(r => r.id === autoFillRunId && r.status === 'SUCCEEDED' && r.draft);
+        const finished = filtered.find(r => r.id === autoFillRunId && (!r.actionType || r.actionType === 'DEFAULT') && r.status === 'SUCCEEDED' && r.draft);
         if (finished && !appliedRunIds.current.has(finished.id)) {
           appliedRunIds.current.add(finished.id);
           applyDraftToForm(finished);
@@ -145,7 +163,7 @@ export const ReviewDetail: React.FC<{
       setJobRuns(current => current.some(item => item.id === updated.id)
         ? current.map(item => item.id === updated.id ? updated : item)
         : [updated, ...current]);
-      if (updated.status === 'SUCCEEDED' && updated.draft && !appliedRunIds.current.has(updated.id)) {
+      if ((!updated.actionType || updated.actionType === 'DEFAULT') && updated.status === 'SUCCEEDED' && updated.draft && !appliedRunIds.current.has(updated.id)) {
         appliedRunIds.current.add(updated.id);
         applyDraftToForm(updated);
       }
@@ -196,24 +214,30 @@ export const ReviewDetail: React.FC<{
     return () => { mounted.current = false; refreshSequence.current += 1; actionSequence.current += 1; };
   }, []);
 
-  useEffect(() => { setFindingFilter('ALL'); void run(refresh); }, [jobId]);
+  useEffect(() => { setFindingFilter('ALL'); setCategoryFilter('ALL'); setAskTargetFindingId(''); setAskInput(''); void run(refresh); }, [jobId]);
 
   const serverMode = capabilities?.deployment === 'server';
   const scopedDevices = (capabilities?.devices || []).filter(device => device.projectIds.includes(task.projectId));
   const bridgeDevice = scopedDevices.find(device => device.online) || scopedDevices[0] || null;
   const bridgeUnavailable = serverMode && (!bridgeDevice || !(capabilities?.bridgeModes || []).includes('review'));
   const runTarget = serverMode && bridgeDevice ? { runner: 'bridge', deviceId: bridgeDevice.id } : {};
-  const runningAiRun = jobRuns.find(r => r.status === 'RUNNING') || null;
-  const latestDraftRun = jobRuns.find(r => r.status === 'SUCCEEDED' && r.draft) || null;
+  const draftRuns = jobRuns.filter(r => !r.actionType || r.actionType === 'DEFAULT');
+  const askRuns = jobRuns.filter(r => r.actionType === 'REVIEW_ASK');
+  const runningAiRun = draftRuns.find(r => r.status === 'RUNNING') || null;
+  const latestDraftRun = draftRuns.find(r => r.status === 'SUCCEEDED' && r.draft) || null;
+  const runningAskRun = askRuns.find(r => r.status === 'RUNNING') || null;
 
   useEffect(() => {
-    if (!runningAiRun) return;
-    const targetRunId = runningAiRun.id;
+    const activeRuns = jobRuns.filter(r => r.status === 'RUNNING');
+    if (!activeRuns.length) return;
+    const targetIds = activeRuns.map(r => r.id);
     const timer = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void pollSingleJobRun(targetRunId);
+      if (document.visibilityState === 'visible') {
+        for (const id of targetIds) void pollSingleJobRun(id);
+      }
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [runningAiRun?.id, jobId, task.id]);
+  }, [jobRuns.filter(r => r.status === 'RUNNING').map(r => r.id).join(','), jobId, task.id]);
 
   useEffect(() => {
     const el = consoleRef.current;
@@ -287,6 +311,29 @@ export const ReviewDetail: React.FC<{
     }
   };
 
+  const startAskQuestion = async (overrideQuestion?: string) => {
+    const question = (overrideQuestion ?? askInput).trim();
+    if (!job || !question || askingAi || runningAskRun || serverMode) return;
+    setAskingAi(true);
+    try {
+      const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(task.id)}/ai-runs`, {
+        mode: 'read',
+        actionType: 'REVIEW_ASK',
+        jobId: job.id,
+        engine,
+        ...(askTargetFindingId ? { askFindingId: askTargetFindingId } : {}),
+        customInstruction: question,
+      });
+      if (!mounted.current || accessLost.current) return;
+      setJobRuns(current => [res.run, ...current.filter(item => item.id !== res.run.id)]);
+      if (!overrideQuestion) setAskInput('');
+    } catch (error) {
+      if (mounted.current) void message.error(error instanceof Error ? error.message : '发起 AI 追问失败。');
+    } finally {
+      if (mounted.current) setAskingAi(false);
+    }
+  };
+
   const stopAiDraft = async (runId: string) => {
     try {
       const res = await api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(runId)}/stop`, {});
@@ -305,7 +352,16 @@ export const ReviewDetail: React.FC<{
         summary: values.summary, source: job.executionMode === 'LOCAL_REPORT' ? 'LOCAL_TOOL' : 'MANUAL',
         ...(job.executionMode === 'LOCAL_REPORT' ? { tool: values.tool } : {}),
         ...(values.evidence?.trim() ? { evidence: values.evidence } : {}),
-        findings: (values.findings || []).map(finding => ({ ...finding, location: finding.location?.trim() ? finding.location : undefined })),
+        findings: (values.findings || []).map(finding => ({
+          severity: finding.severity,
+          title: finding.title,
+          detail: finding.detail,
+          location: finding.location?.trim() ? finding.location : undefined,
+          ...(finding.category ? { category: finding.category } : {}),
+          ...(typeof finding.confidence === 'number' ? { confidence: finding.confidence } : {}),
+          ...(finding.ruleId ? { ruleId: finding.ruleId } : {}),
+          ...(finding.suggestedPatch ? { suggestedPatch: finding.suggestedPatch } : {}),
+        })),
         ...appliedDraftExtras,
       });
       if (accessLost.current || !mounted.current) return;
@@ -421,7 +477,12 @@ export const ReviewDetail: React.FC<{
           <Typography.Paragraph type="secondary" style={{ marginTop: 4 }}>{memberName(members, job.report.actorId)} · {reportSourceLabel(job.report.source)}{job.report.tool ? ' · ' + toolLabel(job.report.tool) : ''} · {timeText(job.report.createdAt)}</Typography.Paragraph>
           <Typography.Paragraph className="tf-preserve">{job.report.summary}</Typography.Paragraph>
           {job.report.evidence && <pre className="tf-code-panel">{job.report.evidence}</pre>}
-          {(job.report.verdict || typeof job.report.score === 'number') && <div style={{ marginBottom: 8 }}><VerdictTag verdict={job.report.verdict} score={job.report.score} /></div>}
+          {(job.report.verdict || typeof job.report.score === 'number' || job.report.meta) && (
+            <div style={{ marginBottom: 8 }}>
+              <VerdictTag verdict={job.report.verdict} score={job.report.score} meta={job.report.meta} />
+            </div>
+          )}
+          <ReportMetaSummary meta={job.report.meta} />
           {!!job.report.checklist?.length && <ChecklistTable items={job.report.checklist} />}
         </div>
         {job.findings.length > 0 && (() => {
@@ -431,9 +492,11 @@ export const ReviewDetail: React.FC<{
           const infoCount = job.findings.filter(item => item.severity === 'INFO').length;
           const actionableCount = unwaivedCriticalCount + warnCount;
           const unwaivedAll = sortActionableFindings(job.findings);
+          const categories = [...new Set(job.findings.map(item => item.category).filter(Boolean))] as FindingCategory[];
           const filteredFindings = job.findings.filter(item => {
-            if (findingFilter === 'UNWAIVED_CRITICAL') return item.severity === 'CRITICAL' && !item.waiver;
-            if (findingFilter === 'ACTIONABLE') return (item.severity === 'CRITICAL' && !item.waiver) || item.severity === 'WARN';
+            if (findingFilter === 'UNWAIVED_CRITICAL' && !(item.severity === 'CRITICAL' && !item.waiver)) return false;
+            if (findingFilter === 'ACTIONABLE' && !((item.severity === 'CRITICAL' && !item.waiver) || item.severity === 'WARN')) return false;
+            if (categoryFilter !== 'ALL' && item.category !== categoryFilter) return false;
             return true;
           });
           return (
@@ -447,6 +510,18 @@ export const ReviewDetail: React.FC<{
                   {infoCount > 0 && <Tag style={{ marginInlineEnd: 0 }}>改进建议 {infoCount}</Tag>}
                 </Space>
                 <Space size={8} wrap>
+                  {categories.length > 0 && (
+                    <Select<'ALL' | FindingCategory>
+                      size="small"
+                      style={{ minWidth: 120 }}
+                      value={categoryFilter}
+                      onChange={setCategoryFilter}
+                      options={[
+                        { value: 'ALL', label: '全部分类' },
+                        ...categories.map(c => ({ value: c, label: findingCategoryLabel(c) })),
+                      ]}
+                    />
+                  )}
                   {unwaivedAll.length > 0 && (
                     <Tooltip title="复制可直接粘贴给 Cursor / Codex / Claude / Gemini 的结构化批量修复指令">
                       <Button
@@ -496,30 +571,44 @@ export const ReviewDetail: React.FC<{
                           {severityLabel(finding.severity)}
                         </StatusBadge>
                         <Typography.Text strong className="tf-break">{finding.title}</Typography.Text>
+                        <FindingMetaBadges category={finding.category} confidence={finding.confidence} ruleId={finding.ruleId} />
                       </Flex>
-                      {!finding.waiver && (
-                        <Button
-                          size="small"
-                          type="text"
-                          icon={<Copy size={13} />}
-                          onClick={() => {
-                            const prompt = buildSingleFindingFixPrompt({
-                              task,
-                              stage: job.stage,
-                              finding,
-                              repoPath,
-                              constitutionFiles,
-                            });
-                            void navigator.clipboard.writeText(prompt)
-                              .then(() => message.success('已复制该发现项的 AI 定向修复指令。'))
-                              .catch(() => message.warning('浏览器未能复制，请重试。'));
-                          }}
-                        >
-                          复制 AI 修复指令
-                        </Button>
-                      )}
+                      <Space size={4} wrap>
+                        {!serverMode && (
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<MessageSquare size={13} />}
+                            onClick={() => setAskTargetFindingId(finding.id)}
+                          >
+                            追问 AI
+                          </Button>
+                        )}
+                        {!finding.waiver && (
+                          <Button
+                            size="small"
+                            type="text"
+                            icon={<Copy size={13} />}
+                            onClick={() => {
+                              const prompt = buildSingleFindingFixPrompt({
+                                task,
+                                stage: job.stage,
+                                finding,
+                                repoPath,
+                                constitutionFiles,
+                              });
+                              void navigator.clipboard.writeText(prompt)
+                                .then(() => message.success('已复制该发现项的 AI 定向修复指令。'))
+                                .catch(() => message.warning('浏览器未能复制，请重试。'));
+                            }}
+                          >
+                            复制 AI 修复指令
+                          </Button>
+                        )}
+                      </Space>
                     </Flex>
                     <Typography.Paragraph className="tf-preserve">{finding.detail}</Typography.Paragraph>
+                    <SuggestedPatchView patch={finding.suggestedPatch} />
                     {finding.location && (
                       <Tooltip title="点击复制定位锚点">
                         <Typography.Text
@@ -555,6 +644,69 @@ export const ReviewDetail: React.FC<{
           );
         })()}
         {!job.findings.length && <Typography.Text type="secondary">此报告未登记发现项。</Typography.Text>}
+        {!serverMode && (
+          <Card
+            size="small"
+            title={<Space size={6}><MessageSquare size={15} /><span>向 AI 追问此报告（/ask）</span></Space>}
+            extra={
+              <Select size="small" style={{ width: 155 }} value={engine} options={engineOptions} onChange={val => { setEngine(val); writeStoredString(AI_ENGINE_PREF_KEY, val); }} disabled={!!runningAskRun} />
+            }
+          >
+            <Flex vertical gap={8}>
+              {job.findings.length > 0 && (
+                <Select
+                  size="small"
+                  value={askTargetFindingId}
+                  onChange={setAskTargetFindingId}
+                  options={[
+                    { value: '', label: '聚焦范围：整份评审报告' },
+                    ...job.findings.map(f => ({ value: f.id, label: `[${severityLabel(f.severity)}] ${f.title}` })),
+                  ]}
+                />
+              )}
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  placeholder="输入追问内容（只读核查快照与代码，按 Enter 发送）"
+                  maxLength={1000}
+                  value={askInput}
+                  disabled={!!runningAskRun || askingAi}
+                  onChange={e => setAskInput(e.target.value)}
+                  onPressEnter={() => void startAskQuestion()}
+                />
+                {runningAskRun ? (
+                  <Button danger icon={<Square size={13} />} onClick={() => void stopAiDraft(runningAskRun.id)}>停止</Button>
+                ) : (
+                  <Button type="primary" loading={askingAi} disabled={!askInput.trim()} onClick={() => void startAskQuestion()}>追问 AI</Button>
+                )}
+              </Space.Compact>
+              <Flex gap={6} wrap>
+                {ASK_PRESETS.map(q => (
+                  <Tag key={q} style={{ cursor: 'pointer', marginInlineEnd: 0 }} onClick={() => setAskInput(q)}>+ {q}</Tag>
+                ))}
+              </Flex>
+              {askRuns.map(run => {
+                const targetFinding = run.askFindingId ? job.findings.find(f => f.id === run.askFindingId) : null;
+                return (
+                  <Card key={run.id} size="small" style={{ background: 'var(--tf-raised)' }}>
+                    <Flex justify="space-between" align="center" gap={6} wrap style={{ marginBottom: 6 }}>
+                      <Space size={6} wrap>
+                        <Tag color={run.status === 'SUCCEEDED' ? 'success' : run.status === 'RUNNING' ? 'processing' : 'error'}>
+                          {run.status === 'RUNNING' ? '核查回答中…' : run.status === 'SUCCEEDED' ? 'AI 回答' : '执行异常'}
+                        </Tag>
+                        {targetFinding && <Tag color="geekblue">{targetFinding.title}</Tag>}
+                        <Typography.Text strong>{run.askQuestion || '专项核查追问'}</Typography.Text>
+                      </Space>
+                      {(run.draft?.answer || run.output) && (
+                        <Button size="small" type="text" icon={<Copy size={12} />} onClick={() => { void navigator.clipboard.writeText(run.draft?.answer || run.output).then(() => message.success('已复制回答。')).catch(() => {}); }}>复制</Button>
+                      )}
+                    </Flex>
+                    {(run.draft?.answer || run.output) ? <MarkdownPreview content={run.draft?.answer || run.output} /> : <Typography.Text type="secondary">{run.error || '正在基于冻结快照分析…'}</Typography.Text>}
+                  </Card>
+                );
+              })}
+            </Flex>
+          </Card>
+        )}
       </> : canReport && <>
         <div className="tf-form-width">
           <Typography.Title level={5}>提交评审报告</Typography.Title>
@@ -673,6 +825,10 @@ export const ReviewDetail: React.FC<{
                 </div>
                 <Form.Item label="问题详情" name={[field.name, 'detail']} rules={[{ required: true, whitespace: true, message: '请填写问题详情' }]}><Input.TextArea rows={3} maxLength={4000} /></Form.Item>
                 <Form.Item label="文件位置或文档锚点（可选）" name={[field.name, 'location']}><Input maxLength={500} className="tf-code-input" /></Form.Item>
+                <Form.Item name={[field.name, 'category']} hidden><Input /></Form.Item>
+                <Form.Item name={[field.name, 'confidence']} hidden><Input /></Form.Item>
+                <Form.Item name={[field.name, 'ruleId']} hidden><Input /></Form.Item>
+                <Form.Item name={[field.name, 'suggestedPatch']} hidden><Input /></Form.Item>
               </Card>)}
             </>}</Form.List>
             <Button type="primary" htmlType="submit" loading={busy}>提交评审报告</Button>

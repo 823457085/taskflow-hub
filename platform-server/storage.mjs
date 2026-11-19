@@ -119,6 +119,9 @@ export function openStorage(dbPath) {
       CREATE TABLE IF NOT EXISTS team_skill_revisions (id TEXT PRIMARY KEY,skill_id TEXT NOT NULL REFERENCES team_skills(id),version INTEGER NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,enabled INTEGER NOT NULL,actor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS skill_revision_idx ON team_skill_revisions(skill_id,version DESC);`);
     add('reports', 'verdict', 'TEXT'); add('reports', 'score', 'INTEGER'); add('reports', 'checklist', 'TEXT');
+    add('reports', 'meta', 'TEXT');
+    add('findings', 'category', 'TEXT'); add('findings', 'confidence', 'INTEGER'); add('findings', 'rule_id', 'TEXT'); add('findings', 'patch_json', 'TEXT');
+    add('local_ai_runs', 'action_type', 'TEXT');
     const interruptedAt = new Date().toISOString();
     db.prepare("UPDATE local_ai_runs SET status='INTERRUPTED',error='服务重启，本地执行已中断',finished_at=?,updated_at=? WHERE status='RUNNING' AND runner='local'").run(interruptedAt, interruptedAt);
     db.prepare('INSERT OR IGNORE INTO projects VALUES (?,?,?,?)').run('default', 'DEFAULT', '默认项目', new Date().toISOString());

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPlatform } from './server.mjs';
-import { chainReportMarkdown, declaredDeliverableKeys, declaredRepository, linkStatus, parseMergeRequest, requirementKeys } from './delivery-chain.mjs';
+import { chainReportMarkdown, computeAssetDelta, declaredDeliverableKeys, declaredRepository, linkStatus, parseMergeRequest, requirementKeys } from './delivery-chain.mjs';
 
 const password = 'local-only-delivery-chain-passphrase';
 async function fixture() {
@@ -102,5 +102,86 @@ test('delivery chain: breakdown review, verdict reports, chain report and list s
     const { statuses } = await expect('/api/chain-statuses?projectId=default', 'GET', undefined, token);
     assert.equal(statuses[parent.id].TASK_BREAKDOWN, 'CONDITIONAL');
     assert.equal(statuses[child.id].PRD, 'MISSING');
+  } finally { await app.close(); }
+});
+
+test('computeAssetDelta diffs revisions and extracts changed sections', () => {
+  const r1 = { id: 'a1', kind: 'PRD', logicalKey: 'PRD', title: '离线开门 PRD', revision: 1, sha256: 'h1', content: '# 范围\n支持离线开门\n## 异常\n旧提示' };
+  const r2 = { id: 'a2', kind: 'PRD', logicalKey: 'PRD', title: '离线开门 PRD', revision: 2, sha256: 'h2', content: '# 范围\n支持离线开门\n## 异常\n新防重放提示\n新增超时 30s' };
+  const delta = computeAssetDelta(r1, r2);
+  assert.ok(delta);
+  assert.equal(delta.fromRevision, 1);
+  assert.equal(delta.toRevision, 2);
+  assert.equal(delta.additions, 2);
+  assert.equal(delta.deletions, 1);
+  assert.deepEqual(delta.changedHeadings, ['异常']);
+  assert.equal(computeAssetDelta(r1, r1), null);
+});
+
+test('delivery chain v2: custom BLOCK rules, rich report meta, PASS guardrail, deltas and chain-analyze', async () => {
+  const { app, expect, token } = await fixture();
+  try {
+    const task = (await expect('/api/tasks', 'POST', { jiraKey: 'OPAY-901', title: '离线凭证轮换与风控' }, token, 201)).task;
+    await expect(`/api/tasks/${task.id}/assets`, 'POST', { kind: 'PRD', title: '离线开门 PRD', content: '# 范围\n离线开门\n## 验收标准\nAC-1 凭证过期拒绝' }, token, 201);
+    await expect(`/api/tasks/${task.id}/assets`, 'POST', { kind: 'PRD', title: '离线开门 PRD', content: '# 范围\n离线开门\n## 验收标准\nAC-1 凭证过期拒绝\nAC-2 新增防重放校验' }, token, 201);
+
+    // Custom natural-language BLOCK rule supports all 6 delivery stages and deletion
+    await expect('/api/plugins', 'POST', {
+      id: 'offline-replay-block',
+      name: '防重放校验强门禁',
+      version: '1.0.0',
+      stages: ['PRD', 'TASK_BREAKDOWN'],
+      enforcement: 'BLOCK',
+      rule: 'PRD 与拆分必须包含防重放校验要求。',
+    }, token, 201);
+
+    const job = (await expect('/api/reviews', 'POST', { taskId: task.id, stage: 'PRD', executionMode: 'LOCAL_REPORT' }, token, 201)).job;
+    assert.equal(job.snapshot.plugins[0].enforcement, 'BLOCK');
+
+    // CRITICAL findings cannot submit with PASS verdict
+    await expect(`/api/jobs/${job.id}/report`, 'POST', {
+      source: 'LOCAL_TOOL', tool: 'codex', summary: '矛盾结论测试', verdict: 'PASS',
+      findings: [{ severity: 'CRITICAL', title: '缺少签名校验', detail: '未定义盐值与轮换策略' }],
+    }, token, 400);
+
+    const submitted = (await expect(`/api/jobs/${job.id}/report`, 'POST', {
+      source: 'LOCAL_TOOL', tool: 'codex', summary: '发现 1 条防重放规则缺口与 1 条待澄清', verdict: 'FAIL', score: 62,
+      checklist: [{ item: '防重放校验强门禁', result: 'FAIL', note: '缺少 nonce 时效说明', ref: 'offline-replay-block' }],
+      meta: {
+        riskLevel: 'high', effortScore: 3, coverageMetrics: { coveragePrd: 85 },
+        clarifyQuestions: [{ id: 'Q-001', question: '离线凭证最大离线天数是多少？', impact: '影响本地缓存 TTL', owner: 'PM' }],
+        compliance: { compliant: ['AC-1'], missing: ['AC-2'], manualCheck: ['POS 断网实机'] },
+      },
+      findings: [{
+        severity: 'CRITICAL', category: 'SECURITY', confidence: 9, ruleId: 'offline-replay-block',
+        title: '缺少防重放 nonce 机制', detail: '需明确离线凭证唯一 jti', location: '§2.3',
+        suggestedPatch: { before: 'token = sign(uid)', after: 'token = sign({ uid, jti: randomUUID() })' },
+      }],
+    }, token, 201)).job;
+    assert.equal(submitted.report.meta.riskLevel, 'high');
+    assert.equal(submitted.report.meta.clarifyQuestions[0].id, 'Q-001');
+    assert.equal(submitted.findings[0].category, 'SECURITY');
+    assert.equal(submitted.findings[0].confidence, 9);
+    assert.equal(submitted.findings[0].suggestedPatch.after, 'token = sign({ uid, jti: randomUUID() })');
+
+    const chainRes = await expect(`/api/tasks/${task.id}/chain`, 'GET', undefined, token);
+    assert.equal(chainRes.chain.deltas.length, 1);
+    assert.equal(chainRes.chain.links[0].delta.toRevision, 2);
+    assert.equal(chainRes.chain.links[0].checks.some(c => c.id === 'plugin_offline-replay-block' && c.ok === false && c.level === 'required'), true);
+    assert.ok(chainRes.chain.analysis.conflicts.some(c => c.id === 'CONFLICT-PLUGIN_OFFLINE-REPLAY-BLOCK'));
+
+    const analyzeRes = await expect(`/api/tasks/${task.id}/chain-analyze`, 'GET', undefined, token);
+    assert.equal(analyzeRes.analysis.metrics.clarifyOpenCount, 1);
+    assert.equal(analyzeRes.deltas.length, 1);
+
+    const { markdown } = await expect(`/api/tasks/${task.id}/chain-report`, 'GET', undefined, token);
+    assert.match(markdown, /跨环节一致性巡检/);
+    assert.match(markdown, /材料变更增量/);
+    assert.match(markdown, /待澄清问题（Clarify）/);
+    assert.match(markdown, /Q-001/);
+
+    await expect('/api/plugins/offline-replay-block', 'DELETE', undefined, token, 200);
+    const afterDelete = await expect('/api/plugins', 'GET', undefined, token);
+    assert.equal(afterDelete.plugins.length, 0);
   } finally { await app.close(); }
 });

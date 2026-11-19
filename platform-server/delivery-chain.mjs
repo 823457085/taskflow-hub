@@ -1,12 +1,79 @@
 // Delivery chain: one requirement = one chain of six links (需求 → Jira任务与子任务 → 技术方案 → 代码·分支·仓库 → 测试用例 → 上线).
 // Each link exposes the same structure — linked objects, deterministic rule checks, the AI review result and one next action —
 // so the UI and the exported report can describe every link the same way.
-import { basename } from 'node:path';
+import { existsSync, lstatSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { CHAIN_STAGES, taskRow } from './common.mjs';
 import { CHAIN_LINKS } from './review-rubrics.mjs';
 
 const KIND_LABEL = { PRD: '需求文档', TECH_SPEC: '技术方案', CODE: '代码改动', TEST_CASE: '测试用例', RELEASE_PLAN: '上线计划', SUBTASKS: '研发子任务' };
 const STAGE_KIND = { PRD: 'PRD', TASK_BREAKDOWN: null, TECH_SPEC: 'TECH_SPEC', CODE_REVIEW: 'CODE', TEST_CASE: 'TEST_CASE', RELEASE: 'RELEASE_PLAN' };
+const KIND_LINK_ID = { PRD: 'REQUIREMENT', TECH_SPEC: 'TECH_SPEC', CODE: 'CODE', TEST_CASE: 'TEST', RELEASE_PLAN: 'RELEASE' };
+const CONSTITUTION_CANDIDATES = ['AGENTS.md', '.specify/memory/constitution.md', 'CLAUDE.md', '.cursorrules', '.github/copilot-instructions.md', '.clinerules'];
+
+function quickConstitutionFiles(repoPath) {
+  if (!repoPath || typeof repoPath !== 'string') return [];
+  const found = [];
+  for (const rel of CONSTITUTION_CANDIDATES) {
+    try {
+      const full = join(repoPath, rel);
+      if (existsSync(full) && lstatSync(full).isFile()) found.push(rel);
+    } catch { /* ignore inaccessible or TCC-protected dir */ }
+  }
+  return found;
+}
+
+// Lightweight OpenSpec-style revision delta between the latest two revisions of an asset.
+export function computeAssetDelta(prevAsset, currAsset) {
+  if (!prevAsset || !currAsset || prevAsset.id === currAsset.id || prevAsset.sha256 === currAsset.sha256) return null;
+  const splitLines = text => String(text || '').replace(/\r\n/g, '\n').split('\n').slice(0, 1200);
+  const oldLines = splitLines(prevAsset.content);
+  const newLines = splitLines(currAsset.content);
+  const oldCounts = new Map();
+  const newCounts = new Map();
+  for (const line of oldLines) { const k = line.trim(); if (k) oldCounts.set(k, (oldCounts.get(k) || 0) + 1); }
+  for (const line of newLines) { const k = line.trim(); if (k) newCounts.set(k, (newCounts.get(k) || 0) + 1); }
+
+  const removed = [];
+  const added = [];
+  const seenOld = new Map();
+  for (const line of oldLines) {
+    const k = line.trim();
+    if (!k) continue;
+    const nth = (seenOld.get(k) || 0) + 1; seenOld.set(k, nth);
+    if (nth > (newCounts.get(k) || 0)) removed.push(line);
+  }
+  const seenNew = new Map();
+  const changedHeadings = new Set();
+  let currentHeading = '';
+  for (const line of newLines) {
+    const headingMatch = /^#{1,4}\s+(.+)$/.exec(line.trim()) || /^\*([^*]{2,40})\*$/.exec(line.trim());
+    if (headingMatch) currentHeading = headingMatch[1].trim();
+    const k = line.trim();
+    if (!k) continue;
+    const nth = (seenNew.get(k) || 0) + 1; seenNew.set(k, nth);
+    if (nth > (oldCounts.get(k) || 0)) {
+      added.push(line);
+      if (currentHeading) changedHeadings.add(currentHeading);
+    }
+  }
+  const previewLines = [
+    ...removed.slice(0, 8).map(text => ({ kind: '-', text: text.slice(0, 200) })),
+    ...added.slice(0, 10).map(text => ({ kind: '+', text: text.slice(0, 200) })),
+  ];
+  return {
+    assetId: currAsset.id,
+    kind: currAsset.kind,
+    linkId: KIND_LINK_ID[currAsset.kind] || null,
+    title: currAsset.title,
+    fromRevision: prevAsset.revision,
+    toRevision: currAsset.revision,
+    additions: added.length,
+    deletions: removed.length,
+    changedHeadings: [...changedHeadings].slice(0, 6),
+    previewLines,
+  };
+}
 export const LINK_STATUS_LABEL = {
   MISSING: '缺资料', READY: '待 AI 审核', REVIEWING: '审核中', AWAITING_DECISION: '待确认',
   PASS: '通过', CONDITIONAL: '有条件通过', CHANGES_REQUESTED: '退回修改', BLOCKED: '阻断', STALE: '需重审',
@@ -112,12 +179,19 @@ const reviewSummary = job => job ? {
   jobId: job.id, status: job.status, stale: job.stale, createdAt: job.createdAt, executionMode: job.executionMode,
   verdict: job.report?.verdict || null, score: job.report?.score ?? null, summary: job.report?.summary || '', tool: job.report?.tool || null,
   reportedAt: job.report?.createdAt || null, checklist: job.report?.checklist || [],
+  ...(job.report?.meta ? { meta: job.report.meta } : {}),
   findings: {
     critical: job.findings.filter(item => item.severity === 'CRITICAL' && !item.waiver).length,
     warn: job.findings.filter(item => item.severity === 'WARN').length,
     info: job.findings.filter(item => item.severity === 'INFO').length,
     waived: job.findings.filter(item => item.waiver).length,
-    items: job.findings.map(item => ({ id: item.id, severity: item.severity, title: item.title, detail: item.detail, location: item.location, waived: !!item.waiver })),
+    items: job.findings.map(item => ({
+      id: item.id, severity: item.severity, title: item.title, detail: item.detail, location: item.location, waived: !!item.waiver,
+      ...(item.category ? { category: item.category } : {}),
+      ...(Number.isInteger(item.confidence) ? { confidence: item.confidence } : {}),
+      ...(item.ruleId ? { ruleId: item.ruleId } : {}),
+      ...(item.suggestedPatch ? { suggestedPatch: item.suggestedPatch } : {}),
+    })),
   },
   decision: job.decision ? { decision: job.decision.decision, reason: job.decision.reason, createdAt: job.decision.createdAt } : null,
 } : null;
@@ -156,8 +230,23 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     const ref = task.externalRef || {};
     const baseUrl = ref.baseUrl || null;
     const jiraUrl = key => (baseUrl ? `${baseUrl.replace(/\/+$/, '')}/browse/${key}` : null);
-    const assets = latestAssets(workflow.assetsFor(task.id));
+    const allAssets = workflow.assetsFor(task.id);
+    memo.assets.set(task.id, allAssets);
+    const assets = latestAssets(allAssets);
     const ofKind = kind => assets.filter(asset => asset.kind === kind);
+    const deltas = [];
+    const bySeries = new Map();
+    for (const asset of allAssets) {
+      const k = `${asset.kind}:${asset.logicalKey}`;
+      if (!bySeries.has(k)) bySeries.set(k, []);
+      bySeries.get(k).push(asset);
+    }
+    for (const series of bySeries.values()) {
+      if (series.length >= 2) {
+        const delta = computeAssetDelta(series[1], series[0]);
+        if (delta) deltas.push(delta);
+      }
+    }
     const imports = importsFor(task.id);
     const children = db.prepare('SELECT * FROM tasks WHERE parent_id=? ORDER BY jira_key').all(task.id).map(taskRow);
     const parent = task.parentId ? taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(task.parentId)) : null;
@@ -168,6 +257,8 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     const notLinked = declaredKeys.filter(key => !knownKeys.has(key));
     const repo = declaredRepository(ref.description);
     const workspace = workspaceFor(user.id, task.projectId);
+    const constitutionFiles = quickConstitutionFiles(workspace?.repoPath);
+    const projectPlugins = db.prepare('SELECT manifest FROM plugins WHERE project_id=? ORDER BY id').all(task.projectId).map(r => JSON.parse(r.manifest));
     const codeAssets = ofKind('CODE');
     const mrs = codeAssets.map(asset => parseMergeRequest(asset, imports.get(asset.id)?.remote_version));
     const branchKeys = new Set([task.jiraKey, ...reqKeys, ...children.map(child => child.jiraKey), ...(parent ? [parent.jiraKey] : [])]);
@@ -177,6 +268,22 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     const releaseText = ofKind('RELEASE_PLAN').map(asset => asset.content).join('\n');
     const gatePass = stage => gates[stage]?.status === 'PASS';
     const assetObject = asset => ({ type: 'asset', kind: asset.kind, label: asset.title, url: asset.sourceUrl, meta: `r${asset.revision}`, assetId: asset.id });
+
+    const pluginChecksFor = (stage, job) => {
+      const stagePlugins = projectPlugins.filter(p => Array.isArray(p.stages) && p.stages.includes(stage));
+      const checklist = job?.report?.checklist || [];
+      return stagePlugins.map(p => {
+        const matched = checklist.find(c => (c.ref && c.ref.includes(p.id)) || (c.item && c.item.includes(p.name)));
+        const ok = matched ? (matched.result === 'PASS' ? true : matched.result === 'NA' ? null : false) : null;
+        return {
+          id: `plugin_${p.id}`,
+          label: `门禁规则：${p.name}`,
+          ok,
+          level: p.enforcement === 'BLOCK' ? 'required' : 'advice',
+          detail: matched ? (matched.note || matched.result) : (p.rule || '待 AI 审核时逐项核验'),
+        };
+      });
+    };
 
     const linkDefs = {
       REQUIREMENT: () => ({
@@ -253,13 +360,16 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     const links = CHAIN_LINKS.map((link, index) => {
       const gate = gates[link.stage];
       const job = jobFor(task, gate, link.stage, memo);
-      const { objects, checks } = linkDefs[link.id]();
+      const { objects, checks: baseChecks } = linkDefs[link.id]();
+      const checks = [...baseChecks, ...pluginChecksFor(link.stage, job)];
       const missing = gate?.status === 'MISSING_INPUT' ? workflow.inputs(task, link.stage, undefined, memo).missing : [];
       const status = linkStatus(gate, job && gate?.jobId ? job : null);
+      const linkDelta = deltas.find(d => d.linkId === link.id) || null;
       return {
         id: link.id, index: index + 1, stage: link.stage, title: link.title, purpose: link.purpose, focus: link.rubric,
         advisory: link.stage === 'TASK_BREAKDOWN', status, statusLabel: LINK_STATUS_LABEL[status], gateReason: gate?.reason || '',
         missing: missing.map(kind => KIND_LABEL[kind] || kind), objects, checks,
+        ...(linkDelta ? { delta: linkDelta } : {}),
         review: reviewSummary(job), next: nextAction(status, link, gate, job, missing),
       };
     });
@@ -286,13 +396,110 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
       tasks: jiraKeysIn(item.ref).map(key => { const child = childRows.find(row => row.jiraKey === key); return { key, title: child?.title || null, taskId: child?.id || null, links: child?.links || null }; }),
     }));
 
+    // Deterministic cross-artifact analysis (/analyze lint + coverage metrics).
+    const prdLink = links.find(link => link.id === 'REQUIREMENT');
+    const specLink = links.find(link => link.id === 'TECH_SPEC');
+    const testLink = links.find(link => link.id === 'TEST');
+    const ratioOf = items => {
+      const active = (items || []).filter(item => item.result !== 'NA');
+      if (!active.length) return null;
+      return Math.round((active.filter(item => item.result === 'PASS').length / active.length) * 100);
+    };
+    const specAcRows = (specLink?.review?.checklist || []).filter(item => /需求|PRD|\bAC\b|验收|Coverage/i.test(item.item));
+    const coveragePrd = specLink?.review?.meta?.coverageMetrics?.coveragePrd
+      ?? (specAcRows.length ? ratioOf(specAcRows) : ratioOf(reqPoints));
+    const testAcRows = (testLink?.review?.checklist || []).filter(item => /验收|\bAC\b|需求|Trace/i.test(item.item));
+    const traceAc = testLink?.review?.meta?.coverageMetrics?.traceAc
+      ?? (testAcRows.length ? ratioOf(testAcRows) : null);
+    const prdClarifyQs = prdLink?.review?.meta?.clarifyQuestions || [];
+    const openClarifyQs = prdClarifyQs.filter(q => !q.resolved);
+    const clarifyChecklistOpen = (prdLink?.review?.checklist || []).filter(item => /歧义|待确认|Clarify/i.test(item.item) && ['WARN', 'FAIL'].includes(item.result));
+    const clarifyOpenCount = openClarifyQs.length || clarifyChecklistOpen.length;
+
+    const conflicts = [];
+    const parentVersions = new Set((ref.fixVersions || []).map(v => v?.name).filter(Boolean));
+    if (parentVersions.size) {
+      const driftChildren = children.filter(c => {
+        const cVers = (c.externalRef?.fixVersions || []).map(v => v?.name).filter(Boolean);
+        return cVers.length > 0 && !cVers.some(v => parentVersions.has(v));
+      });
+      if (driftChildren.length) {
+        conflicts.push({
+          id: 'CONFLICT-FIXVERSION', severity: 'WARN', category: 'SPEC_ALIGN',
+          title: '父子任务 Fix Version 不一致',
+          detail: `主任务版本 ${[...parentVersions].join('/')}，以下子任务版本不一致：${driftChildren.map(c => c.jiraKey).join('、')}`,
+          linkIds: ['REQUIREMENT', 'BREAKDOWN'],
+        });
+      }
+    }
+    if (repo && workspace?.repoPath && basename(workspace.repoPath) !== repo) {
+      conflicts.push({
+        id: 'CONFLICT-REPO', severity: 'WARN', category: 'CONTRACT',
+        title: '声明仓库与已绑本机仓库目录不一致',
+        detail: `Jira 声明仓库「${repo}」，本机当前绑定「${basename(workspace.repoPath)}」`,
+        linkIds: ['BREAKDOWN', 'CODE'],
+      });
+    }
+    if (notLinked.length) {
+      conflicts.push({
+        id: 'CONFLICT-UNLINKED-SUBTASK', severity: 'WARN', category: 'SPEC_ALIGN',
+        title: 'Jira 描述中声明的交付事项尚未全部导入',
+        detail: `未导入工作台：${notLinked.join('、')}`,
+        linkIds: ['BREAKDOWN'],
+      });
+    }
+    const staleLinks = links.filter(l => l.status === 'STALE');
+    if (staleLinks.length) {
+      conflicts.push({
+        id: 'CONFLICT-STALE-DRIFT', severity: 'WARN', category: 'SPEC_ALIGN',
+        title: `${staleLinks.length} 个环节受材料或策略变更影响需重审`,
+        detail: `${staleLinks.map(l => l.title).join('、')}${deltas.length ? `（已检测 ${deltas.map(d => `${d.title} r${d.fromRevision}→r${d.toRevision}`).join('、')}）` : ''}`,
+        linkIds: staleLinks.map(l => l.id),
+      });
+    }
+    if (openClarifyQs.length && (ofKind('TECH_SPEC').length || codeAssets.length)) {
+      conflicts.push({
+        id: 'CONFLICT-CLARIFY-OPEN', severity: 'WARN', category: 'SPEC_ALIGN',
+        title: `需求存在 ${openClarifyQs.length} 条待澄清问题未闭环`,
+        detail: openClarifyQs.slice(0, 3).map(q => `${q.id}: ${q.question}`).join('；'),
+        linkIds: ['REQUIREMENT', 'TECH_SPEC'],
+      });
+    }
+    for (const link of links) {
+      for (const check of link.checks) {
+        if (check.id.startsWith('plugin_') && check.ok === false) {
+          conflicts.push({
+            id: `CONFLICT-${check.id.toUpperCase()}`,
+            severity: check.level === 'required' ? 'CRITICAL' : 'WARN',
+            category: 'SPEC_ALIGN',
+            title: `[${link.title}] ${check.label}未满足`,
+            detail: check.detail,
+            linkIds: [link.id],
+          });
+        }
+      }
+    }
+
+    const analysis = {
+      metrics: {
+        coveragePrd,
+        traceAc,
+        clarifyOpenCount,
+        constitutionCount: constitutionFiles.length,
+        customRuleCount: projectPlugins.length,
+        conflictCount: conflicts.length,
+      },
+      constitutionFiles,
+      conflicts,
+    };
+
     return {
       generatedAt: new Date().toISOString(),
       task: { id: task.id, jiraKey: task.jiraKey, title: task.title, url: jiraUrl(task.jiraKey), status: task.status, jiraStatus: ref.status || null, assignee: userName(task.assigneeId), projectId: task.projectId, fixVersions: (ref.fixVersions || []).map(item => item.name) },
       parent: parent ? { id: parent.id, jiraKey: parent.jiraKey, title: parent.title } : null,
       requirementKeys: reqKeys,
       overall: { status: overallStatus, passed: gating.filter(link => link.status === 'PASS' || link.status === 'CONDITIONAL').length, total: gating.length, score: scores.length ? Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null, currentLinkId: current?.id || null, blockers },
-      links, children: childRows, traceability,
+      links, children: childRows, traceability, deltas, analysis,
     };
   }
 
@@ -309,10 +516,30 @@ export function chainReportMarkdown(chain) {
   if (chain.requirementKeys.length) out.push(`- 需求单：${chain.requirementKeys.join('、')}`);
   if (chain.task.fixVersions.length) out.push(`- Fix Version：${chain.task.fixVersions.join(' / ')}`);
   if (chain.parent) out.push(`- 父任务：${chain.parent.jiraKey} ${chain.parent.title}`);
+  if (chain.analysis?.metrics) {
+    const m = chain.analysis.metrics;
+    const metricBits = [
+      m.coveragePrd !== null ? `PRD 覆盖 ${m.coveragePrd}%` : null,
+      m.traceAc !== null ? `AC 追溯 ${m.traceAc}%` : null,
+      `待澄清 ${m.clarifyOpenCount} 项`,
+      `跨环节冲突 ${m.conflictCount} 项`,
+    ].filter(Boolean);
+    out.push(`- 质量指标：${metricBits.join(' · ')}`);
+  }
   out.push(`- 生成时间：${chain.generatedAt}`, '');
   out.push('## 环节总览', '', '| # | 环节 | 状态 | AI 结论 | 评分 | 阻断 / 警告 |', '|---|---|---|---|---|---|');
   for (const link of chain.links) out.push(`| ${link.index} | ${link.title}${link.advisory ? '（建议项）' : ''} | ${link.statusLabel} | ${link.review?.verdict ? VERDICT_LABEL[link.review.verdict] : link.review?.summary ? '已出报告' : '—'} | ${link.review?.score ?? '—'} | ${link.review ? `${link.review.findings.critical} / ${link.review.findings.warn}` : '—'} |`);
   out.push('');
+  if (chain.analysis?.conflicts?.length) {
+    out.push('## 跨环节一致性巡检（/analyze）', '');
+    for (const c of chain.analysis.conflicts) out.push(`- \`${c.severity}\` **${c.title}**：${cell(c.detail)}`);
+    out.push('');
+  }
+  if (chain.deltas?.length) {
+    out.push('## 材料变更增量（Delta Diff）', '');
+    for (const d of chain.deltas) out.push(`- **${d.title}**（\`r${d.fromRevision} → r${d.toRevision}\`）：+${d.additions} / -${d.deletions}${d.changedHeadings.length ? ` · 涉及章节：${d.changedHeadings.join('、')}` : ''}`);
+    out.push('');
+  }
   if (chain.overall.blockers.length) {
     out.push('## 阻断项', '');
     for (const item of chain.overall.blockers) out.push(`- **[${item.link}] ${item.title}**：${cell(item.detail)}`);
@@ -327,11 +554,19 @@ export function chainReportMarkdown(chain) {
     if (link.review) {
       const review = link.review;
       out.push(`**AI 审核**${review.stale ? '（材料已变化，需重审）' : ''}`, '');
-      if (review.verdict || review.score !== null) out.push(`- 结论：${review.verdict ? VERDICT_LABEL[review.verdict] : '—'}${review.score !== null ? ` · 评分 ${review.score}` : ''}${review.tool ? ` · 工具 ${review.tool}` : ''}`);
+      if (review.verdict || review.score !== null) out.push(`- 结论：${review.verdict ? VERDICT_LABEL[review.verdict] : '—'}${review.score !== null ? ` · 评分 ${review.score}` : ''}${review.meta?.riskLevel ? ` · 风险 ${review.meta.riskLevel}` : ''}${review.meta?.effortScore ? ` · 审校复杂度 ${review.meta.effortScore}/5` : ''}${review.tool ? ` · 工具 ${review.tool}` : ''}`);
       if (review.summary) out.push(`- 摘要：${cell(review.summary)}`);
       if (review.decision) out.push(`- 人工确认：${review.decision.decision === 'APPROVE' ? '批准' : '退回'} — ${cell(review.decision.reason)}`);
+      if (review.meta?.clarifyQuestions?.length) {
+        out.push('', '**待澄清问题（Clarify）**', '');
+        for (const q of review.meta.clarifyQuestions) out.push(`- \`${q.id}\` ${q.resolved ? '✅ ' : '❓ '}${cell(q.question)}${q.impact ? `（影响：${cell(q.impact)}）` : ''}`);
+      }
+      if (review.meta?.walkthrough?.length) {
+        out.push('', '| 文件/章节 | 改动概览 | 风险 |', '|---|---|---|');
+        for (const w of review.meta.walkthrough) out.push(`| ${cell(w.file)} | ${cell(w.summary)} | ${w.risk || '—'} |`);
+      }
       if (review.checklist.length) { out.push('', '| 检查项 | 结果 | 依据 |', '|---|---|---|'); for (const item of review.checklist) out.push(`| ${cell(item.item)} | ${RESULT_MARK[item.result] || item.result} | ${cell(item.note)}${item.ref ? `（${cell(item.ref)}）` : ''} |`); }
-      if (review.findings.items.length) { out.push(''); for (const item of review.findings.items) out.push(`- \`${item.severity}\`${item.waived ? '（已豁免）' : ''} ${item.title}：${cell(item.detail)}${item.location ? `（${cell(item.location)}）` : ''}`); }
+      if (review.findings.items.length) { out.push(''); for (const item of review.findings.items) out.push(`- \`${item.severity}\`${item.category ? ` \`${item.category}\`` : ''}${Number.isInteger(item.confidence) ? ` (置信度 ${item.confidence}/10)` : ''}${item.waived ? '（已豁免）' : ''} ${item.title}：${cell(item.detail)}${item.location ? `（${cell(item.location)}）` : ''}`); }
       out.push('');
     } else out.push('_尚未进行 AI 审核_', '');
   }

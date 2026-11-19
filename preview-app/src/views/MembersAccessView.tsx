@@ -1,8 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Popconfirm, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { Download, Plus, RefreshCw, Search, ShieldCheck } from 'lucide-react';
-import { api, ApiError, MemberCandidate, Project, ProjectMember, ProjectPermissions, Role, ROLES, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
+import { Download, Plus, RefreshCw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { api, ApiError, MemberCandidate, Project, ProjectMember, ProjectPermissions, REVIEW_STAGE_OPTIONS, Role, ROLES, RuleEnforcement, Stage, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
 import { roleLabel, stageLabel } from './displayLabels';
 import { clearSearchOnEscape, isSubmitShortcut } from './uiPreferences';
@@ -35,7 +35,7 @@ export const MembersAccessView: React.FC<{
   const screens = Grid.useBreakpoint();
   const [form] = Form.useForm<{ userId: string; role: Role }>();
   const [newMemberForm] = Form.useForm<{ username: string; password: string; role: Role }>();
-  const [pluginForm] = Form.useForm<{ id: string; name: string; version: string; stages: Stage[] }>();
+  const [pluginForm] = Form.useForm<{ id: string; name: string; version: string; stages: Stage[]; enforcement: RuleEnforcement; rule?: string }>();
   const [open, setOpen] = useState(false);
   const [newMemberOpen, setNewMemberOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<{ id: string; username: string } | null>(null);
@@ -223,24 +223,26 @@ export const MembersAccessView: React.FC<{
         name: preset.name,
         version: preset.version,
         stages: preset.stages,
+        enforcement: preset.enforcement,
+        rule: preset.description,
       });
       if (!alive.current || accessLost.current) return;
-      void message.success(`已启用项目门禁策略插件「${preset.name}」！`);
+      void message.success(`已启用项目门禁规则「${preset.name}」！`);
       await Promise.all([loadPlugins(), loadAudit()]);
     } catch (error) {
       if (!alive.current || accessLost.current) return;
       if (error instanceof ApiError && error.status === 409) {
-        void message.info('该策略插件已登记。');
+        void message.info('该策略规则已登记。');
         await loadPlugins();
       } else {
-        void message.error(error instanceof Error ? error.message : '登记插件失败。');
+        void message.error(error instanceof Error ? error.message : '登记规则失败。');
       }
     } finally {
       if (alive.current) setInstallingPluginId('');
     }
   };
 
-  const registerCustomPlugin = (values: { id: string; name: string; version: string; stages: Stage[] }) => {
+  const registerCustomPlugin = (values: { id: string; name: string; version: string; stages: Stage[]; enforcement?: RuleEnforcement; rule?: string }) => {
     if (!canRegisterPlugins) return;
     void run(async isCurrent => {
       await api('plugins', {
@@ -249,10 +251,22 @@ export const MembersAccessView: React.FC<{
         name: values.name.trim(),
         version: values.version.trim(),
         stages: values.stages,
+        enforcement: values.enforcement || 'WARN',
+        ...(values.rule?.trim() ? { rule: values.rule.trim() } : {}),
       });
       if (!isCurrent()) return;
       closePluginDrawer();
-      void message.success(`已登记门禁策略插件「${values.name.trim()}」。`);
+      void message.success(`已登记门禁规则「${values.name.trim()}」。`);
+      await Promise.all([loadPlugins(), loadAudit()]);
+    });
+  };
+
+  const removePlugin = (pluginId: string) => {
+    if (!canRegisterPlugins || busy) return;
+    void run(async isCurrent => {
+      await api('plugins/' + encodeURIComponent(pluginId), undefined, 'DELETE');
+      if (!isCurrent()) return;
+      void message.success('已移除该门禁规则。');
       await Promise.all([loadPlugins(), loadAudit()]);
     });
   };
@@ -421,7 +435,7 @@ export const MembersAccessView: React.FC<{
               disabled={busy}
               onClick={() => {
                 pluginForm.resetFields();
-                pluginForm.setFieldsValue({ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'] });
+                pluginForm.setFieldsValue({ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'], enforcement: 'WARN' });
                 setPluginDrawerOpen(true);
               }}
             >
@@ -485,23 +499,23 @@ export const MembersAccessView: React.FC<{
           pagination={false}
           columns={[
             {
-              title: '策略名称 / 标识',
+              title: '规则名称 / 要求说明',
               key: 'name',
               render: (_, p) => (
                 <Flex vertical gap={2}>
-                  <Typography.Text strong>{p.name}</Typography.Text>
-                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>{p.id}</Typography.Text>
+                  <Space size={6} wrap>
+                    <Typography.Text strong>{p.name}</Typography.Text>
+                    <Tag color={p.enforcement === 'BLOCK' ? 'error' : 'warning'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                      {p.enforcement === 'BLOCK' ? 'BLOCK · 违规阻断' : 'WARN · 建议提醒'}
+                    </Tag>
+                  </Space>
+                  {p.rule && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.rule}</Typography.Text>}
+                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>{p.id} · v{p.version}</Typography.Text>
                 </Flex>
               ),
             },
             {
-              title: '版本',
-              dataIndex: 'version',
-              width: 96,
-              render: val => <Typography.Text code>v{val}</Typography.Text>,
-            },
-            {
-              title: '生效门禁阶段',
+              title: '生效环节',
               key: 'stages',
               render: (_, p) => (
                 <Space size={[4, 4]} wrap>
@@ -512,13 +526,23 @@ export const MembersAccessView: React.FC<{
               ),
             },
             {
-              title: '策略状态',
+              title: '规则状态',
               key: 'status',
               width: 140,
               render: () => <StatusBadge variant="green">快照与 AI 注入生效</StatusBadge>,
             },
+            ...(canRegisterPlugins ? [{
+              title: '操作',
+              key: 'actions',
+              width: 72,
+              render: (_: unknown, p: PolicyPlugin) => (
+                <Popconfirm title="移除此条门禁规则？" okText="移除" cancelText="取消" onConfirm={() => removePlugin(p.id)}>
+                  <Button type="text" danger size="small" icon={<Trash2 size={14} />} aria-label={`移除规则 ${p.name}`} />
+                </Popconfirm>
+              ),
+            }] : []),
           ]}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={canRegisterPlugins ? '暂未登记项目门禁策略插件，可点击上方预设一键启用。' : '当前项目暂未登记门禁策略插件。'} /> }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={canRegisterPlugins ? '暂未登记项目门禁策略规则，可点击上方预设或自定义自然语言规则。' : '当前项目暂未登记门禁策略规则。'} /> }}
         />
       </Flex>
     </Card>
@@ -629,19 +653,25 @@ export const MembersAccessView: React.FC<{
         <Form.Item label="平台角色" name="role" rules={[{ required: true }]}><Select options={choices(ROLES)} /></Form.Item>
       </Form>
     </Drawer>
-    <Drawer title="自定义登记门禁策略插件" open={pluginDrawerOpen && canRegisterPlugins} onClose={closePluginDrawer} closable={!busy} maskClosable={!busy} keyboard={!busy} size={520} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closePluginDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canRegisterPlugins} onClick={() => pluginForm.submit()}>登记策略插件</Button></Flex>}>
-      <Form name="register-policy-plugin" form={pluginForm} layout="vertical" disabled={busy || !canRegisterPlugins} initialValues={{ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'] }} onFinish={registerCustomPlugin} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canRegisterPlugins) { event.preventDefault(); pluginForm.submit(); } }}>
-        <Form.Item label="插件标识（小写字母、数字与连字符）" name="id" rules={[{ required: true, message: '请输入插件标识。' }, { pattern: /^[a-z][a-z0-9-]*$/, message: '需以小写字母开头，仅含 a-z、0-9 和 -。' }]}>
-          <Input placeholder={buildScopedPluginId('payment-idempotency-guard', projectId, projectKey)} maxLength={64} />
+    <Drawer title="自定义自然语言门禁规则" open={pluginDrawerOpen && canRegisterPlugins} onClose={closePluginDrawer} closable={!busy} maskClosable={!busy} keyboard={!busy} size={540} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closePluginDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canRegisterPlugins} onClick={() => pluginForm.submit()}>登记门禁规则</Button></Flex>}>
+      <Form name="register-policy-plugin" form={pluginForm} layout="vertical" disabled={busy || !canRegisterPlugins} initialValues={{ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'], enforcement: 'WARN' }} onFinish={registerCustomPlugin} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canRegisterPlugins) { event.preventDefault(); pluginForm.submit(); } }}>
+        <Form.Item label="规则标识（小写字母、数字与连字符）" name="id" rules={[{ required: true, message: '请输入规则标识。' }, { pattern: /^[a-z][a-z0-9-]*$/, message: '需以小写字母开头，仅含 a-z、0-9 和 -。' }]}>
+          <Input placeholder={buildScopedPluginId('offline-door-token-expiry', projectId, projectKey)} maxLength={64} />
         </Form.Item>
-        <Form.Item label="策略名称" name="name" rules={[{ required: true, whitespace: true, message: '请输入策略名称。' }]}>
-          <Input placeholder="例如：核心清结算金额对账核验" maxLength={100} />
+        <Form.Item label="规则名称" name="name" rules={[{ required: true, whitespace: true, message: '请输入规则名称。' }]}>
+          <Input placeholder="例如：离线凭证有效期与密钥轮换核验" maxLength={100} />
+        </Form.Item>
+        <Form.Item label="自然语言审核规则（AI 审核时将逐条对照并体现在清单中）" name="rule" rules={[{ required: true, whitespace: true, message: '请输入具体审核要求。' }]}>
+          <Input.TextArea rows={3} maxLength={1000} placeholder="例如：所有涉及离线开门凭证缓存的代码与方案，必须写明失效时间校验、设备解绑清理和防重放机制。" />
+        </Form.Item>
+        <Form.Item label="规则强度（WARN 仅提醒 / BLOCK 违规阻断）" name="enforcement" rules={[{ required: true }]}>
+          <Segmented<RuleEnforcement> options={[{ value: 'WARN', label: 'WARN · 建议提醒' }, { value: 'BLOCK', label: 'BLOCK · 违规阻断' }]} />
+        </Form.Item>
+        <Form.Item label="绑定交付链路阶段" name="stages" rules={[{ required: true, message: '请至少选择一个交付阶段。' }]}>
+          <Select mode="multiple" options={REVIEW_STAGE_OPTIONS} placeholder="选择生效的评审阶段" />
         </Form.Item>
         <Form.Item label="语义化版本号" name="version" rules={[{ required: true, message: '请输入版本号。' }, { pattern: /^\d+\.\d+\.\d+$/, message: '版本号需符合 x.y.z 格式（如 1.0.0）。' }]}>
           <Input placeholder="1.0.0" maxLength={32} />
-        </Form.Item>
-        <Form.Item label="绑定门禁阶段" name="stages" rules={[{ required: true, message: '请至少选择一个门禁阶段。' }]}>
-          <Select mode="multiple" options={STAGES} placeholder="选择生效的评审阶段" />
         </Form.Item>
       </Form>
     </Drawer>

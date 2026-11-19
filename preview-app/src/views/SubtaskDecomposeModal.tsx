@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, App as AntApp, Button, Checkbox, Flex, Input, Modal, Select, Space, Tag, Typography } from 'antd';
-import { Plus, Sparkles, Trash2 } from 'lucide-react';
-import { api, ApiError, isLocalTaskKey, type Asset, type User, type WorkTask } from './workspaceApi';
+import { Plus, Sparkles, Square, Trash2 } from 'lucide-react';
+import { api, ApiError, isLocalTaskKey, type Asset, type LocalAiEngineId, type LocalAiRun, type LocalAutomationCapabilities, type User, type WorkTask } from './workspaceApi';
 import { TASK_TYPE_OPTIONS } from './displayLabels';
+import { readStoredChoice } from './uiPreferences';
 import {
   allocateNextJiraKeys,
   buildStandardDeliverySubtasks,
@@ -17,17 +18,22 @@ interface DraftSubtaskRow {
   title: string;
   type: WorkTask['type'];
   assigneeId: string;
-  source: SubtaskCandidate['source'];
+  source: SubtaskCandidate['source'] | 'AI_DRAFT';
+  estimateDays?: number;
+  covers?: string[];
+  after?: string[];
   created?: boolean;
 }
 
+const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
 const VALID_JIRA_KEY_RE = /^[A-Z][A-Z0-9]*-[1-9]\d*$/;
 
-const SOURCE_LABELS: Record<SubtaskCandidate['source'], string> = {
+const SOURCE_LABELS: Record<DraftSubtaskRow['source'], string> = {
   TECH_SPEC: '方案提取',
   PRD: 'PRD 提取',
   JIRA: 'Jira 描述',
   STANDARD: '研发模板',
+  AI_DRAFT: 'AI 拆解',
   CUSTOM: '自定义',
 };
 
@@ -45,6 +51,9 @@ export const SubtaskDecomposeModal: React.FC<{
   const { message } = AntApp.useApp();
   const [rows, setRows] = useState<DraftSubtaskRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [aiRun, setAiRun] = useState<LocalAiRun | null>(null);
+  const [startingAi, setStartingAi] = useState(false);
+  const [aiRationale, setAiRationale] = useState('');
 
   const localParent = isLocalTaskKey(parentTask.jiraKey);
   const defaultAssignee = canAssign
@@ -64,6 +73,7 @@ export const SubtaskDecomposeModal: React.FC<{
 
   useEffect(() => {
     if (!open) return;
+    setAiRationale('');
     const specCandidates = extractSubtaskCandidatesFromSpecs({
       parentTask,
       assets,
@@ -75,6 +85,72 @@ export const SubtaskDecomposeModal: React.FC<{
       setRows(toDraftRows(buildStandardDeliverySubtasks(parentTask, existingTasks)));
     }
   }, [open, parentTask.id]);
+
+  useEffect(() => {
+    if (!open || !aiRun || aiRun.status !== 'RUNNING') return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(aiRun.id)}`)
+        .then(res => {
+          setAiRun(res.run);
+          if (res.run.status === 'SUCCEEDED' && res.run.draft?.subtasks?.length) {
+            const list = res.run.draft.subtasks;
+            const keys = localParent ? list.map(() => '') : allocateNextJiraKeys(parentTask.jiraKey, existingTasks.map(t => t.jiraKey), list.length);
+            setRows(list.map((item, idx) => ({
+              rowId: `ai-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
+              enabled: true,
+              jiraKey: keys[idx] || '',
+              title: item.roleHint && !item.title.includes(item.roleHint) ? `[${item.roleHint}] ${item.title}`.slice(0, 200) : item.title,
+              type: item.type || 'TASK',
+              assigneeId: defaultAssignee,
+              source: 'AI_DRAFT',
+              estimateDays: item.estimateDays,
+              covers: item.covers,
+              after: item.after,
+            })));
+            setAiRationale(res.run.draft.rationale || '');
+            void message.success(`AI 已基于 PRD/技术方案生成 ${list.length} 条建议子任务（支持工期与依赖核对）。`);
+          } else if (res.run.status === 'FAILED') {
+            void message.error(res.run.error || 'AI 拆解未产出有效结构化草案。');
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [open, aiRun?.id, aiRun?.status]);
+
+  const startAiSubtaskDraft = async () => {
+    if (startingAi || aiRun?.status === 'RUNNING' || submitting) return;
+    setStartingAi(true);
+    try {
+      let engine = readStoredChoice('taskflow.ai.engine', ENGINE_IDS, 'codex');
+      try {
+        const caps = await api<LocalAutomationCapabilities>('local-automation/capabilities');
+        if (!caps.engines.some(e => e.id === engine && e.available)) {
+          engine = caps.engines.find(e => e.available)?.id || engine;
+        }
+      } catch { /* fallback */ }
+      const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(parentTask.id)}/ai-runs`, {
+        mode: 'read',
+        actionType: 'SUBTASK_DRAFT',
+        engine,
+      });
+      setAiRun(res.run);
+      void message.info('正在调用本机 AI 阅读 PRD 与技术方案生成子任务草案…');
+    } catch (error) {
+      void message.error(error instanceof Error ? error.message : '启动 AI 智能拆解失败。');
+    } finally {
+      setStartingAi(false);
+    }
+  };
+
+  const stopAiDraftRun = async () => {
+    if (!aiRun) return;
+    try {
+      const res = await api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(aiRun.id)}/stop`, {});
+      setAiRun(res.run);
+    } catch { /* ignore */ }
+  };
 
   const applySpecExtraction = () => {
     const specCandidates = extractSubtaskCandidatesFromSpecs({
@@ -217,6 +293,15 @@ export const SubtaskDecomposeModal: React.FC<{
         />
         <Flex justify="space-between" align="center" wrap gap={8}>
           <Space size={8} wrap>
+            {aiRun?.status === 'RUNNING' ? (
+              <Button size="small" danger icon={<Square size={13} />} onClick={() => void stopAiDraftRun()}>
+                停止 AI 拆解
+              </Button>
+            ) : (
+              <Button size="small" type="primary" ghost icon={<Sparkles size={13} />} loading={startingAi} disabled={submitting} onClick={() => void startAiSubtaskDraft()}>
+                AI 智能拆解 PRD/方案
+              </Button>
+            )}
             <Button size="small" icon={<Sparkles size={13} />} disabled={submitting} onClick={applySpecExtraction}>
               从 PRD / 技术方案提取
             </Button>
@@ -231,6 +316,7 @@ export const SubtaskDecomposeModal: React.FC<{
             已选 {activeRows.length} / {rows.length} 项
           </Typography.Text>
         </Flex>
+        {aiRationale && <Alert type="success" showIcon title={aiRationale} />}
 
         <div style={{ display: 'grid', gap: 8, maxHeight: 380, overflowY: 'auto', paddingRight: 2 }}>
           {rows.map(row => (
@@ -263,7 +349,7 @@ export const SubtaskDecomposeModal: React.FC<{
                 maxLength={48}
                 onChange={e => updateRow(row.rowId, { jiraKey: e.target.value.toUpperCase() })}
               />
-              <Flex vertical gap={2} style={{ minWidth: 0 }}>
+              <Flex vertical gap={4} style={{ minWidth: 0 }}>
                 <Input
                   size="small"
                   value={row.title}
@@ -272,12 +358,23 @@ export const SubtaskDecomposeModal: React.FC<{
                   placeholder="输入具体可交付的子任务标题"
                   maxLength={200}
                   suffix={
-                    <Tag color={row.created ? 'success' : 'default'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                    <Tag color={row.created ? 'success' : row.source === 'AI_DRAFT' ? 'geekblue' : 'default'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
                       {row.created ? '已创建' : SOURCE_LABELS[row.source]}
                     </Tag>
                   }
                   onChange={e => updateRow(row.rowId, { title: e.target.value })}
                 />
+                {(typeof row.estimateDays === 'number' || !!row.covers?.length || !!row.after?.length) && (
+                  <Space size={4} wrap>
+                    {typeof row.estimateDays === 'number' && (
+                      <Tag color={row.estimateDays > 3 ? 'warning' : 'default'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                        约 {row.estimateDays}d{row.estimateDays > 3 ? '（超3天建议再拆）' : ''}
+                      </Tag>
+                    )}
+                    {row.covers?.map(c => <Tag key={c} color="blue" style={{ marginInlineEnd: 0, fontSize: 11 }}>{c}</Tag>)}
+                    {!!row.after?.length && <Typography.Text type="secondary" style={{ fontSize: 11 }}>依赖：{row.after.join('、')}</Typography.Text>}
+                  </Space>
+                )}
               </Flex>
               <Select<WorkTask['type']>
                 size="small"
