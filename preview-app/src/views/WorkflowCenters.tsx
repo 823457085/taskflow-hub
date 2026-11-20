@@ -22,7 +22,16 @@ const REVIEW_SCOPES = ['all', 'needs_my_action', 'pending_approval', 'awaiting_r
 const REVIEW_SORT_MODES = ['newest', 'oldest_waiting'] as const;
 type ReviewQuickScope = typeof REVIEW_SCOPES[number];
 type ReviewSortMode = typeof REVIEW_SORT_MODES[number];
-type CenterProps = { projectId: string; tasks: WorkTask[]; role?: Role; onChanged?: () => Promise<void>; onUnauthorized: () => void };
+type CenterProps = { projectId: string; tasks: WorkTask[]; role?: Role; onChanged?: () => Promise<void>; onBeforeRefresh?: () => Promise<boolean>; onUnauthorized: () => void };
+
+async function runCenterRefresh(
+  refresh: () => Promise<void>,
+  onChanged?: () => Promise<void>,
+  onBeforeRefresh?: () => Promise<boolean>,
+): Promise<void> {
+  if (onBeforeRefresh && (await onBeforeRefresh())) return;
+  await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
+}
 type ReviewCenterProps = CenterProps & { user?: User | null; members?: User[]; onForbidden?: () => void };
 export interface ProjectAssetMetadata {
   id: string;
@@ -96,7 +105,7 @@ const reviewBadgeVariant = (status: string): 'green' | 'blue' | 'warn' | 'neutra
   return 'neutral';
 };
 
-export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, user, role = 'DEV', members = [], onChanged, onUnauthorized, onForbidden }) => {
+export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, user, role = 'DEV', members = [], onChanged, onBeforeRefresh, onUnauthorized, onForbidden }) => {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const { items: jobs, loading, failure, refresh } = useProjectCollection<ReviewJob>('jobs', projectId, onUnauthorized);
@@ -304,7 +313,7 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
               一键全部批准 ({approvableVisibleJobs.length})
             </Button>
           )}
-          <Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void refresh()}>刷新</Button>
+          <Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)}>刷新</Button>
           <Button type={approvableVisibleJobs.length >= 2 ? 'default' : 'primary'} icon={<Plus size={16} />} disabled={!projectId || !eligibleTasks.length || !allowedStages.length} onClick={triggerNewReview}>发起评审</Button>
         </Space>
       }
@@ -467,7 +476,7 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
   </div>;
 };
 
-export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'DEV', onChanged, onUnauthorized }) => {
+export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'DEV', onChanged, onBeforeRefresh, onUnauthorized }) => {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
   const { items: assets, loading, failure, refresh } = useProjectCollection<ProjectAssetMetadata>('assets', projectId, onUnauthorized);
@@ -574,7 +583,7 @@ export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'D
   const empty = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>{!failure && projectId && (kind || !!search || latestOnly ? <Button onClick={resetFilters}>清空筛选</Button> : eligibleTasks.length ? <Button type="primary" icon={<Plus size={14} />} disabled={!allowedKinds.length} onClick={triggerNewAsset}>就地添加材料</Button> : <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心创建任务</Button>)}</Empty>;
 
   return <div className="tf-workflow-center">
-    <Card title={<Space size={8}><h2 className="tf-workflow-heading">材料版本</h2><Text type="secondary" className="tf-workflow-secondary">{visibleAssets.length} / {assets.length}</Text></Space>} extra={<Space wrap size={8}><Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void refresh()}>刷新</Button><Button type="primary" icon={<Plus size={16} />} disabled={!projectId || !eligibleTasks.length || !allowedKinds.length} onClick={triggerNewAsset}>添加材料</Button></Space>}>
+    <Card title={<Space size={8}><h2 className="tf-workflow-heading">材料版本</h2><Text type="secondary" className="tf-workflow-secondary">{visibleAssets.length} / {assets.length}</Text></Space>} extra={<Space wrap size={8}><Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)}>刷新</Button><Button type="primary" icon={<Plus size={16} />} disabled={!projectId || !eligibleTasks.length || !allowedKinds.length} onClick={triggerNewAsset}>添加材料</Button></Space>}>
       <div style={{ marginBottom: 12, overflowX: 'auto' }}>
         <Segmented<string>
           aria-label="材料类型快捷筛选"

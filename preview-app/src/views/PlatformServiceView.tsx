@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
-import { App, Button, Card, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Drawer, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
 import { ArrowLeft, Bookmark, ChevronLeft, ChevronRight, Columns2, KeyRound, Keyboard, LayoutGrid, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
@@ -60,6 +60,17 @@ const GROUP_MODES = ['grouped', 'flat'] as const;
 type TaskGroupMode = typeof GROUP_MODES[number];
 const taskFromHash = () => new URLSearchParams(location.hash.slice(1)).get('task') || '';
 const options = (values: string[]) => values.map(value => ({ value, label: value }));
+type PreviewBuildMeta = { revision?: string; commit?: string };
+async function readPreviewBuildMeta(): Promise<PreviewBuildMeta | null> {
+  try {
+    const res = await fetch('/__taskflow/version', { cache: 'no-store' });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && typeof data.revision === 'string' ? data : null;
+  } catch {
+    return null;
+  }
+}
 type LoginValues = { username: string; password: string; setupToken?: string };
 type NewTaskValues = { jiraKey?: string; title: string; type: WorkTask['type']; parentId?: string; assigneeId?: string };
 
@@ -111,6 +122,24 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [taskPage, setTaskPage] = useState(1);
   const [updatingTaskId, setUpdatingTaskId] = useState('');
   const [syncingJira, setSyncingJira] = useState(false);
+  const [buildUpdate, setBuildUpdate] = useState<{ revision: string; commit?: string } | null>(null);
+  const loadedBuildRevision = useRef('');
+  const lastVersionCheckAt = useRef(0);
+  const checkBuildUpdate = async (reloadIfChanged = false): Promise<boolean> => {
+    const latest = await readPreviewBuildMeta();
+    if (!latest?.revision) return false;
+    if (!loadedBuildRevision.current) {
+      loadedBuildRevision.current = latest.revision;
+      return false;
+    }
+    if (latest.revision === loadedBuildRevision.current) return false;
+    if (reloadIfChanged) {
+      window.location.reload();
+      return true;
+    }
+    setBuildUpdate({ revision: latest.revision, commit: latest.commit });
+    return false;
+  };
   const taskSearchRef = useRef<InputRef>(null);
   const shortcutNavRef = useRef<{ prevTaskId?: string; nextTaskId?: string; openTask: (id: string) => void; busy: boolean }>({ openTask: () => {}, busy: false });
   const lastRoutedTaskId = useRef(taskFromHash());
@@ -294,6 +323,22 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       if (active) { setBusy(pendingOperations.current > 0); setInitializing(false); }
     });
     return () => { active = false; mounted.current = false; refreshSequence.current += 1; taskCreateSequence.current += 1; };
+  }, []);
+  useEffect(() => {
+    void checkBuildUpdate(false);
+    const checkOnReturn = () => {
+      if (document.visibilityState === 'hidden') return;
+      const now = Date.now();
+      if (now - lastVersionCheckAt.current < 5000) return;
+      lastVersionCheckAt.current = now;
+      void checkBuildUpdate(false);
+    };
+    window.addEventListener('focus', checkOnReturn);
+    document.addEventListener('visibilitychange', checkOnReturn);
+    return () => {
+      window.removeEventListener('focus', checkOnReturn);
+      document.removeEventListener('visibilitychange', checkOnReturn);
+    };
   }, []);
   useEffect(() => { onSessionChange?.(!!user); }, [user?.id, onSessionChange]);
   const [workbenchMode, setWorkbenchMode] = useState<'server' | 'relay' | null>(null);
@@ -697,7 +742,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     setSavedViews(next);
     void message.info(`已移除视图「${view.name}」。`);
   };
-  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(() => refresh())}>刷新</Button>{workbenchAvailable && <Tooltip title={workbenchMode === 'server' ? '打开服务器上的工作台（AI 与 git 在你电脑上执行，需 Bridge 在运行）' : '在浏览器中打开你电脑上的工作台（需本机工作台与 Bridge 在运行）'}><Button icon={<MonitorSmartphone size={16} />} onClick={openWorkbench}>我的工作台</Button></Tooltip>}<Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
+  const accountActions = <Space wrap size={8} className="tf-page-actions"><StatusBadge variant="blue">{user.username} · {roleLabel(scoped || isTaskDetail ? role || user.role : user.role)}</StatusBadge><Tooltip title="全局搜索任务、项目与模块（Cmd/Ctrl + K）"><Button icon={<Search size={15} />} onClick={openQuickCommand}>跳转 ⌘K</Button></Tooltip><Tooltip title="键盘快捷键指南（按 ? 查看）"><Button icon={<Keyboard size={15} />} aria-label="快捷键指南" onClick={() => { setShortcutsEverOpened(true); setShortcutsOpen(true); }} /></Tooltip><Button icon={<RefreshCw size={16} />} loading={busy} onClick={() => void perform(async () => { if (await checkBuildUpdate(true)) return; await refresh(); })}>刷新</Button>{workbenchAvailable && <Tooltip title={workbenchMode === 'server' ? '打开服务器上的工作台（AI 与 git 在你电脑上执行，需 Bridge 在运行）' : '在浏览器中打开你电脑上的工作台（需本机工作台与 Bridge 在运行）'}><Button icon={<MonitorSmartphone size={16} />} onClick={openWorkbench}>我的工作台</Button></Tooltip>}<Button type="text" icon={<KeyRound size={16} />} disabled={busy} onClick={() => setPasswordOpen(true)}>修改密码</Button><Button type="text" icon={<LogOut size={16} />} disabled={busy} onClick={() => void perform(async () => { await api('logout', {}); clearSession(); })}>退出</Button></Space>;
   const taskList = <>
       <ChainStagePipelineBar
         tasks={tasks}
@@ -905,8 +950,8 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   let content: React.ReactNode;
   if (section === 'overview') content = <WorkspaceOverview projects={projects} tasks={allTasks} user={user} onUnauthorized={clearSession} onSyncJira={hasBoundJira ? () => void syncMyJiraTasks() : undefined} syncingJira={syncingJira} onApproved={() => void refreshTasksOnly()} openDigestTick={digestTick} />;
   else if (section === 'projects') content = <ProjectDirectory projects={projects} tasks={allTasks} onOpen={switchProject} onCreate={platformPermissions.createProjects ? openNewProject : undefined} onProjectRenamed={updated => setProjects(prev => prev.map(item => item.id === updated.id ? { ...item, name: updated.name } : item))} />;
-  else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} members={members} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense>;
-  else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onUnauthorized={clearSession} /></Suspense>;
+  else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} members={members} onChanged={() => refreshTasksOnly()} onBeforeRefresh={() => checkBuildUpdate(true)} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense>;
+  else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onBeforeRefresh={() => checkBuildUpdate(true)} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'members') content = project ? <Suspense fallback={routeFallback}><MembersAccessView key={projectId} projectId={projectId} projectKey={project.key} user={user} role={role || 'DEV'} members={members} users={users} tasks={tasks} candidates={candidates} permissions={permissions} canManageUsers={platformPermissions.manageUsers} onChanged={() => refresh()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense> : <Card><Empty description="尚无可访问的项目" /></Card>;
   else if (section === 'connections') content = <Suspense fallback={routeFallback}><ConnectionsView projectId={projectId} project={project} projects={projects} role={role || 'DEV'} user={user} platformPermissions={platformPermissions} onUnauthorized={clearSession} onForbidden={reloadAccess} onProjectsChanged={async id => { await refresh(id); }} /></Suspense>;
   else if (section === 'todos') content = <Suspense fallback={routeFallback}><TeamTodosView key={user.id} user={user} projects={projects} projectId={projectId} members={members} tasks={tasks} canAssign={permissions.assignTasks} onUnauthorized={clearSession} /></Suspense>;
@@ -925,6 +970,17 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       <div className="tf-page-heading tf-module-heading"><div><Title level={1}>{heading}</Title><Paragraph type="secondary">{descriptions[section]}</Paragraph></div>{accountActions}</div>
       {scoped && <div className="tf-module-scope"><Text type="secondary">项目</Text><Select aria-label="当前项目" showSearch={{ optionFilterProp: 'label' }} value={projectId || undefined} disabled={busy || !projects.length} options={projectOptions} onChange={id => switchProject(id)} placeholder="选择项目" /></div>}
     </>}
+    {buildUpdate && (
+      <Alert
+        type="info"
+        showIcon
+        closable
+        onClose={() => setBuildUpdate(null)}
+        style={{ marginBottom: 12 }}
+        title={`检测到本地工作台已更新${buildUpdate.commit ? `（${buildUpdate.commit.slice(0, 7)}）` : ''}，当前页签仍在运行旧版界面，请点击立即刷新。`}
+        action={<Button size="small" type="primary" onClick={() => window.location.reload()}>立即刷新页面</Button>}
+      />
+    )}
     {content}
     <ChangePasswordDrawer open={passwordOpen} username={user.username} onClose={() => setPasswordOpen(false)} onUnauthorized={clearSession} />
     {(shortcutsOpen || shortcutsEverOpened) && (

@@ -35,7 +35,9 @@ test('persistent preview serves assets and preserves API auth and origin boundar
   const base = `http://127.0.0.1:${port}`;
   try {
     await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw new Error('Preview exited before readiness'); })]);
-    assert.match(await (await fetch(base)).text(), /TaskFlow test/);
+    const indexRes = await fetch(base);
+    assert.match(indexRes.headers.get('cache-control') || '', /no-store/);
+    assert.match(await indexRes.text(), /TaskFlow test/);
     assert.equal((await fetch(`${base}/app.js`)).status, 200);
     assert.equal((await fetch(`${base}/server.mjs`)).status, 404);
     assert.notEqual((await fetch(`${base}/%2e%2e%2fprivate.txt`)).status, 200);
