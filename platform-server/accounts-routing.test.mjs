@@ -38,7 +38,7 @@ async function fixture() {
     }
     let value;
     if (url.pathname === '/rest/api/2/myself') value = { name: identity, key: identity, displayName: identity, active: true };
-    else if (url.pathname === '/rest/api/2/project') value = state.catalog;
+    else if (url.pathname === '/rest/api/2/project') value = typeof state.catalog === 'function' ? state.catalog(identity) : state.catalog;
     else if (url.pathname === '/rest/api/2/search') value = { issues: [issue('TEST-1', identity)], total: 1 };
     else if (url.pathname.startsWith('/rest/api/2/issue/')) value = issue(decodeURIComponent(url.pathname.split('/').at(-1)), identity);
     else if (url.pathname === '/rest/api/user/current') value = { type: 'known', username: identity, displayName: identity };
@@ -303,4 +303,88 @@ test('a delayed GitLab MR read cannot fetch diffs or import after membership, se
       assert.equal(f.auditCount(), audits);
     } finally { await f.close(); }
   });
+});
+
+test('personal Jira project sync joins only Jira-visible bound projects with base roles and auto-selects personal credentials', async t => {
+  const f = await fixture(); t.after(f.close);
+  const alice = await f.member('jira-sync-alice', 'DEV');
+  const lead = await f.member('jira-sync-lead', 'LEAD');
+  const qa = await f.member('jira-sync-qa', 'QA');
+  f.app.db.prepare('DELETE FROM project_members WHERE project_id=? AND user_id=?').run(f.project.id, qa.user.id);
+  f.state.catalog = identity => {
+    if (identity === 'alice-jira') return [
+      { id: '101', key: 'TEST', name: 'L_PROJECT' },
+      { id: '102', key: 'OTHER', name: 'L_OTHER_PROJECT' },
+      { id: '109', key: 'UNBOUND', name: 'L_UNBOUND_PROJECT' },
+    ];
+    if (identity === 'lead-jira') return [{ id: '102', key: 'OTHER', name: 'L_OTHER_PROJECT' }];
+    if (identity === 'qa-jira') return [{ id: '102', key: 'OTHER', name: 'L_OTHER_PROJECT' }];
+    return [{ id: '101', key: 'TEST', name: 'L_PROJECT' }, { id: '102', key: 'OTHER', name: 'L_OTHER_PROJECT' }];
+  };
+
+  assert.equal((await f.call(`/api/projects/${f.other.id}/members`, 'GET', undefined, alice)).status, 403);
+  const aliceAccount = await f.account(alice, 'alice-jira', 'jira');
+  const existingPrefAccount = await f.account(alice, 'alice-existing-pref', 'jira');
+  await f.select(alice, 'jira', existingPrefAccount.id);
+
+  const synced = f.expect(await f.call(`/api/accounts/${aliceAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: aliceAccount.version }, alice));
+  assert.equal(synced.account.status, 'CONNECTED');
+  assert.equal(synced.identity.displayName, 'alice-jira');
+  assert.equal(synced.joinedCount, 1);
+  assert.equal(synced.matchedCount, 2);
+  assert.equal(synced.unmatchedRemoteCount, 1);
+  assert.equal(synced.joinedProjects[0].key, 'OTHER');
+  assert.equal(synced.joinedProjects[0].role, 'DEV');
+  assert.ok(synced.projects.some(p => p.id === f.other.id && p.role === 'DEV'));
+  assert.equal(f.app.db.prepare("SELECT account_id FROM account_preferences WHERE user_id=? AND project_id=? AND provider='jira'").get(alice.user.id, f.project.id)?.account_id, existingPrefAccount.id, 'existing account preference must not be overwritten');
+  assert.equal(f.app.db.prepare("SELECT account_id FROM account_preferences WHERE user_id=? AND project_id=? AND provider='jira'").get(alice.user.id, f.other.id)?.account_id, aliceAccount.id, 'newly joined Jira project auto-selects personal Jira account');
+
+  // Alice can immediately read/lookup Jira tasks in OTHER using her personal Jira account.
+  const lookup = f.expect(await f.call('/api/jira/tasks/lookup', 'POST', { projectId: f.other.id, reference: 'OTHER-1' }, alice));
+  assert.equal(lookup.issue.key, 'OTHER-1');
+  assert.equal(lookup.issue.title, 'L_TITLE_alice-jira');
+
+  // Global LEAD joining via Jira must only receive non-privileged DEV role and retain existing LEAD in TEST.
+  const leadAccount = await f.account(lead, 'lead-jira', 'jira');
+  const leadSync = f.expect(await f.call(`/api/accounts/${leadAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: leadAccount.version }, lead));
+  assert.equal(leadSync.joinedProjects[0].role, 'DEV');
+  const leadOther = leadSync.projects.find(p => p.id === f.other.id);
+  const leadTest = leadSync.projects.find(p => p.id === f.project.id);
+  assert.equal(leadOther.role, 'DEV');
+  assert.equal(leadOther.permissions.manageMembers, false);
+  assert.equal(leadTest.role, 'LEAD');
+
+  // A zero-project QA user can both test and sync personal Jira account and joins as QA.
+  assert.equal(f.expect(await f.call('/api/projects', 'GET', undefined, qa)).projects.length, 0);
+  const qaAccount = await f.account(qa, 'qa-jira', 'jira');
+  f.expect(await f.call(`/api/accounts/${qaAccount.id}/test`, 'POST', { expectedVersion: qaAccount.version }, qa));
+  const qaSync = f.expect(await f.call(`/api/accounts/${qaAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: qaAccount.version }, qa));
+  assert.equal(qaSync.joinedCount, 1);
+  assert.equal(qaSync.joinedProjects[0].role, 'QA');
+  assert.equal(qaSync.projects.length, 1);
+  assert.equal(qaSync.projects[0].key, 'OTHER');
+
+  // Security isolation: foreign user, shared PROJECT account, non-Jira account, localDevice, wrong source, and mid-flight invalidation.
+  assert.equal((await f.call(`/api/accounts/${aliceAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: aliceAccount.version }, lead)).status, 404);
+  const shared = await f.account(lead, 'shared-jira', 'jira', { scope: 'PROJECT', projectId: f.project.id });
+  assert.equal((await f.call(`/api/accounts/${shared.id}/sync-jira-projects`, 'POST', { expectedVersion: shared.version }, alice)).data.error.code, 'PERSONAL_ACCOUNT_REQUIRED');
+  const conf = await f.account(alice, 'alice-conf', 'confluence');
+  assert.equal((await f.call(`/api/accounts/${conf.id}/sync-jira-projects`, 'POST', { expectedVersion: conf.version }, alice)).status, 400);
+
+  const paired = f.expect(await f.call('/api/device-authorizations', 'POST', { deviceName: 'sync-scope-device', tool: 'custom' }, {}), 201);
+  f.expect(await f.call('/api/device-authorizations/decision', 'POST', { userCode: paired.userCode, decision: 'APPROVE', projectIds: [f.project.id] }, { cookie: alice.cookie }));
+  const device = f.expect(await f.call('/api/device-authorizations/poll', 'POST', { deviceCode: paired.deviceCode }, {}));
+  assert.equal((await f.call(`/api/accounts/${aliceAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: aliceAccount.version }, device)).status, 403);
+
+  // Mid-flight credential rotation must not grant membership or update status.
+  const dave = await f.member('jira-sync-dave', 'DEV');
+  const daveAccount = await f.account(dave, 'alice-jira', 'jira');
+  const gate = f.hold('/rest/api/2/project');
+  const pending = f.call(`/api/accounts/${daveAccount.id}/sync-jira-projects`, 'POST', { expectedVersion: daveAccount.version }, dave);
+  await f.waitForStart(gate, pending);
+  f.expect(await f.call(`/api/accounts/${daveAccount.id}`, 'PATCH', { expectedVersion: daveAccount.version, token: f.register('dave-rotated', 'jira') }, dave));
+  gate.release();
+  assert.equal((await pending).status, 409);
+  assert.equal(f.app.db.prepare('SELECT role FROM project_members WHERE project_id=? AND user_id=?').get(f.other.id, dave.user.id), undefined);
+  assert.equal(f.state.headerFailures, 0);
 });

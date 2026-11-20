@@ -7,6 +7,7 @@ import { api, ApiError, ASSET_ROLES, type AssetKind, JiraIssueMetadata, JiraProj
 import { StatusBadge } from '../components/Primitives';
 import { parseSourceReference, type SourceProvider } from './sourceReference';
 import { AccountUsageSelector } from './AccountUsageSelector';
+import { listAccounts, syncPersonalJiraProjects } from './accountApi';
 import { navigateWorkspace, openTaskRoute } from './workspaceNavigation';
 import { isTaskFrozen } from './taskAvailability';
 import { assetKindLabel, authModeLabel, connectorStatusLabel, mrStateLabel } from './displayLabels';
@@ -349,6 +350,20 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     { title: '操作', width: 120, render: (_, item) => active === 'jenkins' ? !item.isFolder ? <Button size="small" disabled={busy} onClick={() => selectJob(item)}>选择 Job</Button> : null : <Button size="small" disabled={busy} onClick={() => selectPipeline(item)}>选择流水线</Button> },
   ];
 
+  const syncPersonalProjects = () => run(async expected => {
+    if (!connection?.accountId || connection.accountScope !== 'PERSONAL' || active !== 'jira') return;
+    const listed = await listAccounts();
+    if (expected !== generation.current) return;
+    const target = listed.accounts.find(item => item.id === connection.accountId);
+    if (!target) { void message.error('所选个人 Jira 账号不存在或已不可用。'); return; }
+    const synced = await syncPersonalJiraProjects(target.id, target.version, true);
+    if (expected !== generation.current) return;
+    const extra = synced.unmatchedRemoteCount > 0 ? `；另有 ${synced.unmatchedRemoteCount} 个远端 Jira 项目尚未由管理员同步到平台` : '';
+    notify(synced.joinedCount > 0
+      ? `已按你的 Jira 权限同步可见项目：新增 ${synced.joinedCount} 个，共匹配 ${synced.matchedCount} 个${extra}。`
+      : `已按你的 Jira 权限校验：当前共匹配 ${synced.matchedCount} 个平台项目，无需新增${extra}。`);
+    await onProjectsChanged?.(synced.joinedProjects[0]?.id || projectId);
+  }, 'sync-personal');
   return <div className="tf-connections">
     <Card className="tf-connections-summary">
       <Flex align="center" justify="space-between" gap={16} wrap>
@@ -374,10 +389,11 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
           <Flex wrap gap={8}>
             {canConfigureLegacy && platformPermissions.reuseLocalCredentials && connection?.localProfileAvailable && <Button type={!connection?.hasCredential && !manualOpen ? 'primary' : 'default'} icon={<KeyRound size={16} />} disabled={busy} loading={operation === 'reuse'} onClick={() => void run(async expected => { await api(`connectors/${active}/reuse-local`, { projectId }); if (expected !== generation.current) return; await testConnection(expected); }, 'reuse')}>复用本机配置并验证</Button>}
             {canRead && <Button type={connection?.hasCredential && connection.status !== 'CONNECTED' && !manualOpen ? 'primary' : 'default'} icon={<Check size={16} />} disabled={busy || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} loading={operation === 'test'} onClick={() => void run(testConnection, 'test')}>验证连接</Button>}
+            {active === 'jira' && accountAligned && connection?.accountScope === 'PERSONAL' && connection?.accountId && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={operation === 'sync-personal'} onClick={() => void syncPersonalProjects()}>按 Jira 权限同步可见项目</Button>}
             {canConfigureLegacy && <Button disabled={busy} onClick={() => setManualOpen(current => !current)} aria-expanded={manualOpen}>{manualOpen ? '收起配置' : '配置项目默认连接'}</Button>}
             <Button disabled={busy} onClick={() => navigateWorkspace('accounts')}>管理账号</Button>
           </Flex>
-          {!canRead && !accessDenied && <Typography.Paragraph type="secondary">选择自己的账号或可用的项目共享账号后，即可读取平台资源。</Typography.Paragraph>}
+          {!canRead && !accessDenied && <Typography.Paragraph type="secondary">{active === 'jira' ? '当前显示的是平台默认连接状态（仅项目负责人或管理员可直接使用）；成员请先点击「管理账号」绑定自己的个人 Jira 账号，即可按本人 Jira 权限同步可见项目并读取资源。' : '选择自己的账号或可用的项目共享账号后，即可读取平台资源。'}</Typography.Paragraph>}
           {manualOpen && canConfigureLegacy && <div className="tf-connection-form-wrap">
             <Divider />
             <ConnectionConfigForm key={`${projectId}:${active}`} connection={connection} provider={active} disabled={busy} loading={operation === 'configure'} onSubmit={(values, clearToken) => void run(async expected => {

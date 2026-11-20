@@ -469,8 +469,10 @@ export const ProjectDirectory: React.FC<{
   tasks: WorkTask[];
   onOpen: (id: string, section?: WorkspaceSection) => void;
   onCreate?: () => void;
+  onSyncJiraProjects?: () => void;
+  syncingJiraProjects?: boolean;
   onProjectRenamed?: (project: Project) => void;
-}> = ({ projects, tasks, onOpen, onCreate, onProjectRenamed }) => {
+}> = ({ projects, tasks, onOpen, onCreate, onSyncJiraProjects, syncingJiraProjects, onProjectRenamed }) => {
   const { message } = App.useApp();
   const [search, setSearch] = useState('');
   const [groupId, setGroupId] = useState('');
@@ -704,6 +706,7 @@ export const ProjectDirectory: React.FC<{
       <Select aria-label="项目分组" value={activeGroup} onChange={setGroupId} options={[{ value: '', label: '全部分组' }, ...groups.map(group => ({ value: group.id, label: group.name }))]} />
       {showGrouped && <Button type="text" onClick={toggleAllGroups}>{allGroupsCollapsed ? '全部展开' : '全部收起'}</Button>}
       {(!!search || !!activeGroup) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}
+      {onSyncJiraProjects && <Button icon={<RefreshCw size={15} />} loading={syncingJiraProjects} onClick={onSyncJiraProjects}>按 Jira 权限同步项目</Button>}
       {onCreate && <Button className="tf-project-create" type="primary" onClick={onCreate}>新建本地项目</Button>}
     </Flex>
     <Typography.Paragraph type="secondary" className="tf-project-group-note">
@@ -711,7 +714,7 @@ export const ProjectDirectory: React.FC<{
         ? '按 Jira 项目分类展示（分组展开/折叠会自动记住）；双击项目标题可直接修改本地显示名称。'
         : projects.some(project => project.jira)
           ? '按项目名称前缀分组（分组展开/折叠会自动记住）；双击项目标题可直接修改本地显示名称，不影响远端 Jira。'
-          : '本地项目空间；双击项目标题可直接修改名称，连接 Jira 后可同步现有项目及其分类。'}
+          : '本地项目空间；在「账号管理」绑定个人 Jira 账号后，可点击上方「按 Jira 权限同步项目」自动显示你有权限的 Jira 项目。'}
     </Typography.Paragraph>
     {!filtered.length ? (
       <Card><Empty description="没有符合条件的项目" image={Empty.PRESENTED_IMAGE_SIMPLE}>{(!!search || !!activeGroup) && <Button onClick={resetFilters}>清空筛选</Button>}</Empty></Card>

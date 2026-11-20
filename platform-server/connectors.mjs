@@ -182,7 +182,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     if (row.account) {
       const actor = db.prepare('SELECT id,username,role FROM users WHERE id=?').get(row.accountActorId);
       if (!actor) fail(401, 'UNAUTHENTICATED', '登录已失效');
-      return accountRow(accounts.revalidateSelection(actor, row.account, row.project_id, row.provider), actor, row.project_id);
+      return accountRow(row.project_id ? accounts.revalidateSelection(actor, row.account, row.project_id, row.provider) : accounts.revalidatePersonalAccount(actor, row.account, row.provider), actor, row.project_id);
     }
     const now = configured(row.project_id, row.provider); if (now.id !== row.id || now.version !== row.version) fail(409, 'CONNECTOR_CHANGED', '连接配置已变化，请重新执行操作'); return now;
   }
@@ -1052,8 +1052,103 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     try { return await syncPromise; }
     finally { if (inFlightSyncMine.get(syncKey) === syncPromise) inFlightSyncMine.delete(syncKey); }
   }
+  async function syncPersonalJiraProjects({ accountId, body, user, reauthorize }) {
+    if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权同步个人 Jira 项目权限');
+    if (Object.keys(body).some(key => !['expectedVersion', 'autoSelect'].includes(key))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
+    if (!Number.isInteger(body.expectedVersion) || body.expectedVersion < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
+    if (body.autoSelect !== undefined && typeof body.autoSelect !== 'boolean') fail(400, 'INVALID_INPUT', 'autoSelect必须为布尔值');
+    const autoSelect = body.autoSelect !== false;
+    const account = accounts.resolvePersonalAccount(user, accountId, 'jira');
+    if (account.version !== body.expectedVersion) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
+    const actorId = user.id;
+    const row = accountRow(account, user, null);
+    const validate = () => {
+      if (reauthorize) user = reauthorize();
+      if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效');
+      if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权同步个人 Jira 项目权限');
+      accounts.revalidatePersonalAccount(user, account, 'jira');
+      return user;
+    };
+    let verified;
+    let catalog;
+    try {
+      verified = await probe('jira', row);
+      validate();
+      catalog = await jiraProjects(row);
+    } catch (error) {
+      if (error instanceof ApiError && ![401, 403, 404, 409].includes(error.status)) {
+        try {
+          const freshUser = validate();
+          accounts.recordCheck(freshUser, account, null, 'jira', { status: 'ERROR', error: error.message });
+        } catch { /* Preserve auth/version error without writing stale account status. */ }
+      }
+      throw error;
+    }
+    const joinedProjects = [];
+    const matchedProjects = [];
+    let autoSelectedCount = 0;
+    let unmatchedRemoteCount = 0;
+    transaction(() => {
+      const freshUser = validate();
+      const now = new Date().toISOString();
+      db.prepare("UPDATE external_accounts SET status='CONNECTED',last_checked_at=?,last_error=NULL WHERE id=? AND version=?").run(now, account.id, account.version);
+      const boundProjects = db.prepare(`
+        SELECT b.project_id AS id, b.remote_id AS remoteId, b.remote_key AS remoteKey, b.remote_name AS remoteName, p.key, p.name
+        FROM jira_project_bindings b
+        JOIN projects p ON p.id = b.project_id
+        WHERE b.source_url = ?
+        ORDER BY p.created_at, p.id
+      `).all(account.base_url);
+      const remoteById = new Map(catalog.map(item => [item.id, item]));
+      const boundRemoteIds = new Set(boundProjects.map(item => item.remoteId));
+      unmatchedRemoteCount = catalog.filter(item => !boundRemoteIds.has(item.id)).length;
+      const baseRole = ['QA', 'PM'].includes(freshUser.role) ? freshUser.role : 'DEV';
+      for (const bound of boundProjects) {
+        if (!remoteById.has(bound.remoteId)) continue;
+        const existing = db.prepare('SELECT role FROM project_members WHERE project_id=? AND user_id=?').get(bound.id, freshUser.id);
+        if (freshUser.role === 'ADMIN') {
+          matchedProjects.push({ id: bound.id, key: bound.key, name: bound.name, role: 'ADMIN', jiraKey: bound.remoteKey, joined: false });
+        } else if (existing) {
+          matchedProjects.push({ id: bound.id, key: bound.key, name: bound.name, role: existing.role, jiraKey: bound.remoteKey, joined: false });
+        } else {
+          db.prepare('INSERT INTO project_members (project_id,user_id,role) VALUES (?,?,?)').run(bound.id, freshUser.id, baseRole);
+          audit(freshUser.id, 'JIRA_PERSONAL_PROJECT_JOIN', bound.id, bound.id);
+          const item = { id: bound.id, key: bound.key, name: bound.name, role: baseRole, jiraKey: bound.remoteKey, joined: true };
+          joinedProjects.push(item);
+          matchedProjects.push(item);
+        }
+        if (autoSelect) {
+          const pref = db.prepare("SELECT account_id FROM account_preferences WHERE user_id=? AND project_id=? AND provider='jira'").get(freshUser.id, bound.id);
+          if (!pref) {
+            db.prepare("INSERT INTO account_preferences (user_id,project_id,provider,account_id,updated_at) VALUES (?,?,'jira',?,?)").run(freshUser.id, bound.id, account.id, now);
+            autoSelectedCount += 1;
+          }
+        }
+      }
+      audit(freshUser.id, 'JIRA_PERSONAL_PROJECT_SYNC', account.id, null);
+    });
+    const finalUser = validate();
+    return {
+      account: accounts.listAccounts(finalUser).accounts.find(item => item.id === account.id),
+      identity: verified.identity,
+      joinedProjects,
+      matchedProjects,
+      joinedCount: joinedProjects.length,
+      matchedCount: matchedProjects.length,
+      autoSelectedCount,
+      remoteVisibleCount: catalog.length,
+      unmatchedRemoteCount,
+      projects: visibleProjects(finalUser),
+    };
+  }
   return async function handle({ method, path, url, user, body, send, reauthorize }) {
     if (await mergeRequests.routes({ method, path, user, body, send, reauthorize })) return true;
+    const personalJiraSync = path.match(/^\/api\/accounts\/([A-Za-z0-9_-]{1,64})\/sync-jira-projects$/);
+    if (personalJiraSync && accounts) {
+      if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
+      send(200, await syncPersonalJiraProjects({ accountId: personalJiraSync[1], body, user, reauthorize }));
+      return true;
+    }
     const accountTest = path.match(/^\/api\/accounts\/([A-Za-z0-9_-]{1,64})\/test$/);
     if (accountTest && accounts) {
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
@@ -1061,16 +1156,18 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       const info = accounts.listAccounts(user).accounts.find(account => account.id === accountTest[1]);
       if (!info) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
       if (!Object.hasOwn(PROVIDERS, info.provider)) fail(409, 'ACCOUNT_TEST_UNSUPPORTED', '该AI账号仅支持保存，执行器尚未接入，不能判定认证或执行成功');
-      const projectId = body.projectId || info.projectId || visibleProjects(user)[0]?.id;
-      if (!projectId) fail(400, 'PROJECT_REQUIRED', '请先选择可访问项目后验证账号');
-      const account = accounts.resolveAccount(user, info.id, projectId, info.provider);
+      const projectId = body.projectId || info.projectId || visibleProjects(user)[0]?.id || null;
+      if (!projectId && info.scope !== 'PERSONAL') fail(400, 'PROJECT_REQUIRED', '请先选择可访问项目后验证账号');
+      const account = projectId ? accounts.resolveAccount(user, info.id, projectId, info.provider) : accounts.resolvePersonalAccount(user, info.id, info.provider);
       if (!Number.isInteger(body.expectedVersion) || body.expectedVersion < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
       if (account.version !== body.expectedVersion) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
       const actorId = user.id; const row = accountRow(account, user, projectId);
       const validate = () => {
         if (reauthorize) user = reauthorize();
         if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效');
-        accounts.revalidateSelection(user, account, projectId, info.provider); return user;
+        if (projectId) accounts.revalidateSelection(user, account, projectId, info.provider);
+        else accounts.revalidatePersonalAccount(user, account, info.provider);
+        return user;
       };
       const verified = await checked(info.provider, row, validate); validate();
       send(200, { account: accounts.listAccounts(user).accounts.find(item => item.id === account.id), ...verified }); return true;

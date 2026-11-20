@@ -7,6 +7,7 @@ import { StatusBadge } from '../components/Primitives';
 import { api, ApiError, CHAIN_STAGE_SHORT, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, Stage, TaskStatus, User, WorkTask } from './workspaceApi';
 import type { ChainStatusMap } from './workspaceApi';
 import { ProjectDirectory, WorkspaceOverview } from './WorkspaceOverview';
+import { listAccounts, syncPersonalJiraProjects } from './accountApi';
 import { clearTaskRoute, navigateWorkspace, openTaskRoute, SECTION_LABELS, taskReturnFilters, WorkspaceSection } from './workspaceNavigation';
 import { ChangePasswordDrawer } from './PasswordDrawers';
 import { roleLabel, TASK_STATUS_OPTIONS, TASK_TYPE_OPTIONS, taskStatusLabel } from './displayLabels';
@@ -122,6 +123,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   const [taskPage, setTaskPage] = useState(1);
   const [updatingTaskId, setUpdatingTaskId] = useState('');
   const [syncingJira, setSyncingJira] = useState(false);
+  const [syncingPersonalJiraProjects, setSyncingPersonalJiraProjects] = useState(false);
   const [buildUpdate, setBuildUpdate] = useState<{ revision: string; commit?: string } | null>(null);
   const loadedBuildRevision = useRef('');
   const lastVersionCheckAt = useRef(0);
@@ -539,6 +541,41 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       if (mounted.current) setUpdatingTaskId('');
     }
   };
+  const syncMyPersonalJiraProjects = async () => {
+    if (!user || syncingPersonalJiraProjects) return;
+    setSyncingPersonalJiraProjects(true);
+    try {
+      const listed = await listAccounts();
+      if (!mounted.current) return;
+      const personalJiras = listed.accounts.filter(item => item.scope === 'PERSONAL' && item.provider === 'jira' && item.enabled);
+      if (!personalJiras.length) {
+        void message.info('请先在「账号管理」绑定你的个人 Jira 账号，保存后会自动按你的 Jira 权限同步可见项目。');
+        navigateWorkspace('accounts');
+        return;
+      }
+      let joinedTotal = 0;
+      let matchedTotal = 0;
+      let unmatchedTotal = 0;
+      let firstJoinedProjectId = '';
+      for (const acc of personalJiras) {
+        const res = await syncPersonalJiraProjects(acc.id, acc.version, true);
+        joinedTotal += res.joinedCount;
+        matchedTotal += res.matchedCount;
+        unmatchedTotal += res.unmatchedRemoteCount;
+        if (!firstJoinedProjectId && res.joinedProjects[0]?.id) firstJoinedProjectId = res.joinedProjects[0].id;
+      }
+      if (!mounted.current) return;
+      const extra = unmatchedTotal > 0 ? `；另有 ${unmatchedTotal} 个远端 Jira 项目尚未由管理员同步到平台` : '';
+      void message.success(joinedTotal > 0
+        ? `已按你的 Jira 权限同步可见项目：新增 ${joinedTotal} 个，共匹配 ${matchedTotal} 个${extra}。`
+        : `已按你的 Jira 权限校验：当前共匹配 ${matchedTotal} 个平台项目，无需新增${extra}。`);
+      await refresh(firstJoinedProjectId || projectIdRef.current);
+    } catch (error) {
+      if (mounted.current) handleError(error);
+    } finally {
+      if (mounted.current) setSyncingPersonalJiraProjects(false);
+    }
+  };
   const projectCreated = async (created: Project) => {
     const scopeMatches = () => mounted.current && currentContext.current.userId === user?.id && currentContext.current.section === section && location.hash === renderedRoute;
     const isCurrent = () => scopeMatches() && projectIdRef.current === projectId;
@@ -950,7 +987,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
   </>;
   let content: React.ReactNode;
   if (section === 'overview') content = <WorkspaceOverview projects={projects} tasks={allTasks} user={user} onUnauthorized={clearSession} onSyncJira={hasBoundJira ? () => void syncMyJiraTasks() : undefined} syncingJira={syncingJira} onApproved={() => void refreshTasksOnly()} openDigestTick={digestTick} />;
-  else if (section === 'projects') content = <ProjectDirectory projects={projects} tasks={allTasks} onOpen={switchProject} onCreate={platformPermissions.createProjects ? openNewProject : undefined} onProjectRenamed={updated => setProjects(prev => prev.map(item => item.id === updated.id ? { ...item, name: updated.name } : item))} />;
+  else if (section === 'projects') content = <ProjectDirectory projects={projects} tasks={allTasks} onOpen={switchProject} onCreate={platformPermissions.createProjects ? openNewProject : undefined} onSyncJiraProjects={() => void syncMyPersonalJiraProjects()} syncingJiraProjects={syncingPersonalJiraProjects} onProjectRenamed={updated => setProjects(prev => prev.map(item => item.id === updated.id ? { ...item, name: updated.name } : item))} />;
   else if (section === 'reviews') content = <Suspense fallback={routeFallback}><ReviewCenter projectId={projectId} tasks={tasks} user={user} role={role || 'DEV'} members={members} onChanged={() => refreshTasksOnly()} onBeforeRefresh={() => checkBuildUpdate(true)} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense>;
   else if (section === 'assets') content = <Suspense fallback={routeFallback}><AssetCenter projectId={projectId} tasks={tasks} role={role || 'DEV'} onChanged={() => refreshTasksOnly()} onBeforeRefresh={() => checkBuildUpdate(true)} onUnauthorized={clearSession} /></Suspense>;
   else if (section === 'members') content = project ? <Suspense fallback={routeFallback}><MembersAccessView key={projectId} projectId={projectId} projectKey={project.key} user={user} role={role || 'DEV'} members={members} users={users} tasks={tasks} candidates={candidates} permissions={permissions} canManageUsers={platformPermissions.manageUsers} onChanged={() => refresh()} onUnauthorized={clearSession} onForbidden={reloadAccess} /></Suspense> : <Card><Empty description="尚无可访问的项目" /></Card>;

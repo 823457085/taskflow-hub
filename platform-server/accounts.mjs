@@ -67,8 +67,26 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     if (!row.enabled) fail(409, 'ACCOUNT_DISABLED', '所选账号已停用，请重新选择');
     return row;
   }
+  function resolvePersonalAccount(user, id, provider) {
+    assertDevice(user); providerValue(provider);
+    const row = stored(textField(id, 'accountId', { max: 64 }));
+    if (!row) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
+    if (row.scope === 'PROJECT') {
+      access(user, row);
+      fail(403, 'PERSONAL_ACCOUNT_REQUIRED', '仅个人账号支持按本人平台权限同步可见项目');
+    }
+    if (row.owner_id !== user.id) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
+    if (row.provider !== provider) fail(400, 'ACCOUNT_PROVIDER_MISMATCH', '所选账号与当前平台不匹配');
+    if (!row.enabled) fail(409, 'ACCOUNT_DISABLED', '所选账号已停用，请重新选择');
+    return row;
+  }
   function revalidateSelection(user, row, projectId, provider) {
     const current = resolveAccount(user, row.id, projectId, provider);
+    if (current.version !== row.version) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
+    return current;
+  }
+  function revalidatePersonalAccount(user, row, provider) {
+    const current = resolvePersonalAccount(user, row.id, provider);
     if (current.version !== row.version) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
     return current;
   }
@@ -113,7 +131,8 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     if (AI_PROVIDERS.includes(provider)) fail(409, 'ACCOUNT_VERIFICATION_UNSUPPORTED', 'AI账号仅支持保存，执行器和验证尚未接入');
     if (!['CONNECTED', 'ERROR'].includes(status)) fail(400, 'INVALID_INPUT', '账号验证状态不受支持');
     transaction(() => {
-      revalidateSelection(user, row, projectId, provider);
+      if (projectId) revalidateSelection(user, row, projectId, provider);
+      else revalidatePersonalAccount(user, row, provider);
       let safeError = typeof error === 'string' ? error : null;
       if (safeError) {
         const credential = getCredential(row);
@@ -128,7 +147,7 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     assertDevice(user); const actorId = user.id;
     const fresh = () => { if (reauthorize) user = reauthorize(); if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效'); assertDevice(user); return user; };
     fresh();
-    if (/^\/api\/accounts\/[A-Za-z0-9_-]{1,64}\/test$/.test(path)) return false;
+    if (/^\/api\/accounts\/[A-Za-z0-9_-]{1,64}\/(?:test|sync-jira-projects)$/.test(path)) return false;
     if (path === '/api/accounts') {
       if (method === 'GET') { send(200, listAccounts(user, { projectId: url.searchParams.get('projectId') || undefined, provider: url.searchParams.get('provider') || undefined })); return true; }
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持GET或POST');
@@ -180,5 +199,5 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     transaction(() => { fresh(); const current = access(user, stored(row.id), true); expectedVersion(body.expectedVersion, current); db.prepare('UPDATE external_accounts SET name=?,base_url=?,auth_mode=?,credential=?,organization_id=?,enabled=?,version=version+1,status=?,updated_at=?,last_checked_at=?,last_error=? WHERE id=?').run(nextName, nextBase, nextMode, sealed, nextOrg, body.enabled === undefined ? row.enabled : Number(body.enabled), credentialChanged ? 'CONFIGURED' : row.status, new Date().toISOString(), credentialChanged ? null : row.last_checked_at, credentialChanged ? null : row.last_error, row.id); audit(user.id, 'ACCOUNT_UPDATE', row.id, row.project_id); });
     send(200, { account: metadata(user, stored(row.id)) }); return true;
   }
-  return { handle, listAccounts, resolveAccount, resolveSelection, revalidateSelection, getCredential, recordCheck };
+  return { handle, listAccounts, resolveAccount, resolvePersonalAccount, resolveSelection, revalidateSelection, revalidatePersonalAccount, getCredential, recordCheck };
 }

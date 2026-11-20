@@ -1,17 +1,17 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import { App, Button, Card, Checkbox, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
 import { KeyRound, Plus, RefreshCw, Search } from 'lucide-react';
 import { api, ApiError, Project, timeText, User } from './workspaceApi';
 import { readTogether } from './readTogether';
 import { navigateWorkspace } from './workspaceNavigation';
 import { StatusBadge } from '../components/Primitives';
-import { ACCOUNT_PROVIDERS, AccountDraft, AccountSelection, accountProviderName, createAccount, deleteAccount, ExternalAccount, listAccounts, selectAccount, updateAccount, verifyAccount } from './accountApi';
+import { ACCOUNT_PROVIDERS, AccountDraft, AccountSelection, accountProviderName, createAccount, deleteAccount, ExternalAccount, listAccounts, selectAccount, syncPersonalJiraProjects, updateAccount, verifyAccount } from './accountApi';
 import { authModeLabel, connectorStatusLabel } from './displayLabels';
 import { clearSearchOnEscape, isSubmitShortcut } from './uiPreferences';
 import './AccountsView.css';
 
-interface AccountFormValues extends AccountDraft {}
+interface AccountFormValues extends AccountDraft { autoSyncJiraProjects?: boolean }
 interface LegacyConnector { provider: string; name: string; status: string; baseUrl: string; authMode: string; hasCredential: boolean; lastCheckedAt: string | null }
 const sameOrigin = (left?: string, right?: string) => {
   try { return new URL(left || '').origin === new URL(right || '').origin; } catch { return false; }
@@ -105,13 +105,30 @@ export const AccountsView: React.FC<{
     if (busy || accessDenied) return;
     setEditing(null); form.resetFields();
     const initialProvider = ACCOUNT_PROVIDERS.find(item => item.value === providerFilter) || ACCOUNT_PROVIDERS[0];
-    form.setFieldsValue({ scope: 'PERSONAL', provider: initialProvider.value, authMode: initialProvider.authMode, baseUrl: suggestedBase(initialProvider.value) }); setOpen(true);
+    form.setFieldsValue({ scope: 'PERSONAL', provider: initialProvider.value, authMode: initialProvider.authMode, baseUrl: suggestedBase(initialProvider.value), autoSyncJiraProjects: true }); setOpen(true);
   };
   const beginEdit = (account: ExternalAccount) => {
     if (busy || !account.canManage) return;
     setEditing(account); form.resetFields();
     form.setFieldsValue({ name: account.name, provider: account.provider as AccountDraft['provider'], scope: account.scope, baseUrl: account.baseUrl, authMode: account.authMode, organizationId: account.organizationId }); setOpen(true);
   };
+  const describeJiraSync = (sync: { joinedCount: number; matchedCount: number; unmatchedRemoteCount: number }) => {
+    const extra = sync.unmatchedRemoteCount > 0 ? `；另有 ${sync.unmatchedRemoteCount} 个远端 Jira 项目尚未由管理员同步到平台` : '';
+    return sync.joinedCount > 0
+      ? `已按你的 Jira 权限同步可见项目：新增 ${sync.joinedCount} 个，共匹配 ${sync.matchedCount} 个${extra}。`
+      : `已按你的 Jira 权限校验：当前共匹配 ${sync.matchedCount} 个平台项目，无需新增${extra}。`;
+  };
+  const syncJira = (account: ExternalAccount) => void run(async isCurrent => {
+    if (account.scope !== 'PERSONAL' || account.provider !== 'jira' || !account.enabled) return;
+    let sync;
+    try { sync = await syncPersonalJiraProjects(account.id, account.version, true); }
+    catch (error) { if (isCurrent()) await refresh(); throw error; }
+    if (!isCurrent()) return;
+    if (sync.account) setAccounts(current => current.map(item => item.id === account.id ? sync.account! : item));
+    void message.success(describeJiraSync(sync));
+    await refresh();
+    if (isCurrent()) await onChanged?.();
+  });
   const save = (values: AccountFormValues) => {
     if (editing && !accounts.some(account => account.id === editing.id && account.canManage) || values.scope === 'PROJECT' && !canCreateShared) return;
     void run(async isCurrent => {
@@ -120,7 +137,20 @@ export const AccountsView: React.FC<{
       const result = editing ? await updateAccount(editing.id, editing.version, changes) : await createAccount({ ...common, provider: values.provider, scope: values.scope, ...(values.scope === 'PROJECT' ? { projectId: project!.id } : {}) });
       if (!isCurrent()) return;
       setAccounts(current => [...current.filter(account => account.id !== result.account.id), result.account]);
-      closeForm(); void message.success('账号已保存，凭据不会回显。');
+      closeForm();
+      if (!editing && values.scope === 'PERSONAL' && values.provider === 'jira' && values.autoSyncJiraProjects !== false) {
+        try {
+          const sync = await syncPersonalJiraProjects(result.account.id, result.account.version, true);
+          if (!isCurrent()) return;
+          if (sync.account) setAccounts(current => current.map(item => item.id === result.account.id ? sync.account! : item));
+          void message.success(`账号已保存，${describeJiraSync(sync)}`);
+        } catch (error) {
+          if (!isCurrent()) return;
+          void message.warning(`账号已保存，但自动同步 Jira 可见项目失败：${error instanceof Error ? error.message : '请稍后重试。'}`);
+        }
+      } else {
+        void message.success('账号已保存，凭据不会回显。');
+      }
       await refresh(); if (isCurrent()) await onChanged?.();
     });
   };
@@ -161,7 +191,8 @@ export const AccountsView: React.FC<{
       });
     } });
   };
-  const actions = (account: ExternalAccount) => <Space wrap size={4}>{canVerifyAccount(account) && <Button type="link" size="small" disabled={busy} onClick={() => verify(account)}>验证</Button>}{account.canManage && <><Button type="link" size="small" disabled={busy} onClick={() => beginEdit(account)}>编辑</Button><Button type="text" size="small" disabled={busy} onClick={() => toggle(account)}>{account.enabled ? '停用' : '启用'}</Button><Button type="text" size="small" danger disabled={busy} onClick={() => remove(account)}>删除</Button></>}</Space>;
+  const personalJiraAccount = accounts.find(account => account.scope === 'PERSONAL' && account.provider === 'jira' && account.enabled);
+  const actions = (account: ExternalAccount) => <Space wrap size={4}>{account.scope === 'PERSONAL' && account.provider === 'jira' && account.enabled && <Button type="link" size="small" disabled={busy} onClick={() => syncJira(account)}>同步可见项目</Button>}{canVerifyAccount(account) && <Button type="link" size="small" disabled={busy} onClick={() => verify(account)}>验证</Button>}{account.canManage && <><Button type="link" size="small" disabled={busy} onClick={() => beginEdit(account)}>编辑</Button><Button type="text" size="small" disabled={busy} onClick={() => toggle(account)}>{account.enabled ? '停用' : '启用'}</Button><Button type="text" size="small" danger disabled={busy} onClick={() => remove(account)}>删除</Button></>}</Space>;
   const scopeLabel = (account: ExternalAccount) => account.scope === 'PERSONAL' ? '我的个人账号' : projects.find(item => item.id === account.projectId)?.name || '项目共享账号';
   const visible = accounts.filter(account =>
     (!providerFilter || account.provider === providerFilter) &&
@@ -172,11 +203,11 @@ export const AccountsView: React.FC<{
     { title: '账号', key: 'name', width: 260, render: (_, account) => <div className="tf-account-name"><Typography.Text strong>{account.name}</Typography.Text><Typography.Text type="secondary">{accountProviderName(account.provider)} · {scopeLabel(account)}</Typography.Text></div> },
     { title: '服务地址', dataIndex: 'baseUrl', render: value => <Typography.Text className="tf-account-url">{value}</Typography.Text> },
     { title: '状态', key: 'status', width: 180, render: (_, account) => <Flex vertical gap={6}><Space wrap size={[6, 6]}><StatusBadge variant={account.status === 'CONNECTED' ? 'green' : account.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(account.status)}</StatusBadge>{!account.enabled && <Tag>已停用</Tag>}</Space><Typography.Text type="secondary" className="tf-account-meta">{account.lastCheckedAt ? timeText(account.lastCheckedAt) : '尚未验证'}</Typography.Text>{account.lastError && <Typography.Text type="secondary" className="tf-account-meta">{account.lastError}</Typography.Text>}</Flex> },
-    { title: '操作', key: 'action', width: 232, render: (_, account) => actions(account) },
+    { title: '操作', key: 'action', width: 296, render: (_, account) => actions(account) },
   ];
   if (accessDenied) return null;
   return <div className="tf-accounts">
-    <Card className="tf-accounts-card" title="绑定的账号" extra={<Space wrap size={8}><Button icon={<RefreshCw size={15} />} loading={loading} disabled={busy} onClick={() => void refresh()}>刷新</Button><Button type="primary" icon={<Plus size={15} />} disabled={busy} onClick={beginCreate}>绑定账号</Button></Space>}>
+    <Card className="tf-accounts-card" title="绑定的账号" extra={<Space wrap size={8}>{personalJiraAccount && <Button icon={<RefreshCw size={15} />} disabled={busy} onClick={() => syncJira(personalJiraAccount)}>按 Jira 权限同步项目</Button>}<Button icon={<RefreshCw size={15} />} loading={loading} disabled={busy} onClick={() => void refresh()}>刷新</Button><Button type="primary" icon={<Plus size={15} />} disabled={busy} onClick={beginCreate}>绑定账号</Button></Space>}>
       <Flex gap={12} wrap className="tf-account-toolbar">
         <Segmented aria-label="账号范围" value={filter} options={[{ label: '全部', value: 'all' }, { label: '我的账号', value: 'PERSONAL' }, { label: '项目共享', value: 'PROJECT' }]} onChange={value => setFilter(value)} />
         <Select aria-label="按平台筛选账号" allowClear placeholder="全部平台" value={providerFilter} options={ACCOUNT_PROVIDERS} onChange={setProviderFilter} />
@@ -221,6 +252,7 @@ export const AccountsView: React.FC<{
         {authMode === 'BASIC' && <Form.Item name="username" label="认证用户名" htmlFor="external-account-username" rules={[{ required: credentialRequired, message: '请输入认证用户名。' }]} extra={editing && !credentialRequired ? '用户名不会回显，留空沿用已保存身份。' : undefined}><Input id="external-account-username" autoComplete="off" /></Form.Item>}
         <Form.Item name="token" label={authMode === 'BASIC' ? '密码或访问令牌' : '访问令牌'} htmlFor="external-account-token" rules={[{ required: credentialRequired, message: '请输入此账号的访问凭据。' }]} extra={editing?.hasCredential && !credentialRequired ? '已保存凭据不回显；同服务来源与认证方式时，留空可沿用。' : '仅提交到本平台服务端加密保存，不会存入浏览器本地缓存。'}><Input.Password id="external-account-token" autoComplete="new-password" /></Form.Item>
         {provider === 'yunxiao' && <Form.Item name="organizationId" label="云效组织 ID" htmlFor="external-account-organization" rules={[{ required: true, message: '请输入云效组织 ID。' }]}><Input id="external-account-organization" autoComplete="off" /></Form.Item>}
+        {!editing && selectedScope === 'PERSONAL' && provider === 'jira' && <Form.Item name="autoSyncJiraProjects" valuePropName="checked"><Checkbox>保存后自动验证并按我的 Jira 权限同步可见项目（仅加入平台已接入且你有权访问的项目，不会越权提升审批角色）</Checkbox></Form.Item>}
         {editing && <Typography.Text type="secondary" className="tf-account-meta">按打开时的版本 v{editing.version} 保存，避免覆盖其他会话的修改。</Typography.Text>}
       </Form>
     </Drawer>

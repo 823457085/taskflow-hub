@@ -32,4 +32,24 @@ export const createAccount = (draft: AccountDraft) => api<{ account: ExternalAcc
 export const updateAccount = (id: string, expectedVersion: number, draft: Partial<Omit<AccountDraft, 'provider' | 'scope' | 'projectId'>> & { enabled?: boolean }) => api<{ account: ExternalAccount }>('accounts/' + encodeURIComponent(id), { expectedVersion, ...draft }, 'PATCH');
 export const deleteAccount = (id: string, expectedVersion: number) => api<void>('accounts/' + encodeURIComponent(id) + '?expectedVersion=' + expectedVersion, undefined, 'DELETE');
 export const selectAccount = (projectId: string, provider: string, accountId: string | null) => api<unknown>('accounts/select', { projectId, provider, accountId });
+export interface PersonalJiraProjectMatch {
+  id: string;
+  key: string;
+  name: string;
+  role: string;
+  jiraKey: string;
+  joined: boolean;
+}
+export interface PersonalJiraProjectSyncResult {
+  account?: ExternalAccount;
+  identity?: { id?: string; displayName?: string; name?: string };
+  joinedProjects: PersonalJiraProjectMatch[];
+  matchedProjects: PersonalJiraProjectMatch[];
+  joinedCount: number;
+  matchedCount: number;
+  autoSelectedCount: number;
+  remoteVisibleCount: number;
+  unmatchedRemoteCount: number;
+}
 export const verifyAccount = (id: string, expectedVersion: number, projectId?: string) => api<{ account?: ExternalAccount; identity?: { displayName?: string; name?: string } }>('accounts/' + encodeURIComponent(id) + '/test', { expectedVersion, ...(projectId ? { projectId } : {}) });
+export const syncPersonalJiraProjects = (id: string, expectedVersion: number, autoSelect = true) => api<PersonalJiraProjectSyncResult>('accounts/' + encodeURIComponent(id) + '/sync-jira-projects', { expectedVersion, autoSelect });
