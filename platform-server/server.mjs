@@ -206,7 +206,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (teamSkills({ method, path, url, user, body: requestBody, send })) return;
       if (await connectors({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       user = auth(req);
-      if (method === 'GET' && path === '/api/me') return send(200, { user: publicUser(user), permissions: globalPermissions(user), ...(user.localDevice ? { authorization: { kind: 'LOCAL_DEVICE', deviceId: user.localDevice.id, projectIds: JSON.parse(user.localDevice.project_ids), expiresAt: new Date(user.localDevice.expires_at).toISOString() } } : {}) });
+      if (method === 'GET' && path === '/api/me') return send(200, { user: publicUser(user), permissions: globalPermissions(user), workbench: { enabled: Boolean(workbenchGateway && !user.localDevice), mode: workbenchGateway && !user.localDevice ? workbenchMode : null }, ...(user.localDevice ? { authorization: { kind: 'LOCAL_DEVICE', deviceId: user.localDevice.id, projectIds: JSON.parse(user.localDevice.project_ids), expiresAt: new Date(user.localDevice.expires_at).toISOString() } } : {}) });
       if (method === 'POST' && path === '/api/logout') { transaction(() => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(user.token_hash); localDevices.logout(user); audit(user.id, 'LOGOUT', user.id); }); return send(204, undefined, { 'Set-Cookie': `taskflow_session=; ${cookieFlags}; Max-Age=0` }); }
       if (path === '/api/users') {
         if (!globalPermissions(user).manageUsers) fail(403, 'FORBIDDEN', '当前角色无权管理用户');

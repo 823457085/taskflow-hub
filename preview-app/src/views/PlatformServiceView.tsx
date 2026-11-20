@@ -220,7 +220,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     jiraTasksRefreshPending.current = false;
     taskCreateSequence.current += 1;
     refreshSequence.current += 1; projectIdRef.current = '';
-    setUser(null); setTasks([]); setAllTasks([]); setProjects([]); setMembers([]); setCandidates([]); setUsers([]); setPlatformPermissions(NO_PLATFORM_PERMISSIONS); setCreateOpen(false); setIntakeOpen(false); setQuickOpen(false); setShortcutsOpen(false); setPasswordOpen(false);
+    setUser(null); setWorkbenchSupported(null); setWorkbenchMode(null); setTasks([]); setAllTasks([]); setProjects([]); setMembers([]); setCandidates([]); setUsers([]); setPlatformPermissions(NO_PLATFORM_PERMISSIONS); setCreateOpen(false); setIntakeOpen(false); setQuickOpen(false); setShortcutsOpen(false); setPasswordOpen(false);
     clearTaskSelection(); setNewProjectOpen(false); resetFilters();
     if (!user) loginForm.resetFields();
     if (user) taskForm.resetFields();
@@ -238,7 +238,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     if (!isCurrent()) return;
     const sequence = ++refreshSequence.current;
     try {
-      const me = await api<{ user: User; permissions?: PlatformPermissions }>('me');
+      const me = await api<{ user: User; permissions?: PlatformPermissions; workbench?: { enabled: boolean; mode?: 'server' | 'relay' | null } }>('me');
       if (!isCurrent()) return;
       const platformAccess = normalizePlatformPermissions(me.permissions);
       const requestedTaskId = taskFromHash();
@@ -276,7 +276,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       projectIdRef.current = selectedProject?.id || '';
       try { if (selectedProject) sessionStorage.setItem('taskflow.project.' + me.user.id, selectedProject.id); } catch { /* No auth data is stored here. */ }
       const currentProjects = visibleProjects.map(item => item.id === selectedProject?.id ? { ...item, role: projectMembers.role || item.role, permissions: normalizeProjectPermissions(projectMembers.permissions) } : item);
-      setUser(me.user); setPlatformPermissions(platformAccess); setProjects(currentProjects); setProjectId(selectedProject?.id || '');
+      setUser(me.user); setWorkbenchSupported(typeof me.workbench?.enabled === 'boolean' ? me.workbench.enabled : null); setPlatformPermissions(platformAccess); setProjects(currentProjects); setProjectId(selectedProject?.id || '');
       setAllTasks(taskData.tasks); setTasks(taskData.tasks.filter(task => task.projectId === selectedProject?.id));
       setMembers(projectMembers.members.map(member => ({ ...member, canEditRole: member.canEditRole === true }))); setCandidates(projectMembers.candidates || []); setUsers(userData.users);
     } catch (error) {
@@ -341,10 +341,11 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
     };
   }, []);
   useEffect(() => { onSessionChange?.(!!user); }, [user?.id, onSessionChange]);
+  const [workbenchSupported, setWorkbenchSupported] = useState<boolean | null>(null);
   const [workbenchMode, setWorkbenchMode] = useState<'server' | 'relay' | null>(null);
   const workbenchAvailable = !!workbenchMode;
   useEffect(() => {
-    if (!user) { setWorkbenchMode(null); return; }
+    if (!user || workbenchSupported === false) { setWorkbenchMode(null); return; }
     let active = true;
     void api<{ url: string; online: boolean; mode?: 'server' | 'relay' }>('workbench/status').then(result => { if (active) setWorkbenchMode(result.mode === 'server' ? 'server' : 'relay'); }).catch(() => { if (active) setWorkbenchMode(null); });
     const params = new URLSearchParams(window.location.search);
@@ -354,7 +355,7 @@ export const PlatformServiceView: React.FC<{ section?: WorkspaceSection; onSessi
       void api<{ url: string }>('workbench/codes', { return: returnTo }).then(result => { if (active) window.location.replace(result.url); }).catch(handleError);
     }
     return () => { active = false; };
-  }, [user?.id]);
+  }, [user?.id, workbenchSupported]);
   const openWorkbench = () => {
     const tab = window.open('', '_blank');
     if (tab) tab.opener = null;

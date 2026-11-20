@@ -52,7 +52,9 @@ test('HTTP authentication, role boundaries, tracked work and persistence', async
     const login = await call('/api/login', 'POST', { username: 'admin', password });
     assert.equal(login.status, 200); const adminToken = login.body.token;
     assert.match(login.headers.get('set-cookie'), /HttpOnly; SameSite=Strict/);
-    assert.equal((await call('/api/me', 'GET', undefined, undefined, { Cookie: login.headers.get('set-cookie').split(';')[0] })).body.user.role, 'ADMIN');
+    const me = await call('/api/me', 'GET', undefined, undefined, { Cookie: login.headers.get('set-cookie').split(';')[0] });
+    assert.equal(me.body.user.role, 'ADMIN');
+    assert.deepEqual(me.body.workbench, { enabled: false, mode: null });
     assert.equal((await call('/api/users', 'POST', { username: 'developer', password, role: 'DEV' }, adminToken)).status, 201);
     assert.equal((await call('/api/users', 'POST', { username: 'quality', password, role: 'QA' }, adminToken)).status, 201);
     const dev = (await call('/api/login', 'POST', { username: 'developer', password })).body;

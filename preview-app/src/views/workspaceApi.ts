@@ -228,7 +228,8 @@ export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...
     })();
     if (canDedupe) {
       inFlightGets.set(path, execute);
-      void execute.finally(() => { if (inFlightGets.get(path) === execute) inFlightGets.delete(path); });
+      const clearInFlight = () => { if (inFlightGets.get(path) === execute) inFlightGets.delete(path); };
+      void execute.then(clearInFlight, clearInFlight);
     }
     return execute;
   };
