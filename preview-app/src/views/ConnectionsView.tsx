@@ -1,28 +1,33 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
-import { App, Badge, Button, Card, Collapse, Descriptions, Divider, Flex, Form, Input, Segmented, Select, Skeleton, Space, Table, Tabs, Tag, Typography } from 'antd';
+import { App, Badge, Button, Card, Descriptions, Divider, Flex, Form, Input, Segmented, Select, Skeleton, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { Check, ClipboardPaste, Copy, ExternalLink, KeyRound, Link2, MoreHorizontal, RefreshCw, Search, ShieldCheck } from 'lucide-react';
-import { api, ApiError, ASSET_ROLES, type AssetKind, JiraIssueMetadata, JiraProject, PlatformPermissions, Project, projectGroup, Role, timeText, User, WorkTask } from './workspaceApi';
+import { Check, ClipboardPaste, Copy, ExternalLink, KeyRound, RefreshCw, Search } from 'lucide-react';
+import { api, ApiError, ASSET_ROLES, type AssetKind, isChildTask, JiraIssueMetadata, JiraProject, PlatformPermissions, Project, projectGroup, Role, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
 import { parseSourceReference, type SourceProvider } from './sourceReference';
 import { AccountUsageSelector } from './AccountUsageSelector';
+import { GITHUB_API_ORIGIN, listAccounts, syncPersonalJiraProjects } from './accountApi';
 import { navigateWorkspace, openTaskRoute } from './workspaceNavigation';
 import { isTaskFrozen } from './taskAvailability';
 import { assetKindLabel, authModeLabel, connectorStatusLabel, mrStateLabel } from './displayLabels';
 import { clearSearchOnEscape } from './uiPreferences';
+import { ConnectionsAutomationPanel } from './ConnectionsAutomationPanel';
+import { LinkifiedText } from './MarkdownPreview';
 import './ConnectionsView.css';
 
-type Provider = 'jira' | 'confluence' | 'gitlab' | 'jenkins' | 'yunxiao';
+type Provider = 'jira' | 'confluence' | 'gitlab' | 'github' | 'jenkins' | 'yunxiao';
 type AuthMode = 'BEARER' | 'BASIC' | 'PRIVATE_TOKEN' | 'NONE';
 type Connector = { provider: Provider; name: string; status: string; baseUrl?: string; authMode?: AuthMode; hasCredential?: boolean; organizationId?: string; lastCheckedAt?: string; lastError?: string; localProfileAvailable?: boolean; capabilities?: string[]; readOnly: boolean; accountId?: string; accountName?: string; accountScope?: 'PERSONAL' | 'PROJECT'; selectionUnavailable?: boolean };
 type ResourceItem = Record<string, unknown> & JiraIssueMetadata;
 type ReadResult = JiraIssueMetadata & { resource: string; items?: ResourceItem[]; total?: number; title?: string; status?: string; content?: string; externalUrl?: string; version?: string | number };
+const writableMainTasks = (tasks: WorkTask[]) => tasks.filter(task => !isChildTask(task) && !isTaskFrozen(task, tasks));
 type ConfigValues = { baseUrl: string; authMode: AuthMode; username?: string; token?: string; organizationId?: string };
 const RESOURCES: Record<Provider, { value: string; label: string }[]> = {
   jira: [{ value: 'jira_issues', label: '搜索 Jira 任务' }, { value: 'jira_issue', label: '读取单个任务' }],
   confluence: [{ value: 'confluence_page', label: '读取 Confluence 页面' }],
   gitlab: [{ value: 'gitlab_mr', label: '读取合并请求' }],
+  github: [{ value: 'github_repo', label: '读取仓库信息' }, { value: 'github_pull', label: '读取 Pull Request' }],
   jenkins: [{ value: 'jenkins_jobs', label: '读取 Job 列表' }, { value: 'jenkins_build', label: '读取构建结果' }],
   yunxiao: [
     { value: 'yunxiao_mrs', label: '读取 Codeup 合并请求列表' },
@@ -32,8 +37,8 @@ const RESOURCES: Record<Provider, { value: string; label: string }[]> = {
     { value: 'yunxiao_run', label: '读取运行记录' },
   ],
 };
-const NAMES: Record<Provider, string> = { jira: 'Jira', confluence: 'Confluence', gitlab: 'GitLab', jenkins: 'Jenkins', yunxiao: '云效' };
-const IMPORT_KINDS: Record<Provider, AssetKind[]> = { jira: [], confluence: ['PRD', 'TECH_SPEC'], gitlab: ['CODE'], jenkins: ['RELEASE_PLAN'], yunxiao: ['CODE', 'RELEASE_PLAN'] };
+const NAMES: Record<Provider, string> = { jira: 'Jira', confluence: 'Confluence', gitlab: 'GitLab', github: 'GitHub', jenkins: 'Jenkins', yunxiao: '云效' };
+const IMPORT_KINDS: Record<Provider, AssetKind[]> = { jira: [], confluence: ['PRD', 'TECH_SPEC'], gitlab: ['CODE'], github: [], jenkins: ['RELEASE_PLAN'], yunxiao: ['CODE', 'RELEASE_PLAN'] };
 const text = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 const required = (name: string) => ({ required: true, whitespace: true, message: `请输入${name}。` });
 const positiveId = { pattern: /^[1-9]\d*$/, message: '请输入有效的正整数 ID。' };
@@ -48,10 +53,10 @@ const ConnectionConfigForm: React.FC<{ connection?: Connector; provider: Provide
   const authMode = Form.useWatch('authMode', form) as AuthMode | undefined;
   const baseUrl = Form.useWatch('baseUrl', form) as string | undefined;
   const credentialRequired = !connection?.hasCredential || (authMode || defaultAuth) !== connection.authMode || differentOrigin(baseUrl ?? connection.baseUrl, connection.baseUrl);
-  return <Form form={form} layout="vertical" requiredMark="optional" disabled={disabled} initialValues={{ baseUrl: connection?.baseUrl || '', authMode: defaultAuth, username: '', token: '', organizationId: connection?.organizationId || '' }} onFinish={values => onSubmit(values, () => form.setFieldValue('token', ''))}>
-    <Form.Item name="baseUrl" label="平台地址" rules={[required('平台地址'), { type: 'url', message: '请输入有效的平台地址。' }]}><Input placeholder="https://" autoComplete="off" /></Form.Item>
+  return <Form form={form} layout="vertical" requiredMark="optional" disabled={disabled} initialValues={{ baseUrl: provider === 'github' ? GITHUB_API_ORIGIN : connection?.baseUrl || '', authMode: defaultAuth, username: '', token: '', organizationId: connection?.organizationId || '' }} onFinish={values => onSubmit(values, () => form.setFieldValue('token', ''))}>
+    <Form.Item name="baseUrl" label="平台地址" rules={[required('平台地址'), { type: 'url', message: '请输入有效的平台地址。' }]}><Input placeholder="https://" autoComplete="off" readOnly={provider === 'github'} /></Form.Item>
     <div className="tf-connection-form-grid">
-      <Form.Item name="authMode" label="认证方式" rules={[{ required: true, message: '请选择认证方式。' }]}><Select options={['BEARER', 'BASIC', 'PRIVATE_TOKEN'].map(value => ({ value, label: authModeLabel(value) }))} /></Form.Item>
+      <Form.Item name="authMode" label="认证方式" rules={[{ required: true, message: '请选择认证方式。' }]}><Select disabled={disabled || provider === 'github'} options={['BEARER', 'BASIC', 'PRIVATE_TOKEN'].map(value => ({ value, label: authModeLabel(value) }))} /></Form.Item>
       {(authMode || defaultAuth) === 'BASIC' && <Form.Item name="username" label="用户名" rules={[{ required: credentialRequired, message: '请输入用户名。' }]}><Input autoComplete="off" /></Form.Item>}
     </div>
     <Form.Item name="token" label="访问令牌" extra={connection?.hasCredential ? '已保存凭据；同一平台保留原认证方式时，留空可继续使用。' : '令牌仅用于服务端认证，保存后不回显。'} rules={[{ required: credentialRequired, message: '请输入访问令牌。' }]}><Input.Password autoComplete="new-password" /></Form.Item>
@@ -66,7 +71,6 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [active, setActive] = useState<Provider>('jira');
   const [operation, setOperation] = useState<string | null>('initial');
-  const [manualOpen, setManualOpen] = useState(false);
   const [resource, setResource] = useState('jira_issues');
   const [jql, setJql] = useState('assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC');
   const [issueKey, setIssueKey] = useState('');
@@ -111,10 +115,15 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
   const usingAccount = !!connection?.accountId || connection?.status === 'ACCOUNT_UNAVAILABLE' || operation === 'account-changing';
   const canConfigureLegacy = canManage && accountAligned && !usingAccount;
   const canImportJira = ['ADMIN', 'LEAD', 'PM'].includes(role);
+  const mainTaskOptions = writableMainTasks(tasks);
+  const findJiraTask = (key: string) => tasks.find(task => task.jiraKey.toUpperCase() === key.toUpperCase());
+  const isJiraChild = (issue: JiraIssueMetadata, key: string) => {
+    const local = findJiraTask(key);
+    return issue.issueType?.subtask === true || (local ? isChildTask(local) : !!(issue.parentKey && findJiraTask(issue.parentKey)?.externalRef?.provider === 'jira'));
+  };
   const importKinds = (active === 'yunxiao'
     ? (['yunxiao_mr', 'yunxiao_commit'].includes(result?.resource || resource) ? (['CODE'] as AssetKind[]) : (['RELEASE_PLAN'] as AssetKind[]))
     : IMPORT_KINDS[active]).filter(value => ASSET_ROLES[value].includes(role));
-  const readyCount = connectors.filter(item => item.status === 'CONNECTED').length;
   const notify = (value: string) => { void message.success(value); };
   const handleAccessError = (error: unknown, expected: number) => {
     if (!(error instanceof ApiError) || ![401, 403].includes(error.status)) return false;
@@ -123,7 +132,7 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     else {
       generation.current += 1;
       operationPending.current = false;
-      setAccessDenied(true); setOperation(null); setManualOpen(false);
+      setAccessDenied(true); setOperation(null);
       setResult(null); setReadParameters(null); setConnectors([]); setTasks([]); setTaskId('');
       setCatalog(null); setSelectedProjectIds([]); resourceForm.resetFields();
       setIssueKey(''); setPageId(''); setRepositoryId(''); setMrIid(''); setJobName('');
@@ -141,7 +150,7 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     ]);
     if (expected !== generation.current) return;
     setConnectors(data.connectors); setTasks(taskData.tasks);
-    const writable = taskData.tasks.filter(task => !isTaskFrozen(task, taskData.tasks));
+    const writable = writableMainTasks(taskData.tasks);
     setTaskId(current => writable.some(task => task.id === current) ? current : writable[0]?.id || '');
     return data.connectors;
   };
@@ -163,7 +172,7 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     finally { if (expected === generation.current) { operationPending.current = false; setOperation(null); } }
   };
   useEffect(() => {
-    generation.current += 1; operationPending.current = false; setAccessDenied(false); setResult(null); setReadParameters(null); setConnectors([]); setTasks([]); setTaskId(''); setCatalog(null); setSelectedProjectIds([]); setManualOpen(false);
+    generation.current += 1; operationPending.current = false; setAccessDenied(false); setResult(null); setReadParameters(null); setConnectors([]); setTasks([]); setTaskId(''); setCatalog(null); setSelectedProjectIds([]);
     setIssueKey(''); setPageId(''); setRepositoryId(''); setMrIid(''); setJobName(''); setBuildNumber('lastSuccessfulBuild'); setPipelineId(''); setRunId('');
     setSourceReference(''); setInputMode('link'); setJiraPreset('mine'); setBuildPreset('lastSuccessfulBuild'); setJobOptions([]); setPipelineOptions([]);
     resourceForm.resetFields();
@@ -171,7 +180,7 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     return () => { generation.current += 1; operationPending.current = false; };
   }, [projectId, roleCanManage, role, user.id, user.role]);
   useEffect(() => {
-    setCatalog(null); setSelectedProjectIds([]); setManualOpen(false); setResult(null); setReadParameters(null);
+    setCatalog(null); setSelectedProjectIds([]); setResult(null); setReadParameters(null);
     const nextResource = RESOURCES[active][0].value;
     const scope = project?.jira ? `project = ${JSON.stringify(project.jira.key)} AND ` : '';
     const nextJql = `${scope}assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`;
@@ -212,7 +221,7 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     if (currentAccountScope.current !== accountScope) return;
     generation.current += 1; operationPending.current = true; setOperation('account-changing');
     alignmentAttempt.current = undefined;
-    setConnectors([]); setManualOpen(false); setResult(null); setReadParameters(null);
+    setConnectors([]); setResult(null); setReadParameters(null);
     setCatalog(null); setSelectedProjectIds([]); setJobOptions([]); setPipelineOptions([]);
     resourceForm.resetFields();
   };
@@ -225,6 +234,8 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     ...(resource === 'jira_issues' && !overrideIssue ? { jql, limit: 20 } : {}),
     ...(overrideIssue || resource === 'jira_issue' ? { issueKey: overrideIssue || issueKey } : {}),
     ...(resource === 'confluence_page' ? { pageId } : {}), ...(resource === 'gitlab_mr' ? { repositoryId, mrIid } : {}),
+    ...(resource === 'github_repo' || resource === 'github_pull' ? { repository: repositoryId.trim() } : {}),
+    ...(resource === 'github_pull' ? { pullNumber: mrIid.trim() } : {}),
     ...(resource === 'yunxiao_mr' ? { repositoryId, mrLocalId: mrIid } : {}),
     ...(resource === 'jenkins_build' ? { jobName, buildNumber } : {}), ...(resource === 'yunxiao_run' ? { pipelineId, runId } : {}),
   });
@@ -242,9 +253,13 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     if (active === 'jira' && !canImportJira) return;
     if (active !== 'jira' && !importKinds.includes(kind)) return;
     if (active === 'jira' && !project?.jira) throw new Error('请先同步并切换到对应的 Jira 项目，再导入任务。');
-    if (active !== 'jira' && !tasks.some(task => task.id === taskId && !isTaskFrozen(task, tasks))) throw new Error('请选择可编辑的本地任务。');
+    if (active !== 'jira' && !mainTaskOptions.some(task => task.id === taskId)) throw new Error('请选择可编辑的主任务。');
+    if (active === 'jira') {
+      const issue = overrideIssue ? result.items?.find(item => text(item.key) === overrideIssue) : result;
+      if (!issue || isJiraChild(issue, overrideIssue || text(readParameters.issueKey))) return;
+    }
     const source = overrideIssue ? { projectId, accountId: readParameters.accountId, resource: 'jira_issue', issueKey: overrideIssue } : readParameters;
-    const data = await api<{ imported: boolean; task?: WorkTask; asset?: { revision: number } }>(`connectors/${active}/import`, { ...source, ...(active !== 'jira' ? { taskId, kind } : {}) });
+    const data = await api<{ imported: boolean }>(`connectors/${active}/import`, { ...source, ...(active !== 'jira' ? { taskId, kind } : {}) });
     if (expected !== generation.current) return;
     notify(data.imported ? '已导入本项目，原始来源与版本已保留。' : '此来源版本已存在，未重复导入。');
     await refresh(expected);
@@ -328,15 +343,16 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
   ];
   const itemColumns: TableColumnsType<ResourceItem> = active === 'jira' ? [
     { title: 'Jira 任务', render: (_, item) => {
-      const existingTask = tasks.find(t => t.jiraKey.toUpperCase() === text(item.key).toUpperCase());
+      const existingTask = findJiraTask(text(item.key));
       return <Space orientation="vertical" size={4}><Space size={6} wrap><Typography.Text code>{text(item.key)}</Typography.Text>{existingTask && <Tag color="blue">已在工作台</Tag>}</Space><Typography.Text strong>{text(item.summary)}</Typography.Text><Typography.Text type="secondary">{item.type}{item.priority ? ` · ${item.priority.name}` : ''}</Typography.Text></Space>;
     } },
     { title: 'Jira 状态', width: 140, render: (_, item) => <StatusBadge variant="blue">{text(item.status)}</StatusBadge> },
     { title: '修复版本', width: 160, render: (_, item) => item.fixVersions?.map(version => version.name).join(' · ') || '—' },
     { title: '操作', width: 168, render: (_, item) => {
-      const existingTask = tasks.find(t => t.jiraKey.toUpperCase() === text(item.key).toUpperCase());
+      const existingTask = findJiraTask(text(item.key));
+      if (isJiraChild(item, text(item.key))) return null;
       if (existingTask) return <Button size="small" type="link" disabled={busy} onClick={() => openTaskRoute(existingTask.id, { from: 'connections' })}>打开任务</Button>;
-      return canImportJira ? <Button size="small" disabled={busy || !project?.jira} onClick={() => importResource(text(item.key))}>导入任务</Button> : <Button size="small" disabled={busy} onClick={() => navigateWorkspace('tasks')}>到任务中心接入</Button>;
+      return canImportJira ? <Button size="small" disabled={busy || !project?.jira} onClick={() => importResource(text(item.key))}>导入任务</Button> : <Button size="small" disabled={busy} onClick={() => navigateWorkspace('tasks')}>到需求中心接入</Button>;
     } },
   ] : result?.resource === 'yunxiao_mrs' ? [
     { title: 'Codeup 合并请求', render: (_, item) => <Space orientation="vertical" size={4}><Typography.Text strong>{text(item.name)}</Typography.Text><Typography.Text type="secondary">{text(item.repositoryName)} · <code>{text(item.sourceBranch)} → {text(item.targetBranch)}</code> · {mrStateLabel(text(item.state))}</Typography.Text></Space> },
@@ -349,17 +365,46 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
     { title: '操作', width: 120, render: (_, item) => active === 'jenkins' ? !item.isFolder ? <Button size="small" disabled={busy} onClick={() => selectJob(item)}>选择 Job</Button> : null : <Button size="small" disabled={busy} onClick={() => selectPipeline(item)}>选择流水线</Button> },
   ];
 
+  const syncPersonalProjects = () => run(async expected => {
+    if (!connection?.accountId || connection.accountScope !== 'PERSONAL' || active !== 'jira') return;
+    const listed = await listAccounts();
+    if (expected !== generation.current) return;
+    const target = listed.accounts.find(item => item.id === connection.accountId);
+    if (!target) { void message.error('所选个人 Jira 账号不存在或已不可用。'); return; }
+    const synced = await syncPersonalJiraProjects(target.id, target.version, true);
+    if (expected !== generation.current) return;
+    const extra = synced.unmatchedRemoteCount > 0 ? `；另有 ${synced.unmatchedRemoteCount} 个远端 Jira 项目尚未由管理员同步到平台` : '';
+    notify(synced.joinedCount > 0
+      ? `已按你的 Jira 权限同步可见项目：新增 ${synced.joinedCount} 个，共匹配 ${synced.matchedCount} 个${extra}。`
+      : `已按你的 Jira 权限校验：当前共匹配 ${synced.matchedCount} 个平台项目，无需新增${extra}。`);
+    await onProjectsChanged?.(synced.joinedProjects[0]?.id || projectId);
+  }, 'sync-personal');
   return <div className="tf-connections">
-    <Card className="tf-connections-summary">
-      <Flex align="center" justify="space-between" gap={16} wrap>
-        <Flex align="center" gap={12}><span className="tf-connections-icon"><Link2 size={20} /></span><div><Typography.Text strong>平台读取</Typography.Text><Typography.Paragraph type="secondary">当前项目 {readyCount} / {connectors.length || 5} 个平台已验证 · 仅只读访问外部系统</Typography.Paragraph></div></Flex>
-        <Button icon={<RefreshCw size={16} />} disabled={busy || !projectId} loading={operation === 'refresh'} onClick={() => void run(refresh, 'refresh')}>刷新状态</Button>
-      </Flex>
-    </Card>
-    <Card className="tf-connections-provider-card">
-      <Tabs more={{ trigger: 'click', icon: <MoreHorizontal size={16} aria-label="更多页签" /> }} locale={{ dropdownAriaLabel: '更多页签' }} aria-label="外部平台" activeKey={active} onChange={key => setActive(key as Provider)} items={(Object.keys(NAMES) as Provider[]).map(provider => { const item = connectors.find(row => row.provider === provider); return { key: provider, disabled: busy, label: <Space size={8}><span>{item?.name || NAMES[provider]}</span>{item && <Badge status={item.status === 'CONNECTED' ? 'success' : item.status === 'ERROR' ? 'error' : 'default'} />}</Space> }; })} />
+    <Card className="tf-connections-provider-card" title="外部平台" extra={
+      <Space size={8} wrap>
+        {projectId && !accessDenied && <Button type="text" size="small" onClick={() => document.getElementById('tf-project-automation')?.scrollIntoView({ block: 'start' })}>自动化配置</Button>}
+        <Button size="small" icon={<RefreshCw size={15} />} disabled={busy || !projectId} loading={operation === 'refresh'} onClick={() => void run(refresh, 'refresh')}>刷新状态</Button>
+      </Space>
+    }>
+      <nav className="tf-connection-provider-nav" aria-label="外部平台">
+        {(Object.keys(NAMES) as Provider[]).map(provider => {
+          const item = connectors.find(row => row.provider === provider);
+          return (
+            <Button
+              key={provider}
+              aria-pressed={active === provider}
+              type={active === provider ? 'default' : 'text'}
+              disabled={busy}
+              onClick={() => setActive(provider)}
+            >
+              {item?.name || NAMES[provider]}
+              {item && <Badge status={item.status === 'CONNECTED' ? 'success' : item.status === 'ERROR' || item.status === 'ACCOUNT_UNAVAILABLE' ? 'error' : 'default'} aria-label={connectorStatusLabel(item.status)} />}
+            </Button>
+          );
+        })}
+      </nav>
       <Skeleton active loading={operation === 'initial' && !connectors.length} paragraph={{ rows: 4 }}>
-        <Flex vertical gap={24}>
+        <Flex vertical gap={16}>
           <Flex justify="space-between" align="flex-start" gap={16} wrap>
             <Space orientation="vertical" size={8}>
               <Typography.Title level={4}>{connection?.name || NAMES[active]} 连接</Typography.Title>
@@ -368,30 +413,19 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
               {accountAligned && connection?.baseUrl && <Typography.Text type="secondary" className="tf-break-anywhere">{connection.baseUrl}</Typography.Text>}
               {(accountAligned || connection?.status === 'ACCOUNT_UNAVAILABLE') && connection?.lastError && <Typography.Text type="danger" className="tf-break-anywhere">{connection.lastError}</Typography.Text>}
             </Space>
-            <ShieldCheck size={22} className="tf-connections-shield" />
           </Flex>
           <div className="tf-connection-account"><AccountUsageSelector key={accountScope} userId={user.id} projectId={projectId} provider={active} disabled={busy || accessDenied} onChanging={changeAccountStart} onChanged={changeAccountComplete} onResolved={resolveAccount} onUnauthorized={onUnauthorized} onForbidden={() => { handleAccessError(new ApiError('', 403), generation.current); }} /></div>
           <Flex wrap gap={8}>
-            {canConfigureLegacy && platformPermissions.reuseLocalCredentials && connection?.localProfileAvailable && <Button type={!connection?.hasCredential && !manualOpen ? 'primary' : 'default'} icon={<KeyRound size={16} />} disabled={busy} loading={operation === 'reuse'} onClick={() => void run(async expected => { await api(`connectors/${active}/reuse-local`, { projectId }); if (expected !== generation.current) return; await testConnection(expected); }, 'reuse')}>复用本机配置并验证</Button>}
-            {canRead && <Button type={connection?.hasCredential && connection.status !== 'CONNECTED' && !manualOpen ? 'primary' : 'default'} icon={<Check size={16} />} disabled={busy || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} loading={operation === 'test'} onClick={() => void run(testConnection, 'test')}>验证连接</Button>}
-            {canConfigureLegacy && <Button disabled={busy} onClick={() => setManualOpen(current => !current)} aria-expanded={manualOpen}>{manualOpen ? '收起配置' : '配置项目默认连接'}</Button>}
+            {canConfigureLegacy && platformPermissions.reuseLocalCredentials && connection?.localProfileAvailable && <Button type={!connection?.hasCredential ? 'primary' : 'default'} icon={<KeyRound size={16} />} disabled={busy} loading={operation === 'reuse'} onClick={() => void run(async expected => { await api(`connectors/${active}/reuse-local`, { projectId }); if (expected !== generation.current) return; await testConnection(expected); }, 'reuse')}>复用本机配置并验证</Button>}
+            {canRead && <Button type={connection?.hasCredential && connection.status !== 'CONNECTED' ? 'primary' : 'default'} icon={<Check size={16} />} disabled={busy || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} loading={operation === 'test'} onClick={() => void run(testConnection, 'test')}>验证连接</Button>}
+            {active === 'jira' && accountAligned && connection?.accountScope === 'PERSONAL' && connection?.accountId && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={operation === 'sync-personal'} onClick={() => void syncPersonalProjects()}>按 Jira 权限同步可见项目</Button>}
             <Button disabled={busy} onClick={() => navigateWorkspace('accounts')}>管理账号</Button>
           </Flex>
-          {!canRead && !accessDenied && <Typography.Paragraph type="secondary">选择自己的账号或可用的项目共享账号后，即可读取平台资源。</Typography.Paragraph>}
-          {manualOpen && canConfigureLegacy && <div className="tf-connection-form-wrap">
-            <Divider />
-            <ConnectionConfigForm key={`${projectId}:${active}`} connection={connection} provider={active} disabled={busy} loading={operation === 'configure'} onSubmit={(values, clearToken) => void run(async expected => {
-              const saved = await api<{ connector: Connector }>(`connectors/${active}/config`, { projectId, baseUrl: values.baseUrl, authMode: values.authMode, ...(values.username ? { username: values.username } : {}), ...(values.token ? { token: values.token } : {}), ...(values.organizationId ? { organizationId: values.organizationId } : {}) });
-              if (expected !== generation.current) return;
-              setConnectors(current => [...current.filter(item => item.provider !== active), saved.connector]);
-              clearToken(); notify('连接配置已保存。'); await testConnection(expected);
-            }, 'configure')} />
-          </div>}
+          {projectId && !canRead && !accessDenied && !busy && <Typography.Text type="secondary">选择可用账号后即可读取资源。</Typography.Text>}
         </Flex>
       </Skeleton>
     </Card>
     {active === 'jira' && canManage && platformPermissions.syncJiraProjects && <Card className="tf-connection-catalog" title="Jira 项目目录" extra={<Button size="small" icon={<Search size={15} />} disabled={busy || !accountAligned || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} loading={operation === 'catalog'} onClick={readCatalog}>读取项目目录</Button>}>
-      <Typography.Paragraph type="secondary">同步保留项目原名与官方分类；未设置分类时按名称前缀分组。项目成员与其他平台连接不会一并复制。</Typography.Paragraph>
       {catalog ? <Flex vertical gap={16}>
         <Flex gap={8} wrap align="center" justify="space-between">
           <Input
@@ -421,13 +455,17 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
         <Flex justify="space-between" align="center" gap={12} wrap><Typography.Text type="secondary">已选择 {selectedProjectIds.length} / {catalog.length} 个可见项目</Typography.Text><Button type="primary" disabled={busy || !accountAligned || !selectedProjectIds.length} loading={operation === 'sync'} onClick={syncCatalog}>同步已选项目（{selectedProjectIds.length}）</Button></Flex>
       </Flex> : <Typography.Text type="secondary">读取目录后，可选择需要同步的 Jira 项目。</Typography.Text>}
     </Card>}
-    {canRead && <Card title={active === 'jira' && !canImportJira || active !== 'jira' && !importKinds.length ? '读取资源' : '读取与导入'}>
-      <Flex vertical gap={24}>
+    {canRead && connection?.hasCredential && <Card title={active === 'jira' && !canImportJira || active !== 'jira' && !importKinds.length ? '读取资源' : '读取与导入'}>
+      <Flex vertical gap={16}>
         {active === 'jira' && <Typography.Paragraph type="secondary">{project?.jira ? <>当前归属：{project.jira.key} · {project.jira.name}。任务查询和导入受此 Jira 项目范围约束。</> : '当前是本地项目。请先同步并切换到对应的 Jira 项目，再导入任务。'}</Typography.Paragraph>}
         <Form form={resourceForm} className="tf-connection-resource-form" layout="vertical" requiredMark="optional" disabled={busy || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} initialValues={{ resource, jql, jiraPreset: 'mine', buildPreset: 'lastSuccessfulBuild', buildNumber }} onFinish={readResource}>
           <Form.Item name="resource" label="读取内容"><Select options={RESOURCES[active]} onChange={changeResource} /></Form.Item>
           {resource === 'jira_issues' && <><Form.Item name="jiraPreset" label="事项范围"><Select options={[{ value: 'mine', label: '连接账号的未完成事项' }, { value: 'open', label: '当前项目未完成事项', disabled: !project?.jira }, { value: 'recent', label: '最近更新的事项' }, { value: 'custom', label: '高级 JQL 查询' }]} onChange={selectJiraPreset} /></Form.Item>{jiraPreset === 'custom' && <Form.Item name="jql" label="JQL 查询" rules={[required('JQL 查询')]}><Input.TextArea autoSize={{ minRows: 3, maxRows: 7 }} className="tf-mono" onChange={event => setJql(event.target.value)} /></Form.Item>}</>}
           {resource === 'jira_issue' && <Form.Item name="issueKey" label="Jira 任务号" rules={[required('Jira 任务号'), { pattern: /^[A-Z][A-Z0-9]*-[1-9]\d*$/, message: '请输入有效的 Jira 任务号。' }]}><Input placeholder={project?.jira ? `${project.jira.key}-100` : 'PROJ-100'} onChange={event => setIssueKey(event.target.value)} /></Form.Item>}
+          {(resource === 'github_repo' || resource === 'github_pull') && <div className="tf-connection-form-grid">
+            <Form.Item name="repositoryId" label="仓库路径" rules={[required('仓库路径')]}><Input placeholder="owner/repository" onChange={event => setRepositoryId(event.target.value)} /></Form.Item>
+            {resource === 'github_pull' && <Form.Item name="mrIid" label="Pull Request 编号" rules={[required('Pull Request 编号'), positiveId]}><Input inputMode="numeric" onChange={event => setMrIid(event.target.value)} /></Form.Item>}
+          </div>}
           {supportsLink && <Segmented block className="tf-connection-input-mode" aria-label="来源输入方式" value={inputMode} options={[{ value: 'link', label: '粘贴来源链接' }, { value: 'manual', label: '高级参数' }]} onChange={value => { setInputMode(value === 'link' ? 'link' : 'manual'); setResult(null); setReadParameters(null); resourceForm.setFieldsValue({ sourceReference, pageId, repositoryId, mrIid, jobName, buildPreset, buildNumber }); }} />}
           {supportsLink && inputMode === 'link' ? <Form.Item name="sourceReference" label={active === 'confluence' ? 'Confluence 页面链接' : active === 'gitlab' ? 'GitLab MR 链接' : active === 'yunxiao' ? '云效 Codeup MR 或提交链接' : 'Jenkins Job 或构建链接'} preserve={false} rules={[required('来源链接'), { validator: (_, value: string) => { if (!value?.trim()) return Promise.resolve(); try { parseSourceReference(active as SourceProvider, value || '', connection?.baseUrl || ''); return Promise.resolve(); } catch (error) { return Promise.reject(error); } } }]} extra={active === 'jenkins' ? '粘贴 Job 链接时读取最近成功构建；构建链接会读取指定记录。' : active === 'yunxiao' ? '支持粘贴 https://codeup.aliyun.com/.../change/123 合并请求或 /commit/sha 链接。' : '自动识别页面或合并请求，不需要手动抄写 ID。'}><Input placeholder={active === 'confluence' ? 'https://…/pages/viewpage.action?pageId=123 或 /x/短链' : active === 'gitlab' ? 'https://…/group/repo/-/merge_requests/123' : active === 'yunxiao' ? 'https://codeup.aliyun.com/org/group/repo/change/1160' : 'https://…/job/service/123/'} autoComplete="off" onChange={event => setSourceReference(event.target.value)} /></Form.Item> : <>
             {resource === 'confluence_page' && <Form.Item name="pageId" label="页面 ID" rules={[required('页面 ID'), positiveId]}><Input inputMode="numeric" onChange={event => setPageId(event.target.value)} /></Form.Item>}
@@ -459,14 +497,39 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
               ...(result.version !== undefined ? [{ key: 'version', label: '来源版本', children: result.version }] : []),
             ]} />
             {result.externalUrl && <Typography.Link href={result.externalUrl} target="_blank" rel="noreferrer"><Space size={4}>查看来源<ExternalLink size={14} /></Space></Typography.Link>}
-            {result.content && <Collapse items={[{ key: 'source', label: '查看来源内容', extra: <Button size="small" type="text" icon={<Copy size={13} />} onClick={event => { event.stopPropagation(); void navigator.clipboard.writeText(result.content || '').then(() => message.success('来源内容已复制。')).catch(() => message.warning('复制失败，请手动选择复制。')); }}>复制内容</Button>, children: <pre className="tf-connection-source">{result.content}</pre> }]} defaultActiveKey={['source']} />}
+            {result.content && <section aria-label="来源内容" className="tf-connection-source-section">
+              <Flex align="center" justify="space-between" gap={8} wrap>
+                <Typography.Text strong>来源内容</Typography.Text>
+                <Button size="small" icon={<Copy size={13} />} onClick={() => void navigator.clipboard.writeText(result.content || '').then(() => message.success('来源内容已复制。')).catch(() => message.warning('复制失败，请手动选择复制。'))}>复制内容</Button>
+              </Flex>
+              <pre className="tf-connection-source">{active === 'jira' || active === 'confluence'
+                ? <LinkifiedText text={result.content} /> : result.content}</pre>
+            </section>}
             {active !== 'jira' && !!importKinds.length && <Form layout="vertical" className="tf-connection-resource-form">
-              <div className="tf-connection-form-grid"><Form.Item label="关联本地任务" required><Select value={taskId || undefined} disabled={busy} placeholder="选择任务" showSearch={{ optionFilterProp: 'label' }} options={tasks.filter(task => !isTaskFrozen(task, tasks)).map(task => ({ value: task.id, label: `${task.jiraKey} · ${task.title}` }))} onChange={setTaskId} /></Form.Item><Form.Item label="资产类型"><Select value={kind} disabled={busy} onChange={setKind} options={importKinds.map(value => ({ value, label: assetKindLabel(value) }))} /></Form.Item></div>
+              <div className="tf-connection-form-grid"><Form.Item label="关联主任务" required><Select value={taskId || undefined} disabled={busy} placeholder="选择主任务" showSearch={{ optionFilterProp: 'label' }} options={mainTaskOptions.map(task => ({ value: task.id, label: `${task.jiraKey} · ${task.title}` }))} onChange={setTaskId} /></Form.Item><Form.Item label="资产类型"><Select value={kind} disabled={busy} onChange={setKind} options={importKinds.map(value => ({ value, label: assetKindLabel(value) }))} /></Form.Item></div>
             </Form>}
-            {active === 'jira' && !canImportJira ? <div><Button type="primary" disabled={busy} onClick={() => navigateWorkspace('tasks')}>到任务中心接入</Button></div> : (active === 'jira' || !!importKinds.length) && <div><Button type="primary" disabled={busy || (active === 'jira' ? !project?.jira : !taskId || !importKinds.includes(kind))} loading={operation === 'import'} onClick={() => importResource()}>{active === 'jira' ? '导入任务' : '导入为资产新版本'}</Button></div>}
+            {active === 'jira' && !isJiraChild(result, text(readParameters?.issueKey)) && (canImportJira
+              ? <div><Button type="primary" disabled={busy || !project?.jira} loading={operation === 'import'} onClick={() => importResource()}>导入任务</Button></div>
+              : <div><Button type="primary" disabled={busy} onClick={() => navigateWorkspace('tasks')}>到需求中心接入</Button></div>)}
+            {active !== 'jira' && !!importKinds.length && <div><Button type="primary" disabled={busy || !mainTaskOptions.some(task => task.id === taskId) || !importKinds.includes(kind)} loading={operation === 'import'} onClick={() => importResource()}>导入为资产新版本</Button></div>}
           </Flex>}
         </div>}
       </Flex>
     </Card>}
+    {canConfigureLegacy && <Card title="项目默认连接" className="tf-connection-config-card">
+      <div className="tf-connection-form-wrap">
+        <ConnectionConfigForm key={`${projectId}:${active}`} connection={connection} provider={active} disabled={busy} loading={operation === 'configure'} onSubmit={(values, clearToken) => void run(async expected => {
+          const saved = await api<{ connector: Connector }>(`connectors/${active}/config`, { projectId, baseUrl: values.baseUrl, authMode: values.authMode, ...(values.username ? { username: values.username } : {}), ...(values.token ? { token: values.token } : {}), ...(values.organizationId ? { organizationId: values.organizationId } : {}) });
+          if (expected !== generation.current) return;
+          setConnectors(current => [...current.filter(item => item.provider !== active), saved.connector]);
+          clearToken(); notify('连接配置已保存。'); await testConnection(expected);
+        }, 'configure')} />
+      </div>
+    </Card>}
+    {projectId && !accessDenied && (
+      <section id="tf-project-automation" aria-label="项目自动化配置" className="tf-connection-automation">
+        <ConnectionsAutomationPanel key={JSON.stringify([user.id, projectId])} projectId={projectId} canManage={canManage} onUnauthorized={onUnauthorized} />
+      </section>
+    )}
   </div>;
 };

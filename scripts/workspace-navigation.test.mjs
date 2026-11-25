@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { assetKindFromRoute, clearTaskRoute, currentWorkspaceSection, navigateWorkspace, openTaskRoute, reviewStageFromRoute, SECTION_LABELS, taskReturnFilters } from '../preview-app/src/views/workspaceNavigation.ts';
+import { assetKindFromRoute, clearTaskRoute, closeTaskRoute, currentWorkspaceSection, displayWorkspaceSection, navigateWorkspace, openTaskRoute, requirementIdFromRoute, requirementReviewStageForSection, reviewStageFromRoute, SECTION_LABELS, taskReturnFilters } from '../preview-app/src/views/workspaceNavigation.ts';
 
 function environment(t, hash = '') {
   const previousLocation = globalThis.location; const previousWindow = globalThis.window;
@@ -116,4 +116,38 @@ test('invalid task routes clear workflow return metadata and reject mismatched f
   assert.deepEqual(taskReturnFilters('#view=tasks&task=x&from=reviews&fromStage=constructor'), {});
   clearTaskRoute();
   assert.equal(location.hash, '#view=tasks');
+});
+
+test('review workspaces keep the selected requirement when reopening a task drawer and returning', t => {
+  environment(t, '#view=tasks&requirement=req-123');
+  for (const [section, stage] of [['tech-review', 'TECH_SPEC'], ['test-review', 'TEST_CASE'], ['code-review', 'CODE_REVIEW']]) {
+    navigateWorkspace(section, { requirementId: requirementIdFromRoute() });
+    assert.equal(requirementReviewStageForSection(currentWorkspaceSection()), stage);
+    assert.equal(location.hash, `#view=${section}&requirement=req-123`);
+    openTaskRoute('child-456', { from: section, tab: 'reviews', jobId: 'report-789' });
+    assert.equal(displayWorkspaceSection(), section);
+    assert.equal(requirementIdFromRoute(), 'req-123');
+    assert.deepEqual(taskReturnFilters(), { requirementId: 'req-123' });
+    closeTaskRoute();
+    assert.equal(location.hash, `#view=${section}&requirement=req-123`);
+  }
+  navigateWorkspace('assets', { requirementId: requirementIdFromRoute() });
+  assert.equal(location.hash, '#view=assets');
+  assert.equal(requirementIdFromRoute('#view=assets&requirement=req-123'), undefined);
+});
+
+test('legacy PRD links enter requirements and task drawers return to the selected requirement', t => {
+  environment(t, '#view=prd-review&requirement=req-123');
+  assert.equal(currentWorkspaceSection(), 'tasks');
+  assert.equal(displayWorkspaceSection(), 'tasks');
+  assert.equal(requirementReviewStageForSection('tasks'), undefined);
+  assert.equal(requirementIdFromRoute(), 'req-123');
+  navigateWorkspace('tasks', { requirementId: requirementIdFromRoute() });
+  assert.equal(location.hash, '#view=tasks&requirement=req-123');
+
+  location.hash = '#view=tasks&task=child-456&from=prd-review&fromRequirement=req-123';
+  assert.equal(displayWorkspaceSection(), 'tasks');
+  assert.deepEqual(taskReturnFilters(), { requirementId: 'req-123' });
+  closeTaskRoute();
+  assert.equal(location.hash, '#view=tasks&requirement=req-123');
 });

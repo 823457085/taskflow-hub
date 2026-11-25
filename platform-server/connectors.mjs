@@ -9,14 +9,18 @@ import { promisify } from 'node:util';
 import { ApiError, ASSET_ROLES, KINDS, fail, sha, textField, taskRow, assetRow, bumpParentContexts, fullGitSha, publicGitRemote } from './common.mjs';
 import { parseJiraReference, jiraReferenceMatchesSource } from './jira-reference.mjs';
 import { createMergeRequests, mergeRequestPath, mergeSnapshot, sameMergeSnapshot } from './merge-requests.mjs';
+import { validateGithubConnection } from './accounts.mjs';
 const executeFile = promisify(execFile);
 const PROVIDERS = {
   jira: { name: 'Jira', capabilities: ['jira_projects', 'jira_issues', 'jira_issue'] },
   confluence: { name: 'Confluence', capabilities: ['confluence_page'] },
   gitlab: { name: 'GitLab', capabilities: ['gitlab_mr'] },
+  github: { name: 'GitHub', capabilities: ['github_repo', 'github_pull'] },
   jenkins: { name: 'Jenkins', capabilities: ['jenkins_jobs', 'jenkins_build'] },
   yunxiao: { name: '云效', capabilities: ['yunxiao_pipelines', 'yunxiao_run', 'yunxiao_repos', 'yunxiao_mrs', 'yunxiao_mr', 'yunxiao_commit'] },
 };
+const JIRA_FIELDS = 'summary,status,description,issuetype,parent,updated,project,priority,components,fixVersions,labels,assignee,subtasks';
+const JIRA_ISSUE_KEY = /^[A-Z][A-Z0-9]*-[1-9]\d*$/;
 function profileEnvironment() {
   const env = process.env;
   return {
@@ -102,6 +106,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     const binding = provider === 'jira' ? db.prepare('SELECT source_url FROM jira_project_bindings WHERE project_id=?').get(projectId) : null;
     if (binding && binding.source_url !== base) fail(409, 'JIRA_PROJECT_SOURCE_MISMATCH', '不能更换已绑定项目的Jira实例来源');
     const authMode = body.authMode;
+    if (provider === 'github') validateGithubConnection(base, authMode, allowLoopbackHttp);
     if (!['BEARER', 'BASIC', 'PRIVATE_TOKEN', 'NONE'].includes(authMode)) fail(400, 'INVALID_AUTH_MODE', '认证方式不受支持');
     const prior = old ? decrypt(old) : {};
     if (body.token === undefined && old && authMode !== 'NONE' && (new URL(old.base_url).origin !== new URL(base).origin || old.auth_mode !== authMode)) fail(400, 'NEW_CREDENTIAL_REQUIRED', '修改服务来源或认证方式时请重新输入凭据');
@@ -131,6 +136,11 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
   }
   function headers(provider, row, credentials) {
     const result = { Accept: 'application/json' };
+    if (provider === 'github') Object.assign(result, {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'TaskFlow',
+      'X-GitHub-Api-Version': '2022-11-28',
+    });
     if (row.auth_mode === 'BASIC') result.Authorization = `Basic ${Buffer.from(`${credentials.username}:${credentials.token}`).toString('base64')}`;
     else if (row.auth_mode === 'BEARER') result.Authorization = `Bearer ${credentials.token}`;
     else if (row.auth_mode === 'PRIVATE_TOKEN') result[provider === 'yunxiao' ? 'x-yunxiao-token' : 'PRIVATE-TOKEN'] = credentials.token;
@@ -153,6 +163,10 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     return value;
   }
   async function remote(provider, row, suffix, { method = 'GET', body } = {}) {
+    if (provider === 'github') {
+      validateGithubConnection(row.base_url, row.auth_mode, allowLoopbackHttp);
+      if (method !== 'GET') fail(405, 'CONNECTOR_READ_ONLY', 'GitHub 连接器仅支持读取');
+    }
     const credentials = decrypt(row); const url = new URL(`${row.base_url}${suffix}`);
     if (url.origin !== new URL(row.base_url).origin) fail(400, 'REMOTE_ORIGIN_REJECTED', '远端地址来源不一致');
     const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -165,10 +179,20 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
         response.on('data', chunk => { size += chunk.length; if (size > 2_097_152) { request.destroy(); reject(new ApiError(502, 'REMOTE_RESPONSE_TOO_LARGE', '远端返回内容超过2MB')); } else chunks.push(chunk); });
         response.on('error', () => reject(new ApiError(502, 'REMOTE_CONNECTION_FAILED', '远端连接中断')));
         response.on('end', () => {
-          let value; try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { reject(new ApiError(502, 'REMOTE_INVALID_JSON', `远端未返回有效JSON（HTTP ${response.statusCode}）`)); return; }
+          let value;
+          try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+          catch {
+            const error = new ApiError(502, 'REMOTE_INVALID_JSON', `远端未返回有效JSON（HTTP ${response.statusCode}）`);
+            error.remoteStatus = response.statusCode;
+            reject(error);
+            return;
+          }
           if (response.statusCode < 200 || response.statusCode >= 300) {
             const message = typeof value?.message === 'string' ? value.message : typeof value?.errorMessage === 'string' ? value.errorMessage : Array.isArray(value?.errorMessages) ? value.errorMessages.filter(item => typeof item === 'string').join('\n') : `远端请求失败（HTTP ${response.statusCode}）`;
-            reject(new ApiError(502, 'REMOTE_REQUEST_FAILED', redact(message, credentials))); return;
+            const error = new ApiError(502, 'REMOTE_REQUEST_FAILED', redact(message, credentials));
+            error.remoteStatus = response.statusCode;
+            reject(error);
+            return;
           }
           try { resolveResult({ data: protectValue(value, credentials), nextPage: response.headers['x-next-page'] || '' }); } catch (error) { reject(error); }
         });
@@ -182,31 +206,51 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     if (row.account) {
       const actor = db.prepare('SELECT id,username,role FROM users WHERE id=?').get(row.accountActorId);
       if (!actor) fail(401, 'UNAUTHENTICATED', '登录已失效');
-      return accountRow(accounts.revalidateSelection(actor, row.account, row.project_id, row.provider), actor, row.project_id);
+      return accountRow(row.project_id ? accounts.revalidateSelection(actor, row.account, row.project_id, row.provider) : accounts.revalidatePersonalAccount(actor, row.account, row.provider), actor, row.project_id);
     }
     const now = configured(row.project_id, row.provider); if (now.id !== row.id || now.version !== row.version) fail(409, 'CONNECTOR_CHANGED', '连接配置已变化，请重新执行操作'); return now;
   }
-  async function probe(provider, row) {
+  async function probeCodeup(row, organization) {
+    const { data } = await remote('yunxiao', row, `/oapi/v1/codeup/organizations/${organization}/repositories?page=1&perPage=1`);
+    if (!Array.isArray(data)) fail(502, 'REMOTE_IDENTITY_INVALID', '云效未返回受保护仓库列表');
+    return { verifiedResource: { resource: 'yunxiao_repos', organizationId: row.organization_id, count: data.length } };
+  }
+  async function probe(provider, row, revalidate, resource) {
     if (row.auth_mode === 'NONE') fail(502, 'REMOTE_AUTH_REQUIRED', '连接需要身份认证，匿名响应不能作为接入成功');
     let data; let identity;
     if (provider === 'yunxiao') {
       if (!row.organization_id) fail(409, 'ORGANIZATION_REQUIRED', '请填写云效组织标识后再测试');
-      data = (await remote(provider, row, `/oapi/v1/flow/organizations/${encodeURIComponent(row.organization_id)}/pipelines?perPage=1&page=1`)).data;
+      const organization = encodeURIComponent(row.organization_id);
+      const personal = row.account?.scope === 'PERSONAL';
+      if (personal && ['yunxiao_repos', 'yunxiao_mrs', 'yunxiao_mr', 'yunxiao_commit'].includes(resource)) {
+        return probeCodeup(row, organization);
+      }
+      try {
+        ({ data } = await remote(provider, row, `/oapi/v1/flow/organizations/${organization}/pipelines?perPage=1&page=1`));
+      } catch (error) {
+        if (!personal || resource !== undefined || ![401, 403].includes(error.remoteStatus)) throw error;
+        revalidate();
+        return probeCodeup(row, organization);
+      }
       if (!Array.isArray(data)) fail(502, 'REMOTE_IDENTITY_INVALID', '云效未返回受保护流水线列表');
       return { verifiedResource: { resource: 'yunxiao_pipelines', organizationId: row.organization_id, count: data.length } };
     }
-    const suffix = { jira: '/rest/api/2/myself', confluence: '/rest/api/user/current', gitlab: '/api/v4/user', jenkins: '/whoAmI/api/json' }[provider];
+    const suffix = { jira: '/rest/api/2/myself', confluence: '/rest/api/user/current', gitlab: '/api/v4/user', github: '/user', jenkins: '/whoAmI/api/json' }[provider];
     data = (await remote(provider, row, suffix)).data;
     if (provider === 'jira' && (data?.accountId || data?.name || data?.key) && data.active !== false) identity = { id: String(data.accountId || data.key || data.name), displayName: data.displayName || data.name || data.accountId };
     if (provider === 'confluence' && data?.type !== 'anonymous' && (data?.accountId || data?.username || data?.userKey) && data?.displayName) identity = { id: String(data.accountId || data.userKey || data.username), displayName: data.displayName };
     if (provider === 'gitlab' && Number.isInteger(data?.id) && data?.username && data?.state !== 'blocked') identity = { id: String(data.id), displayName: data.name || data.username };
+    if (provider === 'github' && Number.isSafeInteger(data?.id) && data.id > 0 &&
+        typeof data.login === 'string' && data.login.trim()) {
+      identity = { id: String(data.id), name: data.login, displayName: typeof data.name === 'string' && data.name.trim() ? data.name : data.login };
+    }
     if (provider === 'jenkins' && data?.authenticated === true && typeof data.name === 'string' && data.name !== 'anonymous') identity = { id: data.name, name: data.name };
     if (!identity) fail(502, 'REMOTE_IDENTITY_INVALID', '远端未返回已认证身份，不能判定连接成功');
     return { identity };
   }
-  async function checked(provider, row, revalidate) {
+  async function checked(provider, row, revalidate, resource) {
     let value;
-    try { value = await probe(provider, row); }
+    try { value = await probe(provider, row, revalidate, resource); }
     catch (error) {
       if (row.account) {
         const user = revalidate();
@@ -230,12 +274,15 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
   const named = value => value && value.id !== undefined && typeof value.name === 'string' ? { id: String(value.id), name: value.name } : null;
   const namedArray = value => Array.isArray(value) ? value.map(named).filter(Boolean) : [];
   function issueValue(row, issue) {
-    if (typeof issue?.key !== 'string' || typeof issue?.fields?.summary !== 'string') fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回有效事项');
+    if (typeof issue?.key !== 'string' || /^LOCAL-T[0-9A-F]{32}$/i.test(issue.key) || typeof issue?.fields?.summary !== 'string') fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回有效事项');
     const fields = issue.fields; const project = fields.project && named(fields.project) && typeof fields.project.key === 'string' ? { ...named(fields.project), key: fields.project.key } : null;
     const binding = projectBinding(row);
     if (binding && (!project || project.id !== binding.remote_id)) fail(403, 'JIRA_PROJECT_SCOPE_MISMATCH', 'Jira返回的事项不属于当前绑定项目');
     const issueType = named(fields.issuetype);
-    return { id: String(issue.id || issue.key), key: issue.key, title: fields.summary, summary: fields.summary, status: fields.status?.name || '', description: fields.description ?? '', type: fields.issuetype?.name || '', issueType: issueType ? { ...issueType, subtask: fields.issuetype.subtask === true } : null, project, priority: named(fields.priority), components: namedArray(fields.components), fixVersions: Array.isArray(fields.fixVersions) ? fields.fixVersions.map(value => { const version = named(value); return version ? { ...version, ...(typeof value.released === 'boolean' ? { released: value.released } : {}) } : null; }).filter(Boolean) : [], labels: Array.isArray(fields.labels) ? fields.labels.filter(value => typeof value === 'string') : [], assignee: fields.assignee ? { id: String(fields.assignee.accountId || fields.assignee.key || fields.assignee.name || ''), name: fields.assignee.name || '', displayName: fields.assignee.displayName || '' } : null, parentKey: fields.parent?.key || null, updatedAt: fields.updated || '', externalUrl: `${row.base_url}/browse/${encodeURIComponent(issue.key)}` };
+    const childKeys = [...new Set((Array.isArray(fields.subtasks) ? fields.subtasks : [])
+      .map(child => child?.key)
+      .filter(key => typeof key === 'string' && key.length <= 48 && key !== issue.key && JIRA_ISSUE_KEY.test(key)))];
+    return { id: String(issue.id || issue.key), key: issue.key, title: fields.summary, summary: fields.summary, status: fields.status?.name || '', statusCategory: fields.status?.statusCategory?.key || '', childKeys, description: fields.description ?? '', type: fields.issuetype?.name || '', issueType: issueType ? { ...issueType, subtask: fields.issuetype.subtask === true } : null, project, priority: named(fields.priority), components: namedArray(fields.components), fixVersions: Array.isArray(fields.fixVersions) ? fields.fixVersions.map(value => { const version = named(value); return version ? { ...version, ...(typeof value.released === 'boolean' ? { released: value.released } : {}) } : null; }).filter(Boolean) : [], labels: Array.isArray(fields.labels) ? fields.labels.filter(value => typeof value === 'string') : [], assignee: fields.assignee ? { id: String(fields.assignee.accountId || fields.assignee.key || fields.assignee.name || ''), name: fields.assignee.name || '', displayName: fields.assignee.displayName || '' } : null, parentKey: fields.parent?.key || null, updatedAt: fields.updated || '', externalUrl: `${row.base_url}/browse/${encodeURIComponent(issue.key)}` };
   }
   function scopedJql(jql, binding) {
     if (!binding) return jql;
@@ -293,7 +340,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     });
     return { projects: visibleProjects(user), created, updated, unchanged };
   }
-  async function readResource(provider, row, body, user, revalidate) {
+  async function readResource(provider, row, body, user, revalidate, startAt) {
     const resource = body.resource;
     if (!PROVIDERS[provider].capabilities.includes(resource)) fail(400, 'RESOURCE_UNSUPPORTED', '该连接器不支持所选资源');
     if (resource === 'jira_projects') {
@@ -308,13 +355,15 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       const jql = textField(body.jql, 'jql', { max: 4000, preserve: true }); const limit = body.limit === undefined ? 20 : body.limit;
       if (!Number.isInteger(limit) || limit < 1 || limit > 50) fail(400, 'INVALID_LIMIT', 'limit必须为1至50的整数');
       const appliedJql = scopedJql(jql, projectBinding(row));
-      const data = (await remote(provider, row, `/rest/api/2/search?${new URLSearchParams({ jql: appliedJql, maxResults: String(limit), fields: 'summary,status,description,issuetype,parent,updated,project,priority,components,fixVersions,labels,assignee' })}`)).data;
+      const params = new URLSearchParams({ jql: appliedJql, maxResults: String(limit), fields: JIRA_FIELDS });
+      if (startAt !== undefined) params.set('startAt', String(startAt));
+      const data = (await remote(provider, row, `/rest/api/2/search?${params}`)).data;
       if (!Array.isArray(data?.issues)) fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回事项列表');
       return { resource, items: data.issues.map(issue => issueValue(row, issue)), total: typeof data.total === 'number' ? data.total : data.issues.length, appliedJql, externalUrl: `${row.base_url}/issues/?${new URLSearchParams({ jql: appliedJql })}` };
     }
     if (resource === 'jira_issue') {
-      const issueKey = textField(body.issueKey, 'issueKey', { max: 48 }); if (!/^[A-Z][A-Z0-9]*-[1-9]\d*$/.test(issueKey)) fail(400, 'INVALID_ISSUE_KEY', 'Jira事项号格式不正确');
-      const issue = issueValue(row, (await remote(provider, row, `/rest/api/2/issue/${encodeURIComponent(issueKey)}?fields=summary,status,description,issuetype,parent,updated,project,priority,components,fixVersions,labels,assignee`)).data);
+      const issueKey = textField(body.issueKey, 'issueKey', { max: 48 }); if (!JIRA_ISSUE_KEY.test(issueKey)) fail(400, 'INVALID_ISSUE_KEY', 'Jira事项号格式不正确');
+      const issue = issueValue(row, (await remote(provider, row, `/rest/api/2/issue/${encodeURIComponent(issueKey)}?fields=${JIRA_FIELDS}`)).data);
       if (issue.key !== issueKey) fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira返回的事项与请求不一致');
       return { resource, ...issue, content: typeof issue.description === 'string' ? issue.description : JSON.stringify(issue.description, null, 2), version: issue.updatedAt || sha(JSON.stringify(issue)), externalId: issue.id };
     }
@@ -347,6 +396,55 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       const externalUrl = details.url || `${row.base_url}/${repositoryId.split('/').map(encodeURIComponent).join('/')}/-/merge_requests/${iid}`;
       return { resource, externalId: `${repositoryId}!${iid}`, title: mr.title, content: JSON.stringify({ ...selected, ...(snapshot || {}) }, null, 2),
         version: selected.sha || sha(JSON.stringify(selected)), truncated, externalUrl, mergeSnapshot: snapshot };
+    }
+    if (resource === 'github_repo' || resource === 'github_pull') {
+      const repository = textField(body.repository, 'repository', { max: 140 });
+      const [owner, name] = repository.split('/');
+      if (!/^[a-z0-9][a-z0-9-]{0,38}\/[a-z0-9._-]{1,100}$/i.test(repository) || ['.', '..'].includes(name)) {
+        fail(400, 'INVALID_REPOSITORY', '请输入 GitHub 仓库标识 owner/repository');
+      }
+      const repositoryPath = [owner, name].map(encodeURIComponent).join('/');
+      const pull = resource === 'github_pull';
+      const number = pull ? positive(body.pullNumber, 'pullNumber') : null;
+      const suffix = pull ? '/pulls/' + number : '';
+      const data = (await remote(provider, row, '/repos/' + repositoryPath + suffix)).data;
+      const target = pull ? data?.base?.repo?.full_name : data?.full_name;
+      if (typeof target !== 'string' || target.toLowerCase() !== repository.toLowerCase() ||
+          (pull && (String(data.number) !== number || typeof data.title !== 'string'))) {
+        fail(502, 'REMOTE_RESOURCE_INVALID', 'GitHub 返回的资源与请求不一致');
+      }
+      let diffs;
+      if (pull && body.includeDiff === true) {
+        if (!Number.isInteger(data.changed_files) || data.changed_files < 1 || data.changed_files > 100 ||
+            !fullGitSha(data.base?.sha) || !fullGitSha(data.head?.sha)) {
+          fail(409, 'REMOTE_CONTENT_INCOMPLETE', 'GitHub PR 没有可完整读取的代码差异');
+        }
+        user = revalidate();
+        const files = await remote(provider, row, '/repos/' + repositoryPath + suffix + '/files?per_page=100');
+        if (!Array.isArray(files.data) || files.nextPage || files.data.length !== data.changed_files ||
+            files.data.some(file => typeof file?.filename !== 'string' || typeof file?.patch !== 'string' || !file.patch.trim())) {
+          fail(409, 'REMOTE_CONTENT_INCOMPLETE', 'GitHub 未完整返回 PR 代码差异');
+        }
+        user = revalidate();
+        const latest = (await remote(provider, row, '/repos/' + repositoryPath + suffix)).data;
+        if (latest?.head?.sha !== data.head.sha || latest?.base?.sha !== data.base.sha) {
+          fail(409, 'MR_HEAD_CHANGED', '读取代码差异时 GitHub PR 已变化，请重试');
+        }
+        diffs = files.data.map(file => ({ old_path: file.previous_filename || file.filename, new_path: file.filename, diff: file.patch }));
+      }
+      const content = JSON.stringify(pull ? {
+        number: data.number, title: data.title, state: data.state, author: data.user?.login,
+        base: data.base?.ref, head: data.head?.ref, headSha: data.head?.sha,
+        updatedAt: data.updated_at, mergedAt: data.merged_at,
+        ...(diffs ? { baseSha: data.base.sha, diffs } : {}),
+      } : {
+        repository: target, description: data.description, defaultBranch: data.default_branch,
+        private: data.private, updatedAt: data.updated_at,
+      }, null, 2);
+      return {
+        resource, externalId: pull ? repository + '#' + number : repository, title: pull ? data.title : target,
+        content, version: sha(content), externalUrl: 'https://github.com/' + repositoryPath + (pull ? '/pull/' + number : ''),
+      };
     }
     if (resource === 'jenkins_jobs') {
       const data = (await remote(provider, row, '/api/json?tree=jobs[name,fullName,_class]')).data;
@@ -506,20 +604,54 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
           if (!(error instanceof ApiError) || [401, 403].includes(error.status)) throw error;
         }
       }
+      const applyCompare = (data, commit) => {
+        if (!Array.isArray(data?.diffs) || !data.diffs.length || data.compareTimeout || data.compareSameRef) return false;
+        compare = data;
+        reviewCommit = commit;
+        return true;
+      };
       if (fullGitSha(cr.mergedRevision)) {
         try {
           const mergeCommit = (await remote(provider, row, `${codeupPrefix}/repositories/${repoId}/commits/${encodeURIComponent(cr.mergedRevision)}`)).data;
           user = revalidate();
           const parentSha = Array.isArray(mergeCommit?.parentIds) ? mergeCommit.parentIds[0] : '';
           if (mergeCommit?.id === cr.mergedRevision && fullGitSha(parentSha)) {
-            const query = new URLSearchParams({ from: parentSha, to: cr.mergedRevision, sourceType: 'commit', targetType: 'commit', straight: 'true' });
+            const query = new URLSearchParams({ from: parentSha, to: cr.mergedRevision, straight: 'true' });
             const pinned = (await remote(provider, row, `${codeupPrefix}/repositories/${repoId}/compares?${query}`)).data;
             user = revalidate();
-            if (Array.isArray(pinned?.diffs) && pinned.diffs.length && !pinned.compareTimeout && !pinned.compareSameRef) {
-              compare = pinned;
-              reviewCommit = cr.mergedRevision;
+            applyCompare(pinned, cr.mergedRevision);
+          }
+        } catch (error) {
+          if (!(error instanceof ApiError) || [401, 403].includes(error.status)) throw error;
+        }
+      }
+      if (!reviewCommit) {
+        try {
+          const patches = (await remote(provider, row, `${codeupPrefix}/repositories/${repoId}/changeRequests/${localId}/diffs/patches`)).data;
+          user = revalidate();
+          if (Array.isArray(patches)) {
+            const latestPatch = type => [...patches]
+              .filter(item => item?.relatedMergeItemType === type && fullGitSha(item.commitId))
+              .sort((a, b) => (Number(b.versionNo) || 0) - (Number(a.versionNo) || 0))[0];
+            const sourcePatch = latestPatch('MERGE_SOURCE');
+            const targetPatch = latestPatch('MERGE_TARGET');
+            if (sourcePatch && targetPatch && sourcePatch.commitId !== targetPatch.commitId) {
+              const query = new URLSearchParams({ from: targetPatch.commitId, to: sourcePatch.commitId });
+              const patchCompare = (await remote(provider, row, `${codeupPrefix}/repositories/${repoId}/compares?${query}`)).data;
+              user = revalidate();
+              applyCompare(patchCompare, fullGitSha(cr.mergedRevision) ? cr.mergedRevision : sourcePatch.commitId);
             }
           }
+        } catch (error) {
+          if (!(error instanceof ApiError) || [401, 403].includes(error.status)) throw error;
+        }
+      }
+      if (!reviewCommit && fullGitSha(cr.mergedRevision)) {
+        try {
+          const query = new URLSearchParams({ from: `${cr.mergedRevision}^1`, to: cr.mergedRevision });
+          const parentCompare = (await remote(provider, row, `${codeupPrefix}/repositories/${repoId}/compares?${query}`)).data;
+          user = revalidate();
+          applyCompare(parentCompare, cr.mergedRevision);
         } catch (error) {
           if (!(error instanceof ApiError) || [401, 403].includes(error.status)) throw error;
         }
@@ -615,10 +747,57 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       while (ancestor) { if (visited.has(ancestor.id)) fail(409, 'TASK_TREE_INVALID', 'Jira父子关系会形成循环，未更新本地任务'); visited.add(ancestor.id); ancestor = ancestor.parentId ? getTask(ancestor.parentId, user) : null; }
     }
     db.prepare('UPDATE tasks SET parent_id=?,version=version+1,context_version=context_version+1,updated_at=? WHERE id=?').run(parent?.id || null, new Date().toISOString(), task.id);
-    bumpParentContexts(db, [task.parentId, parent?.id]);
     audit(user.id, 'JIRA_PARENT_LINK', task.id, task.projectId); return true;
   }
-  function importResource(provider, row, user, body, result) {
+  async function readJiraChildren(row, parents, user, validate) {
+    const keys = [...new Set(parents.flatMap(parent => parent.childKeys || []))];
+    const byKey = new Map();
+    for (let start = 0; start < keys.length; start += 50) {
+      const batch = keys.slice(start, start + 50);
+      const response = await readResource('jira', row, {
+        resource: 'jira_issues', limit: batch.length, jql: `key in (${batch.map(key => JSON.stringify(key)).join(',')})`,
+      }, user, validate);
+      user = validate();
+      for (const issue of response.items) if (batch.includes(issue.key)) byKey.set(issue.key, issue);
+    }
+    return byKey;
+  }
+  function applyJiraChildren(row, parent, declaredKeys, children, user) {
+    const linkedKeys = []; const updatedKeys = []; const skippedChildren = [];
+    const lookup = db.prepare('SELECT * FROM tasks WHERE jira_key=?');
+    for (const key of declaredKeys) {
+      const issue = children.get(key);
+      const description = typeof issue?.description === 'string' ? issue.description : JSON.stringify(issue?.description || '');
+      if (!issue || issue.parentKey !== parent.jiraKey || !issue.title.trim() || issue.title.length > 200 || description.length > 65_536) {
+        skippedChildren.push({ jiraKey: key, reason: 'JIRA_SUBTASK_UNAVAILABLE' });
+        continue;
+      }
+      const existing = taskRow(lookup.get(key));
+      if (existing && (existing.projectId !== parent.projectId || existing.externalRef && !sameSource(existing.externalRef, row) || existing.parentId && existing.parentId !== parent.id)) {
+        skippedChildren.push({ jiraKey: key, reason: 'JIRA_SUBTASK_CONFLICT' });
+        continue;
+      }
+      const ext = JSON.stringify(jiraExternal(row, { ...issue, externalId: issue.id }, issue.updatedAt || sha(JSON.stringify(issue))));
+      const now = new Date().toISOString();
+      const previousParent = existing?.parentId;
+      if (existing) {
+        if (previousParent === parent.id && existing.jiraStatus === 'verified' && JSON.stringify(existing.externalRef) === ext) continue;
+        db.prepare('UPDATE tasks SET parent_id=?,jira_verified=1,external_ref=?,version=version+1,updated_at=? WHERE id=?')
+          .run(parent.id, ext, now, existing.id);
+        updatedKeys.push(key);
+        audit(user.id, 'JIRA_SYNC_UPDATE', existing.id, parent.projectId);
+      } else {
+        const id = randomUUID();
+        const status = issue.statusCategory === 'done' ? 'DONE' : issue.statusCategory === 'indeterminate' ? 'IN_PROGRESS' : 'OPEN';
+        db.prepare('INSERT INTO tasks (id,jira_key,title,owner_id,created_at,updated_at,project_id,parent_id,task_type,status,jira_verified,external_ref) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)')
+          .run(id, key, issue.title, user.id, now, now, parent.projectId, parent.id, 'TASK', status, ext);
+        audit(user.id, 'JIRA_IMPORT', id, parent.projectId);
+      }
+      if (previousParent !== parent.id) linkedKeys.push(key);
+    }
+    return { linkedKeys, updatedKeys, skippedChildren };
+  }
+  function importResource(provider, row, user, body, result, childIssues) {
     current(row); const projectId = row.project_id; const currentRole = role(user, projectId, !row.account);
     if (['jira_projects', 'jira_issues', 'yunxiao_pipelines', 'yunxiao_repos', 'yunxiao_mrs', 'jenkins_jobs'].includes(result.resource)) fail(400, 'IMPORT_RESOURCE_REQUIRED', '请选择具体事项、合并请求或运行记录后导入');
     if (result.truncated) fail(409, 'REMOTE_CONTENT_INCOMPLETE', '远端Diff未完整返回，不能作为完整代码资产导入');
@@ -663,8 +842,13 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
           try { if (linkParent(child, getTask(task.id, user), user)) { linkedChildren.push(child.id); imported = true; } }
           catch (error) { if (error instanceof ApiError && ['TASK_DONE', 'ANCESTOR_DONE'].includes(error.code)) skippedChildren.push({ id: child.id, jiraKey: child.jiraKey, reason: error.code }); else throw error; }
         }
+        const synced = !task.parentId && childIssues ? applyJiraChildren(row, task, result.childKeys, childIssues, user) : null;
+        if (synced) {
+          for (const key of synced.linkedKeys) linkedChildren.push(intakeExisting(row, key).id);
+          if (synced.linkedKeys.length || synced.updatedKeys.length) imported = true;
+        }
         if (imported) audit(user.id, 'JIRA_IMPORT', task.id, projectId);
-        response = { imported, task: getTask(task.id, user), externalUrl: result.externalUrl, linkedChildren, skippedChildren }; return;
+        response = { imported, task: getTask(task.id, user), externalUrl: result.externalUrl, linkedChildren, skippedChildren: [...skippedChildren, ...(synced?.skippedChildren || [])] }; return;
       }
       const task = getTask(textField(body.taskId, 'taskId', { max: 64 }), user); if (task.projectId !== projectId) fail(403, 'IMPORT_PROJECT_MISMATCH', '任务与连接器不属于同一项目');
       const codeupResource = provider === 'yunxiao' && ['yunxiao_mr', 'yunxiao_commit'].includes(result.resource);
@@ -719,13 +903,30 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     if (task?.externalRef && (!sameSource(task.externalRef, row) || task.externalRef.key !== key)) fail(409, 'JIRA_TASK_SOURCE_CONFLICT', '该任务已关联其他Jira实例，不能覆盖原始来源');
     return task || null;
   }
+  function intakeParent(row, issue) {
+    const parent = issue.parentKey ? taskRow(db.prepare('SELECT * FROM tasks WHERE jira_key=? AND project_id=?').get(issue.parentKey, row.project_id)) : null;
+    return parent && sameSource(parent.externalRef, row) ? parent : null;
+  }
   async function jiraIntake({ action, body, user, reauthorize }) {
-    const allowed = action === 'search' ? ['projectId', 'query', 'accountId'] : ['reference', 'projectId', 'accountId'];
+    const allowed = action === 'sync-children' ? ['taskId', 'accountId'] : action === 'search' ? ['projectId', 'query', 'accountId', 'requireMainTask', 'page'] : action === 'import' ? ['reference', 'projectId', 'accountId', 'parentTaskId', 'requireMainTask'] : ['reference', 'projectId', 'accountId'];
     if (Object.keys(body).some(name => !allowed.includes(name))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
-    let reference; let project;
+    let reference; let project; let parentTask;
+    const page = body.page === undefined ? 1 : body.page;
+    const requirementOnly = body.requireMainTask === true;
+    const paged = requirementOnly || body.page !== undefined;
+    const pageSize = paged ? 8 : 30;
     if (action === 'search') {
+      if (!Number.isInteger(page) || page < 1 || page > 10_000) fail(400, 'INVALID_INPUT', 'Jira事项页码必须为1至10000的整数');
+      if (body.requireMainTask !== undefined && typeof body.requireMainTask !== 'boolean') fail(400, 'INVALID_INPUT', 'requireMainTask必须为布尔值');
       const projectId = textField(body.projectId, 'projectId', { max: 64 }); projectRole(user, projectId);
       project = visibleProjects(user).find(item => item.id === projectId);
+      if (!project?.jira) fail(409, 'JIRA_PROJECT_NOT_BOUND', '请先选择已绑定的Jira项目');
+    } else if (action === 'sync-children') {
+      parentTask = getTask(textField(body.taskId, 'taskId', { max: 64 }), user);
+      if (parentTask.parentId || parentTask.externalRef?.issueType?.subtask) fail(409, 'JIRA_PARENT_REQUIRED', '请在主任务中读取关联子任务');
+      if (parentTask.externalRef?.provider !== 'jira') fail(409, 'JIRA_TASK_NOT_LINKED', '主任务尚未关联 Jira 原单');
+      reference = { key: parentTask.jiraKey };
+      project = visibleProjects(user).find(item => item.id === parentTask.projectId);
       if (!project?.jira) fail(409, 'JIRA_PROJECT_NOT_BOUND', '请先选择已绑定的Jira项目');
     } else {
       try { reference = parseJiraReference(body.reference); }
@@ -733,6 +934,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       project = jiraIntakeTarget(user, reference, body.projectId);
     }
     const row = selectedRow(user, project.id, 'jira', body.accountId);
+    if (parentTask && !sameSource(parentTask.externalRef, row)) fail(409, 'JIRA_TASK_SOURCE_CONFLICT', '该任务已关联其他Jira实例，不能覆盖原始来源');
     const binding = projectBinding(row);
     if (!binding || binding.remote_id !== project.jira.id || binding.remote_key !== project.jira.key) fail(409, 'JIRA_PROJECT_CHANGED', 'Jira项目绑定已变化，请重新读取');
     if (row.auth_mode === 'NONE') fail(409, 'REMOTE_AUTH_REQUIRED', 'Jira事项读取需要已配置的身份认证，请联系项目负责人');
@@ -747,37 +949,86 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       return user;
     };
     validate();
-    let result;
+    let result; let childIssues;
     try {
       if (action === 'search') {
         const query = body.query === undefined ? '' : textField(body.query, 'query', { min: 0, max: 100 });
         // This is a plain text picker query, never caller-supplied JQL.
         const escaped = query.replace(/[\\+\-&|!(){}\[\]^"~*?:/]/g, '\\$&');
         const condition = /^[A-Za-z][A-Za-z0-9]*-[1-9]\d*$/.test(query) ? `key = ${JSON.stringify(query.toUpperCase())}` : query ? `summary ~ ${JSON.stringify(escaped)}` : '';
-        result = await readResource('jira', row, { resource: 'jira_issues', jql: `${condition}${condition ? ' ' : ''}ORDER BY updated DESC`, limit: 30 }, user, validate);
-      } else result = await readResource('jira', row, { resource: 'jira_issue', issueKey: reference.key }, user, validate);
+        const where = [condition, requirementOnly ? 'issuetype in standardIssueTypes()' : ''].filter(Boolean).join(' AND ');
+        const order = paged ? 'ORDER BY updated DESC, key DESC' : 'ORDER BY updated DESC';
+        result = await readResource('jira', row, {
+          resource: 'jira_issues', jql: `${where}${where ? ' ' : ''}${order}`, limit: pageSize,
+        }, user, validate, paged ? (page - 1) * pageSize : undefined);
+      } else {
+        result = await readResource('jira', row, { resource: 'jira_issue', issueKey: reference.key }, user, validate);
+        if (action !== 'lookup' && !result.issueType?.subtask && result.childKeys.length) {
+          childIssues = await readJiraChildren(row, [result], validate(), validate);
+        }
+      }
     } finally { validate(); }
     const currentProject = () => visibleProjects(user).find(item => item.id === project.id);
     const usedAccount = row.account ? { id: row.account.id, name: row.account.name, scope: row.account.scope } : null;
-    if (action === 'search') return { project: currentProject(), items: result.items, total: result.total, usedAccount };
-    const existingTask = intakeExisting(row, reference.key);
-    if (action === 'lookup') return { project: currentProject(), issue: result, existingTask, usedAccount };
-    let task; let existing;
+    if (action === 'search') {
+      const existingByKey = db.prepare('SELECT parent_id FROM tasks WHERE jira_key=? AND project_id=?');
+      const items = requirementOnly ? result.items.filter(issue => {
+        if (issue.issueType?.subtask) return false;
+        const local = existingByKey.get(issue.key, project.id);
+        return local ? !local.parent_id : !intakeParent(row, issue);
+      }) : result.items;
+      return { project: currentProject(), items, total: result.total, page, pageSize, usedAccount };
+    }
+    if (action === 'lookup') return { project: currentProject(), issue: result, existingTask: intakeExisting(row, reference.key), usedAccount };
+    let task; let existing; let synced = { linkedKeys: [], updatedKeys: [], skippedChildren: [] };
     transaction(() => {
       validate();
       task = intakeExisting(row, reference.key); existing = !!task;
-      if (task) return;
+      if (body.requireMainTask === true && (task?.parentId || result.issueType?.subtask || body.parentTaskId)) {
+        fail(409, 'JIRA_PARENT_REQUIRED', '请接入主需求的 Jira 链接，子任务会自动关联');
+      }
+      if (parentTask) {
+        task = getTask(parentTask.id, user);
+        if (task.parentId || result.issueType?.subtask) fail(409, 'JIRA_PARENT_REQUIRED', '请在主任务中读取关联子任务');
+        if (!sameSource(task.externalRef, row)) fail(409, 'JIRA_TASK_SOURCE_CONFLICT', '该任务已关联其他Jira实例，不能覆盖原始来源');
+      }
+      if (task) {
+        if (childIssues && !task.parentId) synced = applyJiraChildren(row, task, result.childKeys, childIssues, user);
+        return;
+      }
       if (!result.title.trim() || result.title.length > 200) fail(409, 'REMOTE_TITLE_TOO_LONG', 'Jira标题超出本地任务长度限制，请先查看原事项');
       if ((result.content || '').length > 65_536) fail(409, 'REMOTE_CONTENT_TOO_LARGE', 'Jira正文超出本地导入长度限制，请先查看原事项');
-      const parent = result.parentKey ? taskRow(db.prepare('SELECT * FROM tasks WHERE jira_key=? AND project_id=?').get(result.parentKey, project.id)) : null;
-      const linkedParent = parent && sameSource(parent.externalRef, row) ? parent : null;
+      const linkedParent = intakeParent(row, result);
+      if (body.requireMainTask === true && linkedParent) fail(409, 'JIRA_PARENT_REQUIRED', '请接入主需求的 Jira 链接，子任务会自动关联');
       if (linkedParent) assertWritable(linkedParent, user);
       const assignee = db.prepare('SELECT user_id FROM project_members WHERE project_id=? AND user_id=?').get(project.id, user.id) ? user.id : null;
       const id = randomUUID(); const now = new Date().toISOString(); const version = String(result.version || sha(result.content || ''));
       db.prepare('INSERT INTO tasks (id,jira_key,title,owner_id,created_at,updated_at,project_id,parent_id,task_type,assignee_id,jira_verified,external_ref) VALUES(?,?,?,?,?,?,?,?,?,?,1,?)').run(id, result.key, result.title, user.id, now, now, project.id, linkedParent?.id || null, 'TASK', assignee, JSON.stringify(jiraExternal(row, result, version)));
-      bumpParentContexts(db, [linkedParent?.id]); audit(user.id, 'JIRA_IMPORT', id, project.id); task = getTask(id, user);
+      audit(user.id, 'JIRA_IMPORT', id, project.id); task = getTask(id, user);
+      if (childIssues && !task.parentId) synced = applyJiraChildren(row, task, result.childKeys, childIssues, user);
     });
-    return { task, existing, imported: !existing, project: currentProject(), externalUrl: result.externalUrl };
+    if (parentTask) {
+      const children = db.prepare('SELECT * FROM tasks WHERE parent_id=? ORDER BY jira_key').all(task.id).map(taskRow);
+      return { task, children, linkedCount: synced.linkedKeys.length, updatedCount: synced.updatedKeys.length, skippedChildren: synced.skippedChildren };
+    }
+    // Delivery chain: link a Jira work item declared by the dev task (交付物 / 相关开发事项) as its child.
+    let linkedToParent = false;
+    if (body.parentTaskId !== undefined) {
+      transaction(() => {
+        validate();
+        const parentTask = getTask(textField(body.parentTaskId, 'parentTaskId', { max: 64 }), user);
+        const current = getTask(task.id, user);
+        if (parentTask.projectId !== current.projectId) fail(400, 'INVALID_PARENT', '父任务必须属于同一项目');
+        if (current.parentId === parentTask.id) return;
+        if (current.parentId) fail(409, 'TASK_HAS_PARENT', `${current.jiraKey} 已关联其他父任务`);
+        for (let cursor = parentTask; cursor; cursor = cursor.parentId ? getTask(cursor.parentId, user) : null) if (cursor.id === current.id) fail(409, 'TASK_TREE_INVALID', '不能把上级任务关联为子任务');
+        assertWritable(parentTask, user); assertWritable(current, user);
+        db.prepare('UPDATE tasks SET parent_id=?,version=version+1,updated_at=? WHERE id=?').run(parentTask.id, new Date().toISOString(), current.id);
+        bumpParentContexts(db, [parentTask.id]); audit(user.id, 'TASK_LINK_PARENT', current.id, current.projectId);
+        linkedToParent = true; task = getTask(current.id, user);
+      });
+    }
+    return { task, existing, imported: !existing, linkedToParent, project: currentProject(), externalUrl: result.externalUrl, ...synced };
   }
   async function syncMyJiraTasks({ body, user, reauthorize }) {
     const allowed = ['projectId', 'accountId', 'excludeRefactor'];
@@ -837,7 +1088,6 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     };
     const isRefactorIssue = (title, labels) => excludeRefactor && /【重构】|\brefactor\b/i.test(`${title || ''} ${JSON.stringify(labels || [])}`);
     const isJiraDone = (statusCategory, statusName) => statusCategory === 'done' || ['已完成', '已关闭', '已解决', '已取消', '取消', 'Done', 'Closed', 'Resolved'].includes(statusName || '');
-    const jiraFields = 'summary,status,description,issuetype,parent,updated,project,priority,components,fixVersions,labels,assignee';
 
     const importedKeys = []; const updatedKeys = []; const unchangedKeys = []; const removedKeys = []; const unassignedKeys = [];
     let primaryIdentity = null;
@@ -856,7 +1106,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       };
       validateGroup();
       const sampleRow = groupEntries[0].row;
-      let me; const activeItems = []; const liveStaleMap = new Map(); let staleCandidates = [];
+      let me; const activeItems = []; const liveStaleMap = new Map(); const childrenByProject = new Map(); let staleCandidates = [];
       try {
         const meData = (await remote('jira', sampleRow, '/rest/api/2/myself')).data;
         if (!(meData?.accountId || meData?.key || meData?.name) || meData.active === false) fail(502, 'REMOTE_IDENTITY_INVALID', 'Jira未返回有效登录身份');
@@ -865,7 +1115,7 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
 
         const remoteProjectIds = groupEntries.map(entry => positive(entry.binding.remote_id, 'Jira项目ID'));
         const jql = `project in (${remoteProjectIds.join(',')}) AND assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC`;
-        const searchData = (await remote('jira', sampleRow, `/rest/api/2/search?${new URLSearchParams({ jql, maxResults: '100', fields: jiraFields })}`)).data;
+        const searchData = (await remote('jira', sampleRow, `/rest/api/2/search?${new URLSearchParams({ jql, maxResults: '100', fields: JIRA_FIELDS })}`)).data;
         if (!Array.isArray(searchData?.issues)) fail(502, 'REMOTE_RESOURCE_INVALID', 'Jira未返回事项列表');
 
         const entryByRemoteId = new Map(groupEntries.map(entry => [entry.binding.remote_id, entry]));
@@ -882,6 +1132,11 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
             parsed: { ...parsed, externalId: parsed.id, version: parsed.updatedAt || sha(JSON.stringify(parsed)) },
             statusCategory: rawIssue.fields?.status?.statusCategory?.key || '',
           });
+        }
+
+        for (const entry of groupEntries) {
+          const parents = activeItems.filter(item => item.entry === entry && !item.parsed.issueType?.subtask && item.parsed.childKeys.length).map(item => item.parsed);
+          if (parents.length) childrenByProject.set(entry.project.id, await readJiraChildren(entry.row, parents, validateGroup(), validateGroup));
         }
 
         const activeKeySet = new Set(activeItems.map(item => item.parsed.key));
@@ -909,12 +1164,12 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
           };
           try {
             const staleJql = `key in (${staleCandidates.map(c => JSON.stringify(c.jiraKey)).join(',')})`;
-            const staleRes = (await remote('jira', sampleRow, `/rest/api/2/search?${new URLSearchParams({ jql: staleJql, maxResults: '100', fields: jiraFields })}`)).data;
+            const staleRes = (await remote('jira', sampleRow, `/rest/api/2/search?${new URLSearchParams({ jql: staleJql, maxResults: '100', fields: JIRA_FIELDS })}`)).data;
             for (const rawIssue of staleRes?.issues || []) recordLiveIssue(rawIssue);
           } catch {
             for (const cand of staleCandidates) {
               try {
-                const single = (await remote('jira', sampleRow, `/rest/api/2/issue/${encodeURIComponent(cand.jiraKey)}?fields=${jiraFields}`)).data;
+                const single = (await remote('jira', sampleRow, `/rest/api/2/issue/${encodeURIComponent(cand.jiraKey)}?fields=${JIRA_FIELDS}`)).data;
                 recordLiveIssue(single);
               } catch { /* deleted or invisible in Jira -> stays absent in liveStaleMap */ }
             }
@@ -937,6 +1192,14 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
           const { entry, parsed, statusCategory } = item;
           if (!parsed.title.trim() || parsed.title.length > 200 || String(parsed.description ?? '').length > 65_536) continue;
           const existing = intakeExisting(entry.row, parsed.key);
+          if (existing?.parentId) {
+            const parent = taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(existing.parentId));
+            const synced = parent && sameSource(parent.externalRef, entry.row) && parsed.parentKey === parent.jiraKey
+              ? applyJiraChildren(entry.row, parent, [parsed.key], new Map([[parsed.key, parsed]]), user)
+              : null;
+            (synced?.updatedKeys.length ? updatedKeys : unchangedKeys).push(parsed.key);
+            continue;
+          }
           const isMember = !!db.prepare('SELECT user_id FROM project_members WHERE project_id=? AND user_id=?').get(entry.project.id, user.id);
           const external = jiraExternal(entry.row, parsed, parsed.version);
           const externalJson = JSON.stringify(external);
@@ -950,7 +1213,6 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
             const linkedParent = parent && sameSource(parent.externalRef, entry.row) && parent.status !== 'DONE' ? parent : null;
             db.prepare('INSERT INTO tasks (id,jira_key,title,owner_id,created_at,updated_at,project_id,parent_id,task_type,assignee_id,status,jira_verified,external_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,1,?)')
               .run(id, parsed.key, parsed.title, user.id, now, remoteUpdatedIso, entry.project.id, linkedParent?.id || null, 'TASK', isMember ? user.id : null, initStatus, externalJson);
-            if (linkedParent) bumpParentContexts(db, [linkedParent.id]);
             audit(user.id, 'JIRA_IMPORT', id, entry.project.id);
             importedKeys.push(parsed.key);
           } else if (existing.status !== 'DONE') {
@@ -974,12 +1236,22 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
         for (const item of orderedActive) {
           const { entry, parsed } = item;
           const currentTask = taskRow(db.prepare('SELECT * FROM tasks WHERE jira_key=? AND project_id=?').get(parsed.key, entry.project.id));
-          if (!currentTask || currentTask.status === 'DONE') continue;
+          if (!currentTask || currentTask.parentId || currentTask.status === 'DONE') continue;
           const parent = parsed.parentKey ? taskRow(db.prepare('SELECT * FROM tasks WHERE jira_key=? AND project_id=?').get(parsed.parentKey, entry.project.id)) : null;
           const linkedParent = parent && sameSource(parent.externalRef, entry.row) && parent.status !== 'DONE' ? parent : null;
           if (currentTask.parentId !== (linkedParent?.id || null)) {
             try { linkParent(currentTask, linkedParent, user); } catch { /* skip if ancestor frozen */ }
           }
+        }
+
+        for (const { entry, parsed } of orderedActive) {
+          const childIssues = childrenByProject.get(entry.project.id);
+          if (!childIssues || parsed.issueType?.subtask || !parsed.childKeys.length) continue;
+          const parent = taskRow(db.prepare('SELECT * FROM tasks WHERE jira_key=? AND project_id=?').get(parsed.key, entry.project.id));
+          if (!parent || parent.parentId || !sameSource(parent.externalRef, entry.row)) continue;
+          const synced = applyJiraChildren(entry.row, parent, parsed.childKeys, childIssues, user);
+          importedKeys.push(...synced.linkedKeys.filter(key => !synced.updatedKeys.includes(key)));
+          updatedKeys.push(...synced.updatedKeys.filter(key => !importedKeys.includes(key) && !updatedKeys.includes(key)));
         }
 
         const hasLocalWork = id => !!(
@@ -992,7 +1264,17 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
         const orderedStale = [...staleCandidates].sort((a, b) => (b.parentId ? 1 : 0) - (a.parentId ? 1 : 0));
         for (const cand of orderedStale) {
           const fresh = taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(cand.id));
-          if (!fresh || fresh.status === 'DONE' || fresh.assigneeId !== user.id) continue;
+          if (!fresh || fresh.assigneeId !== user.id) continue;
+          if (fresh.parentId) {
+            const live = liveStaleMap.get(fresh.jiraKey);
+            const parent = taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(fresh.parentId));
+            if (parent && live?.entry && live.parsed?.parentKey === parent.jiraKey && sameSource(parent.externalRef, live.entry.row)) {
+              const synced = applyJiraChildren(live.entry.row, parent, [fresh.jiraKey], new Map([[fresh.jiraKey, live.parsed]]), user);
+              updatedKeys.push(...synced.updatedKeys);
+            }
+            continue;
+          }
+          if (fresh.status === 'DONE') continue;
           const live = liveStaleMap.get(fresh.jiraKey) || null;
           const assignedToMe = live ? matchesJiraIdentity(live.rawAssignee, me) : false;
           const doneInJira = live ? isJiraDone(live.statusCategory, live.statusName) : false;
@@ -1001,7 +1283,6 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
             if (!hasLocalWork(fresh.id)) {
               db.prepare('DELETE FROM devices WHERE task_id=?').run(fresh.id);
               db.prepare('DELETE FROM tasks WHERE id=?').run(fresh.id);
-              if (fresh.parentId) bumpParentContexts(db, [fresh.parentId]);
               audit(user.id, 'JIRA_SYNC_PRUNE', fresh.jiraKey, fresh.projectId);
               removedKeys.push(fresh.jiraKey);
             } else {
@@ -1035,8 +1316,108 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     try { return await syncPromise; }
     finally { if (inFlightSyncMine.get(syncKey) === syncPromise) inFlightSyncMine.delete(syncKey); }
   }
-  return async function handle({ method, path, url, user, body, send, reauthorize }) {
+  async function syncPersonalJiraProjects({ accountId, body, user, reauthorize }) {
+    if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权同步个人 Jira 项目权限');
+    if (Object.keys(body).some(key => !['expectedVersion', 'autoSelect'].includes(key))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
+    if (!Number.isInteger(body.expectedVersion) || body.expectedVersion < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
+    if (body.autoSelect !== undefined && typeof body.autoSelect !== 'boolean') fail(400, 'INVALID_INPUT', 'autoSelect必须为布尔值');
+    const autoSelect = body.autoSelect !== false;
+    const account = accounts.resolvePersonalAccount(user, accountId, 'jira');
+    if (account.version !== body.expectedVersion) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
+    const actorId = user.id;
+    const row = accountRow(account, user, null);
+    const validate = () => {
+      if (reauthorize) user = reauthorize();
+      if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效');
+      if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权同步个人 Jira 项目权限');
+      accounts.revalidatePersonalAccount(user, account, 'jira');
+      return user;
+    };
+    let verified;
+    let catalog;
+    try {
+      verified = await probe('jira', row);
+      validate();
+      catalog = await jiraProjects(row);
+    } catch (error) {
+      if (error instanceof ApiError && ![401, 403, 404, 409].includes(error.status)) {
+        try {
+          const freshUser = validate();
+          accounts.recordCheck(freshUser, account, null, 'jira', { status: 'ERROR', error: error.message });
+        } catch { /* Preserve auth/version error without writing stale account status. */ }
+      }
+      throw error;
+    }
+    const joinedProjects = [];
+    const matchedProjects = [];
+    let autoSelectedCount = 0;
+    let unmatchedRemoteCount = 0;
+    transaction(() => {
+      const freshUser = validate();
+      const now = new Date().toISOString();
+      db.prepare("UPDATE external_accounts SET status='CONNECTED',last_checked_at=?,last_error=NULL WHERE id=? AND version=?").run(now, account.id, account.version);
+      const boundProjects = db.prepare(`
+        SELECT b.project_id AS id, b.remote_id AS remoteId, b.remote_key AS remoteKey, b.remote_name AS remoteName, p.key, p.name
+        FROM jira_project_bindings b
+        JOIN projects p ON p.id = b.project_id
+        WHERE b.source_url = ?
+        ORDER BY p.created_at, p.id
+      `).all(account.base_url);
+      const remoteById = new Map(catalog.map(item => [item.id, item]));
+      const boundRemoteIds = new Set(boundProjects.map(item => item.remoteId));
+      unmatchedRemoteCount = catalog.filter(item => !boundRemoteIds.has(item.id)).length;
+      const baseRole = ['QA', 'PM'].includes(freshUser.role) ? freshUser.role : 'DEV';
+      for (const bound of boundProjects) {
+        if (!remoteById.has(bound.remoteId)) continue;
+        const existing = db.prepare('SELECT role FROM project_members WHERE project_id=? AND user_id=?').get(bound.id, freshUser.id);
+        if (freshUser.role === 'ADMIN') {
+          matchedProjects.push({ id: bound.id, key: bound.key, name: bound.name, role: 'ADMIN', jiraKey: bound.remoteKey, joined: false });
+        } else if (existing) {
+          matchedProjects.push({ id: bound.id, key: bound.key, name: bound.name, role: existing.role, jiraKey: bound.remoteKey, joined: false });
+        } else {
+          db.prepare('INSERT INTO project_members (project_id,user_id,role) VALUES (?,?,?)').run(bound.id, freshUser.id, baseRole);
+          audit(freshUser.id, 'JIRA_PERSONAL_PROJECT_JOIN', bound.id, bound.id);
+          const item = { id: bound.id, key: bound.key, name: bound.name, role: baseRole, jiraKey: bound.remoteKey, joined: true };
+          joinedProjects.push(item);
+          matchedProjects.push(item);
+        }
+        if (autoSelect) {
+          const pref = db.prepare("SELECT account_id FROM account_preferences WHERE user_id=? AND project_id=? AND provider='jira'").get(freshUser.id, bound.id);
+          if (!pref) {
+            db.prepare("INSERT INTO account_preferences (user_id,project_id,provider,account_id,updated_at) VALUES (?,?,'jira',?,?)").run(freshUser.id, bound.id, account.id, now);
+            autoSelectedCount += 1;
+          }
+        }
+      }
+      audit(freshUser.id, 'JIRA_PERSONAL_PROJECT_SYNC', account.id, null);
+    });
+    const finalUser = validate();
+    return {
+      account: accounts.listAccounts(finalUser).accounts.find(item => item.id === account.id),
+      identity: verified.identity,
+      joinedProjects,
+      matchedProjects,
+      joinedCount: joinedProjects.length,
+      matchedCount: matchedProjects.length,
+      autoSelectedCount,
+      remoteVisibleCount: catalog.length,
+      unmatchedRemoteCount,
+      projects: visibleProjects(finalUser),
+    };
+  }
+  function projectRowForSystem(projectId, provider) {
+    const sharedAccount = db.prepare("SELECT * FROM external_accounts WHERE scope='PROJECT' AND project_id=? AND provider=? AND enabled=1 AND deleted_at IS NULL ORDER BY rowid DESC LIMIT 1").get(projectId, provider);
+    if (sharedAccount) return { ...sharedAccount, project_id: projectId, account: sharedAccount, accountActorId: sharedAccount.owner_id };
+    return db.prepare('SELECT * FROM connector_configs WHERE project_id=? AND provider=?').get(projectId, provider) || null;
+  }
+  async function handle({ method, path, url, user, body, send, reauthorize }) {
     if (await mergeRequests.routes({ method, path, user, body, send, reauthorize })) return true;
+    const personalJiraSync = path.match(/^\/api\/accounts\/([A-Za-z0-9_-]{1,64})\/sync-jira-projects$/);
+    if (personalJiraSync && accounts) {
+      if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
+      send(200, await syncPersonalJiraProjects({ accountId: personalJiraSync[1], body, user, reauthorize }));
+      return true;
+    }
     const accountTest = path.match(/^\/api\/accounts\/([A-Za-z0-9_-]{1,64})\/test$/);
     if (accountTest && accounts) {
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
@@ -1044,21 +1425,23 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
       const info = accounts.listAccounts(user).accounts.find(account => account.id === accountTest[1]);
       if (!info) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
       if (!Object.hasOwn(PROVIDERS, info.provider)) fail(409, 'ACCOUNT_TEST_UNSUPPORTED', '该AI账号仅支持保存，执行器尚未接入，不能判定认证或执行成功');
-      const projectId = body.projectId || info.projectId || visibleProjects(user)[0]?.id;
-      if (!projectId) fail(400, 'PROJECT_REQUIRED', '请先选择可访问项目后验证账号');
-      const account = accounts.resolveAccount(user, info.id, projectId, info.provider);
+      const projectId = body.projectId || info.projectId || visibleProjects(user)[0]?.id || null;
+      if (!projectId && info.scope !== 'PERSONAL') fail(400, 'PROJECT_REQUIRED', '请先选择可访问项目后验证账号');
+      const account = projectId ? accounts.resolveAccount(user, info.id, projectId, info.provider) : accounts.resolvePersonalAccount(user, info.id, info.provider);
       if (!Number.isInteger(body.expectedVersion) || body.expectedVersion < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion');
       if (account.version !== body.expectedVersion) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
       const actorId = user.id; const row = accountRow(account, user, projectId);
       const validate = () => {
         if (reauthorize) user = reauthorize();
         if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效');
-        accounts.revalidateSelection(user, account, projectId, info.provider); return user;
+        if (projectId) accounts.revalidateSelection(user, account, projectId, info.provider);
+        else accounts.revalidatePersonalAccount(user, account, info.provider);
+        return user;
       };
       const verified = await checked(info.provider, row, validate); validate();
       send(200, { account: accounts.listAccounts(user).accounts.find(item => item.id === account.id), ...verified }); return true;
     }
-    const intake = path.match(/^\/api\/jira\/tasks\/(lookup|search|import|sync-mine)$/);
+    const intake = path.match(/^\/api\/jira\/tasks\/(lookup|search|import|sync-mine|sync-children)$/);
     if (intake) {
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
       if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备仅可访问已授权的任务接口');
@@ -1084,6 +1467,9 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     const match = path.match(/^\/api\/connectors\/([^/]+)\/(config|reuse-local|test|read|import|sync-projects)$/); if (!match) return false;
     if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持POST');
     const provider = cleanProvider(match[1]); const projectId = textField(body.projectId || 'default', 'projectId', { max: 64 }); role(user, projectId); const action = match[2];
+    if (provider === 'github' && action === 'import' && !(body.resource === 'github_pull' && body.includeDiff === true && body.kind === 'CODE')) {
+      fail(405, 'CONNECTOR_READ_ONLY', 'GitHub 仅支持读取并导入用于评审的 PR 差异');
+    }
     const managementAction = ['config', 'reuse-local', 'sync-projects'].includes(action);
     if (managementAction) role(user, projectId, true);
     const actorId = user.id;
@@ -1109,14 +1495,23 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
     if (action === 'sync-projects' && (provider !== 'jira' || user.role !== 'ADMIN')) fail(403, 'PROJECT_SYNC_ADMIN_ONLY', '同步Jira项目目录仅限平台管理员');
     const row = selectedRow(user, projectId, provider, body.accountId);
     role(user, projectId, managementAction || !row.account);
-    const validate = () => revalidate(row); const verified = await checked(provider, row, validate);
+    const validate = () => revalidate(row);
+    const resource = action === 'read' || action === 'import' ? body.resource ?? '' : undefined;
+    const verified = await checked(provider, row, validate, resource);
     validate();
     if (action === 'test') { send(200, { connector: metadata(provider, current(row)), ...verified }); return true; }
     if (action === 'sync-projects') { const result = await syncProjects(row, user, body, validate); validate(); send(200, result); return true; }
-    let result;
-    try { result = await readResource(provider, row, body, user, validate); } finally { validate(); }
+    let result; let childIssues;
+    try {
+      result = await readResource(provider, row, body, user, validate);
+      if (action === 'import' && provider === 'jira' && body.asAsset !== true && result.resource === 'jira_issue' && !result.issueType?.subtask && result.childKeys.length) {
+        childIssues = await readJiraChildren(row, [result], validate(), validate);
+      }
+    } finally { validate(); }
     if (action === 'read') send(200, result);
-    else send(200, importResource(provider, row, user, body, result));
+    else send(200, importResource(provider, row, user, body, result, childIssues));
     return true;
-  };
+  }
+  handle.internal = { remote, selectedRow, validateSelected, projectRowForSystem, readResource, importResource, mergeRequests };
+  return handle;
 }

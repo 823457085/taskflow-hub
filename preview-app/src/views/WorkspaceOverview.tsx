@@ -1,21 +1,21 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Col, Empty, Flex, Input, List, Row, Select, Skeleton, Space, Statistic, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Empty, Input, List, Select, Skeleton, Tag, Tooltip } from 'antd';
 import type { InputRef } from 'antd';
-import { ArrowRight, Check, CheckCircle2, ChevronDown, ChevronRight, ClipboardCheck, FileSpreadsheet, FileText, FolderKanban, FolderOpen, ListTodo, Pencil, RefreshCw, Search, Terminal, X } from 'lucide-react';
-import { api, ApiError, APPROVE_ROLES, OverviewStageStat, OverviewSummary, OverviewSummaryJob, Project, projectGroup, ProjectWorkspace, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
+import { ArrowRight, Check, CheckCircle2, ClipboardCheck, FileSpreadsheet, FileText, FolderKanban, FolderOpen, ListTodo, Pencil, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
+import { api, ApiError, APPROVE_ROLES, OverviewStageStat, OverviewSummary, OverviewSummaryJob, Project, projectGroup, ProjectWorkspace, REVIEW_STAGE_OPTIONS, Stage, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
-import { navigateWorkspace, openTaskRoute, WorkspaceSection } from './workspaceNavigation';
+import { navigateWorkspace, openTaskRoute, SECTION_LABELS, WorkspaceSection } from './workspaceNavigation';
 import { isTaskFrozen } from './taskAvailability';
 import { DeliveryFlowGuide } from './DeliveryFlowGuide';
+import { ProjectSkillsDialog } from './ProjectSkillsDialog';
 import { DEFAULT_APPROVE_REASON, roleLabel, stageLabel, taskStatusLabel } from './displayLabels';
-import { formatFlowHours, gradeDoraLeadTime, gradeFirstTimePassRate, gradeReviewTurnaround, type OverviewFlowTelemetry } from './deliveryMetrics';
+import { formatFlowHours, type OverviewFlowTelemetry } from './deliveryMetrics';
 import { evaluateReviewSla } from './reviewQueueSla';
-import { clearSearchOnEscape, isEditableTarget, readStoredStringList, writeStoredStringList } from './uiPreferences';
+import { clearSearchOnEscape, isEditableTarget } from './uiPreferences';
 import './WorkspaceOverview.css';
 
 const StandupDigestModal = lazy(() => import('./StandupDigestModal').then(mod => ({ default: mod.StandupDigestModal })));
 
-const COLLAPSED_GROUPS_KEY = 'taskflow.projects.collapsedGroups';
 
 export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[]; user: User; onUnauthorized: () => void; onSyncJira?: () => void; syncingJira?: boolean; onApproved?: () => void; openDigestTick?: number }> = ({ projects, tasks, user, onUnauthorized, onSyncJira, syncingJira, onApproved, openDigestTick }) => {
   const { message } = App.useApp();
@@ -110,7 +110,7 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
     if (!jobsToApprove.length || approvingJobId || batchApproving) return;
     setBatchApproving(true);
     let approvedCount = 0;
-    const stageOrder = (stage: string) => STAGES.findIndex(item => item.value === stage);
+    const stageOrder = (stage: string) => REVIEW_STAGE_OPTIONS.findIndex(item => item.value === stage);
     const ordered = [...jobsToApprove].sort((a, b) => stageOrder(a.stage) - stageOrder(b.stage));
     try {
       for (const job of ordered) {
@@ -171,15 +171,33 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
     { title: '材料版本', value: assetCount ?? '—', section: 'assets', icon: <FileText size={18} />, loading },
   ];
   return <div className="tf-overview">
-    <DeliveryFlowGuide />
-    <Row gutter={[16, 16]}>{metrics.map(item => <Col key={item.section} xs={12} lg={6}><Card className="tf-overview-metric" hoverable role="link" tabIndex={0} aria-label={`查看${item.title}`} onClick={() => navigateWorkspace(item.section)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); navigateWorkspace(item.section); } }}><Flex justify="space-between" align="center"><Statistic title={item.title} value={item.value} loading={item.loading} /><span className="tf-overview-icon" aria-hidden="true">{item.icon}</span></Flex><span className="tf-overview-metric-link">查看<ArrowRight size={13} /></span></Card></Col>)}</Row>
+    <div className="tf-overview-metrics" aria-label="工作台数据">
+      {metrics.map(item => (
+        <button key={item.section} type="button" className="tf-overview-metric" onClick={() => navigateWorkspace(item.section)}>
+          <span className="tf-overview-icon" aria-hidden="true">{item.icon}</span>
+          <span className="tf-overview-metric-text">
+            <span>{item.title}</span>
+            {item.loading ? <Skeleton.Input active size="small" /> : <strong>{item.value}</strong>}
+          </span>
+          <ArrowRight className="tf-overview-metric-arrow" size={16} aria-hidden="true" />
+        </button>
+      ))}
+    </div>
     <div className="tf-overview-columns">
-      <Card title="我的待办" extra={<Space size={8} wrap><Button size="small" icon={<FileSpreadsheet size={14} />} onClick={openDigest}>晨会 / 迭代简报</Button>{onSyncJira && <Button size="small" icon={<RefreshCw size={14} />} loading={syncingJira} onClick={onSyncJira}>同步最新 Jira</Button>}<Button type="link" onClick={() => navigateWorkspace('tasks')}>任务中心<ArrowRight size={14} /></Button></Space>}>
-        <List dataSource={mine.slice(0, 10)} locale={{ emptyText: <Empty description="当前没有指派给你的未完成任务。" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} renderItem={task => {
+      <Card
+        className="tf-overview-queue"
+        title={<span className="tf-overview-panel-title"><ListTodo size={17} />我的待办</span>}
+        extra={<div className="tf-overview-panel-actions">{onSyncJira && <Tooltip title="同步最新 Jira"><Button aria-label="同步最新 Jira" size="small" icon={<RefreshCw size={14} />} loading={syncingJira} onClick={onSyncJira} /></Tooltip>}<Button type="text" size="small" onClick={() => navigateWorkspace('tasks')}>任务中心<ArrowRight size={14} /></Button></div>}
+      >
+        <List dataSource={mine.slice(0, 10)} locale={{ emptyText: <Empty description="暂无我的待办" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }} renderItem={task => {
           const boundWs = workspaceByProject.get(task.projectId);
           return <List.Item className="tf-overview-task">
-            <div className="tf-overview-task-main"><Space size={8} wrap><Typography.Text code>{task.jiraKey}</Typography.Text><Typography.Text type="secondary">{projects.find(project => project.id === task.projectId)?.name}</Typography.Text>{task.externalRef?.assignee?.displayName && <Tag>{task.externalRef.assignee.displayName}</Tag>}</Space><Button type="link" className="tf-overview-task-title" onClick={() => openTaskRoute(task.id, { from: 'overview' })}>{task.title}</Button><Typography.Text type="secondary" className="tf-overview-meta">更新于 {timeText(task.externalRef?.version || task.updatedAt)}</Typography.Text></div>
-            <Space size={6} wrap>
+            <div className="tf-overview-task-main">
+              <div className="tf-overview-task-meta"><code>{task.jiraKey}</code><span>{projects.find(project => project.id === task.projectId)?.name}</span></div>
+              <button type="button" className="tf-overview-task-title" title={task.title} onClick={() => openTaskRoute(task.id, { from: 'overview' })}>{task.title}</button>
+              <time className="tf-overview-meta">{timeText(task.externalRef?.version || task.updatedAt)}</time>
+            </div>
+            <div className="tf-overview-row-actions">
               <StatusBadge variant="neutral">{task.externalRef ? task.externalRef.status : taskStatusLabel(task.status)}</StatusBadge>
               {boundWs && (
                 <Tooltip title={`在 Finder 打开仓库：${boundWs.repoPath}`}>
@@ -188,22 +206,20 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
                     type="text"
                     icon={<FolderOpen size={14} />}
                     loading={openingTaskProject === task.projectId}
+                    aria-label="在 Finder 打开仓库"
                     onClick={() => void openTaskRepo(task.projectId, boundWs.repoPath)}
-                  >
-                    Finder
-                  </Button>
+                  />
                 </Tooltip>
               )}
-              <Button size="small" type="primary" ghost onClick={() => openTaskRoute(task.id, { from: 'overview' })}>立即推进</Button>
-            </Space>
+            </div>
           </List.Item>;
         }} />
       </Card>
-      <div className="tf-overview-side">
-        <Card
-          title="待审批的报告"
+      <Card
+          className="tf-overview-queue tf-overview-reviews"
+          title={<span className="tf-overview-panel-title"><ClipboardCheck size={17} />待审批 <span className="tf-overview-count">{loading ? '—' : pending.length}</span></span>}
           extra={
-            <Space size={6} wrap>
+            <div className="tf-overview-panel-actions">
               {approvablePending.length >= 2 && (
                 <Button
                   size="small"
@@ -216,8 +232,8 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
                   一键全部批准 ({approvablePending.length})
                 </Button>
               )}
-              <Button type="link" size="small" onClick={() => navigateWorkspace('reviews')}>评审中心</Button>
-            </Space>
+              <Button type="text" size="small" onClick={() => navigateWorkspace('reviews')}>{SECTION_LABELS.reviews}<ArrowRight size={14} /></Button>
+            </div>
           }
         >
           {loading ? <Skeleton active paragraph={{ rows: 2 }} /> : pending.length ? <List dataSource={pending.slice(0, 5)} renderItem={job => {
@@ -225,14 +241,13 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
             const canQuickApprove = isJobQuickApprovable(job);
             const sla = evaluateReviewSla(job);
             return <List.Item>
-              <Flex justify="space-between" align="center" gap={8} style={{ width: '100%' }} wrap>
-                <Space size={6} wrap>
-                  <Button type="link" className="tf-overview-task-title" onClick={() => openTaskRoute(job.taskId, { tab: 'reviews', jobId: job.id, from: 'overview' })}>
-                    {jobTask?.jiraKey || job.taskId} · {stageLabel(job.stage)}
-                  </Button>
-                  <Tag color={sla.tagColor} style={{ marginInlineEnd: 0 }}>{sla.label}</Tag>
-                </Space>
-                <Space size={6} wrap>
+              <div className="tf-overview-review-row">
+                <div className="tf-overview-task-main">
+                  <div className="tf-overview-task-meta"><code>{jobTask?.jiraKey || job.taskId}</code><span>{stageLabel(job.stage)}</span></div>
+                  <button type="button" className="tf-overview-task-title" title={jobTask?.title} onClick={() => openTaskRoute(job.taskId, { tab: 'reviews', jobId: job.id, from: 'overview' })}>{jobTask?.title || stageLabel(job.stage)}</button>
+                </div>
+                <div className="tf-overview-row-actions">
+                  <Tag color={sla.tagColor}>{sla.label}</Tag>
                   {canQuickApprove && (
                     <Button
                       size="small"
@@ -245,153 +260,57 @@ export const WorkspaceOverview: React.FC<{ projects: Project[]; tasks: WorkTask[
                       一键批准
                     </Button>
                   )}
-                  <Button size="small" onClick={() => openTaskRoute(job.taskId, { tab: 'reviews', jobId: job.id, from: 'overview' })}>
-                    {canQuickApprove ? '查看' : '前往审批'}
-                  </Button>
-                </Space>
-              </Flex>
+                </div>
+              </div>
             </List.Item>;
           }} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={ready ? '暂无待审批报告' : current?.failure || '尚未读取评审记录。'} />}
         </Card>
 
-        {(() => {
-          const totalVisible = visibleTasks.length;
-          const doneTasksCount = visibleTasks.filter(t => t.status === 'DONE').length;
-          const reviewTasksCount = visibleTasks.filter(t => t.status === 'IN_REVIEW').length;
-          const progressTasksCount = visibleTasks.filter(t => t.status === 'IN_PROGRESS').length;
-          const openTasksCount = visibleTasks.filter(t => t.status === 'OPEN').length;
-          const unclaimedTasksCount = visibleTasks.filter(t => !t.assigneeId && t.status !== 'DONE').length;
-          const completionRate = totalVisible > 0 ? Math.round((doneTasksCount / totalVisible) * 100) : 0;
-          const blockers = ready ? (current.openBlockersCount ?? 0) : 0;
-          const breakdown = ready ? (current.stageBreakdown || {}) : {};
-          return (
-            <Card
-              title="交付健康度与门禁瓶颈雷达"
-              size="small"
-              extra={<Button type="link" size="small" icon={<FileSpreadsheet size={13} />} onClick={openDigest}>导出简报</Button>}
-            >
-              <Flex vertical gap={12}>
-                <div>
-                  <Flex justify="space-between" align="center" gap={8} wrap style={{ marginBottom: 6 }}>
-                    <Typography.Text style={{ fontSize: 12.5 }}>
-                      任务完成率 <strong>{completionRate}%</strong>（{doneTasksCount}/{totalVisible}）
-                    </Typography.Text>
-                    <Space size={6} wrap>
-                      {unclaimedTasksCount > 0 && <Tag style={{ marginInlineEnd: 0 }}>待认领 {unclaimedTasksCount}</Tag>}
-                      {blockers > 0 ? (
-                        <Tag color="error" style={{ marginInlineEnd: 0 }}>活跃阻断项 {blockers}</Tag>
-                      ) : (
-                        <Tag color="success" style={{ marginInlineEnd: 0 }}>0 活跃阻断</Tag>
-                      )}
-                    </Space>
-                  </Flex>
-                  {totalVisible > 0 && (
-                    <div className="tf-health-bar" aria-label="任务状态分布">
-                      {doneTasksCount > 0 && <div className="tf-health-seg-done" style={{ width: `${(doneTasksCount / totalVisible) * 100}%` }} title={`已完成 ${doneTasksCount}`} />}
-                      {reviewTasksCount > 0 && <div className="tf-health-seg-review" style={{ width: `${(reviewTasksCount / totalVisible) * 100}%` }} title={`评审中 ${reviewTasksCount}`} />}
-                      {progressTasksCount > 0 && <div className="tf-health-seg-progress" style={{ width: `${(progressTasksCount / totalVisible) * 100}%` }} title={`进行中 ${progressTasksCount}`} />}
-                      {openTasksCount > 0 && <div className="tf-health-seg-open" style={{ width: `${(openTasksCount / totalVisible) * 100}%` }} title={`待开始 ${openTasksCount}`} />}
-                    </div>
-                  )}
-                  <Flex gap={10} wrap style={{ marginTop: 6 }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>已完成 {doneTasksCount}</Typography.Text>
-                    <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>评审中 {reviewTasksCount}</Typography.Text>
-                    <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>进行中 {progressTasksCount}</Typography.Text>
-                    <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>待开始 {openTasksCount}</Typography.Text>
-                  </Flex>
-                </div>
-
-                <Flex vertical gap={6}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 600 }}>
-                    五阶段门禁流转分布（点击直达对应阶段）
-                  </Typography.Text>
-                  {STAGES.map(s => {
-                    const st = breakdown[s.value] || { approved: 0, pendingApproval: 0, awaitingReport: 0, changesRequested: 0 };
-                    return (
-                      <div
-                        key={s.value}
-                        role="link"
-                        tabIndex={0}
-                        className="tf-stage-radar-row"
-                        onClick={() => navigateWorkspace('reviews', { stage: s.value })}
-                        onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); navigateWorkspace('reviews', { stage: s.value }); } }}
-                      >
-                        <Typography.Text style={{ fontSize: 12.5, fontWeight: 500 }}>{s.label}</Typography.Text>
-                        <Space size={4} wrap>
-                          {st.pendingApproval > 0 && <Tag color="processing" style={{ marginInlineEnd: 0 }}>待审 {st.pendingApproval}</Tag>}
-                          {st.awaitingReport > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>待报告 {st.awaitingReport}</Tag>}
-                          {st.changesRequested > 0 && <Tag color="error" style={{ marginInlineEnd: 0 }}>退回 {st.changesRequested}</Tag>}
-                          <Tag color={st.approved > 0 ? 'success' : 'default'} style={{ marginInlineEnd: 0 }}>已过 {st.approved}</Tag>
-                        </Space>
-                      </div>
-                    );
-                  })}
-                </Flex>
-
-                {ready && current.flowTelemetry && (() => {
-                  const flow = current.flowTelemetry;
-                  const leadGrade = gradeDoraLeadTime(flow.medianLeadTimeHours);
-                  const turnGrade = gradeReviewTurnaround(flow.medianReviewTurnaroundHours);
-                  const passGrade = gradeFirstTimePassRate(flow.firstTimePassRate);
-                  return (
-                    <Flex vertical gap={6}>
-                      <Typography.Text type="secondary" style={{ fontSize: 12, fontWeight: 600 }}>
-                        DORA 研发效能与门禁流转遥测
-                      </Typography.Text>
-                      <div className="tf-dora-telemetry-grid">
-                        <div className="tf-dora-tile">
-                          <Flex justify="space-between" align="center" gap={4} wrap>
-                            <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>变更前置周期 (P50)</Typography.Text>
-                            <Tag color={leadGrade.tagColor} style={{ marginInlineEnd: 0 }}>{leadGrade.label}</Tag>
-                          </Flex>
-                          <span className="tf-dora-tile-value">{formatFlowHours(flow.medianLeadTimeHours)}</span>
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                            P90 {formatFlowHours(flow.p90LeadTimeHours)} · 结项 {flow.completedTasksTotal}
-                          </Typography.Text>
-                        </div>
-
-                        <div className="tf-dora-tile">
-                          <Flex justify="space-between" align="center" gap={4} wrap>
-                            <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>门禁审批周转 (P50)</Typography.Text>
-                            <Tag color={turnGrade.tagColor} style={{ marginInlineEnd: 0 }}>{turnGrade.label}</Tag>
-                          </Flex>
-                          <span className="tf-dora-tile-value">{formatFlowHours(flow.medianReviewTurnaroundHours)}</span>
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                            P90 {formatFlowHours(flow.p90ReviewTurnaroundHours)} · 已决 {flow.decidedReviewsCount}
-                          </Typography.Text>
-                        </div>
-
-                        <div className="tf-dora-tile">
-                          <Flex justify="space-between" align="center" gap={4} wrap>
-                            <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>门禁一次通过率</Typography.Text>
-                            <Tag color={passGrade.tagColor} style={{ marginInlineEnd: 0 }}>{passGrade.label}</Tag>
-                          </Flex>
-                          <span className="tf-dora-tile-value">{flow.firstTimePassRate !== null ? `${flow.firstTimePassRate}%` : '—'}</span>
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                            放行 {flow.approvedReviewsCount} · 退回返工 {flow.reworkReviewsCount}
-                          </Typography.Text>
-                        </div>
-
-                        <div className="tf-dora-tile">
-                          <Flex justify="space-between" align="center" gap={4} wrap>
-                            <Typography.Text type="secondary" style={{ fontSize: 11.5 }}>近 7 天交付吞吐</Typography.Text>
-                            <Tag color={flow.throughput7d.tasksDone + flow.throughput7d.gatesApproved + flow.throughput7d.assetsVersioned > 0 ? 'processing' : 'default'} style={{ marginInlineEnd: 0 }}>7d 窗口</Tag>
-                          </Flex>
-                          <span className="tf-dora-tile-value">{flow.throughput7d.tasksDone} 项结项</span>
-                          <Typography.Text type="secondary" style={{ fontSize: 11 }}>
-                            过审 {flow.throughput7d.gatesApproved} · 新材料 {flow.throughput7d.assetsVersioned}
-                          </Typography.Text>
-                        </div>
-                      </div>
-                    </Flex>
-                  );
-                })()}
-              </Flex>
-            </Card>
-          );
-        })()}
-      </div>
     </div>
+    {(() => {
+      const total = visibleTasks.length;
+      const distribution = [
+        { label: '已完成', count: visibleTasks.filter(task => task.status === 'DONE').length, className: 'done' },
+        { label: '评审中', count: visibleTasks.filter(task => task.status === 'IN_REVIEW').length, className: 'review' },
+        { label: '进行中', count: visibleTasks.filter(task => task.status === 'IN_PROGRESS').length, className: 'progress' },
+        { label: '待开始', count: visibleTasks.filter(task => task.status === 'OPEN').length, className: 'open' },
+      ];
+      const done = distribution[0].count;
+      const rate = total ? Math.round(done / total * 100) : 0;
+      const unclaimed = visibleTasks.filter(task => !task.assigneeId && task.status !== 'DONE').length;
+      const blockers = ready ? (current.openBlockersCount ?? 0) : 0;
+      const breakdown = ready ? current.stageBreakdown : undefined;
+      const telemetry = ready ? current.flowTelemetry : undefined;
+      return <Card className="tf-overview-delivery"
+        title="交付进度"
+        extra={<Button type="text" size="small" icon={<FileSpreadsheet size={14} />} onClick={openDigest}>晨会 / 迭代简报</Button>}
+      >
+        <div className="tf-overview-delivery-grid">
+          <div className="tf-overview-progress">
+            <div className="tf-overview-completion"><strong>{rate}%</strong><span>任务完成率 · {done}/{total}</span></div>
+            <div className="tf-health-bar" aria-label="任务状态分布">
+              {total > 0 && distribution.filter(item => item.count > 0).map(item => (
+                <span key={item.className} className={`tf-health-seg-${item.className}`} style={{ width: `${item.count / total * 100}%` }} title={`${item.label} ${item.count}`} />
+              ))}
+            </div>
+            <div className="tf-overview-progress-legend">
+              {distribution.map(item => <span key={item.className}><i className={`tf-health-seg-${item.className}`} />{item.label} <b>{item.count}</b></span>)}
+            </div>
+            <div className="tf-overview-workload">
+              {unclaimed > 0 && <span>待认领 <b>{unclaimed}</b></span>}
+              {ready && <span>阻断项 <b>{blockers}</b></span>}
+            </div>
+          </div>
+          <DeliveryFlowGuide breakdown={breakdown} />
+        </div>
+        {telemetry && <dl className="tf-overview-flow-stats">
+          <div><dt>变更前置周期 P50</dt><dd>{formatFlowHours(telemetry.medianLeadTimeHours)}</dd></div>
+          <div><dt>评审用时 P50</dt><dd>{formatFlowHours(telemetry.medianReviewTurnaroundHours)}</dd></div>
+          <div><dt>首次评审通过率</dt><dd>{telemetry.firstTimePassRate == null ? '—' : `${telemetry.firstTimePassRate}%`}</dd></div>
+          <div><dt>近 7 天结项</dt><dd>{telemetry.throughput7d.tasksDone} 项</dd></div>
+        </dl>}
+      </Card>;
+    })()}
     {(digestOpen || digestEverOpened) && (
       <Suspense fallback={null}>
         <StandupDigestModal
@@ -417,17 +336,22 @@ export const ProjectDirectory: React.FC<{
   tasks: WorkTask[];
   onOpen: (id: string, section?: WorkspaceSection) => void;
   onCreate?: () => void;
+  onSyncJiraProjects?: () => void;
+  syncingJiraProjects?: boolean;
   onProjectRenamed?: (project: Project) => void;
-}> = ({ projects, tasks, onOpen, onCreate, onProjectRenamed }) => {
-  const { message } = App.useApp();
+  onProjectDeleted?: (projectId: string) => void | Promise<void>;
+  onUnauthorized?: () => void;
+}> = ({ projects, tasks, onOpen, onCreate, onSyncJiraProjects, syncingJiraProjects, onProjectRenamed, onProjectDeleted, onUnauthorized }) => {
+  const { message, modal } = App.useApp();
   const [search, setSearch] = useState('');
   const [groupId, setGroupId] = useState('');
-  const [collapsedGroups, setCollapsedGroups] = useState<string[]>(() => readStoredStringList(COLLAPSED_GROUPS_KEY));
   const [workspaces, setWorkspaces] = useState<ProjectWorkspace[]>([]);
   const [editingId, setEditingId] = useState('');
   const [draftName, setDraftName] = useState('');
   const [savingId, setSavingId] = useState('');
+  const [deletingId, setDeletingId] = useState('');
   const [openingKey, setOpeningKey] = useState('');
+  const [skillsProjectId, setSkillsProjectId] = useState('');
   const searchInputRef = useRef<InputRef>(null);
   const mounted = useRef(true);
 
@@ -456,15 +380,39 @@ export const ProjectDirectory: React.FC<{
   const resetFilters = () => { setSearch(''); setGroupId(''); };
   const filtered = projects.filter(project => (!activeGroup || projectGroup(project).id === activeGroup) && (!search.trim() || `${project.key} ${project.name}`.toLowerCase().includes(search.trim().toLowerCase())));
 
-  const toggleGroupCollapse = (id: string) => {
-    setCollapsedGroups(prev => {
-      const next = prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id];
-      writeStoredStringList(COLLAPSED_GROUPS_KEY, next);
-      return next;
+  const canRename = (project: Project) => project.role === 'ADMIN' || project.role === 'LEAD';
+  const canDelete = (project: Project) => (project.role === 'ADMIN' || project.role === 'LEAD') && project.id !== 'default';
+
+  const confirmDeleteProject = (project: Project, taskCount: number) => {
+    if (!canDelete(project) || deletingId) return;
+    modal.confirm({
+      title: `删除项目 ${project.key}（${project.name}）？`,
+      content: taskCount > 0
+        ? `该项目下当前有 ${taskCount} 项本地任务。确认后将从本地工作台永久删除该项目及其任务、材料、评审记录与项目级配置；不会修改或删除外部 Jira / Confluence / GitLab 中的任何数据。`
+        : '将从本地工作台删除该空项目及其成员角色与项目级配置；不会影响外部 Jira / Confluence / GitLab 中的任何数据。',
+      okText: '确认删除项目',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: async () => {
+        setDeletingId(project.id);
+        try {
+          const query = taskCount > 0 ? '?cascade=1' : '';
+          await api<{ deletedProjectId: string; deletedKey: string; deletedTasks: number }>(
+            `projects/${encodeURIComponent(project.id)}${query}`,
+            undefined,
+            'DELETE',
+          );
+          if (!mounted.current) return;
+          void message.success(`已删除项目 ${project.key}。`);
+          await onProjectDeleted?.(project.id);
+        } catch (error) {
+          if (mounted.current) void message.error(error instanceof Error ? error.message : '删除项目失败。');
+        } finally {
+          if (mounted.current) setDeletingId('');
+        }
+      },
     });
   };
-
-  const canRename = (project: Project) => project.role === 'ADMIN' || project.role === 'LEAD';
 
   const startRename = (project: Project) => {
     if (!canRename(project) || savingId) return;
@@ -519,174 +467,119 @@ export const ProjectDirectory: React.FC<{
   };
 
   const workspaceByProject = new Map(workspaces.map(ws => [ws.projectId, ws]));
+  const skillsProject = projects.find(project => project.id === skillsProjectId);
 
-  const renderCard = (project: Project) => {
+  const renderProject = (project: Project) => {
     const work = tasks.filter(task => task.projectId === project.id);
-    const activeWorkCount = work.filter(task => task.status !== 'DONE').length;
-    const doneWorkCount = work.length - activeWorkCount;
-    const group = projectGroup(project);
+    const activeCount = work.filter(task => task.status !== 'DONE').length;
     const ws = workspaceByProject.get(project.id);
-    const repoBase = ws?.repoPath ? ws.repoPath.split('/').filter(Boolean).pop() || ws.repoPath : '';
+    const repoBase = ws?.repoPath.split('/').filter(Boolean).pop();
     const isEditing = editingId === project.id;
-    const editable = canRename(project);
 
-    return <Col key={project.id} xs={24} md={12} xl={8}><Card className="tf-project-directory-card"><Flex vertical gap={14} className="tf-project-card-content">
-      <Flex justify="space-between" align="center" gap={8}>
-        <Space size={6} wrap>
-          <Typography.Text code>{project.key}</Typography.Text>
-          {ws && <Tooltip title={`已绑定本地仓库：${ws.repoPath}`}><Tag color="geekblue">{repoBase}</Tag></Tooltip>}
-        </Space>
-        <Tag>{group.name}</Tag>
-      </Flex>
-
-      {isEditing ? (
-        <div className="tf-project-inline-rename">
-          <Input
-            autoFocus
-            aria-label={`编辑项目 ${project.key} 名称`}
-            value={draftName}
-            maxLength={100}
-            disabled={savingId === project.id}
-            onChange={event => setDraftName(event.target.value)}
-            onKeyDown={event => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                void commitRename(project);
-              } else if (event.key === 'Escape') {
-                event.preventDefault();
-                event.stopPropagation();
-                cancelRename();
-              }
-            }}
-          />
-          <Button size="small" type="primary" icon={<Check size={14} />} loading={savingId === project.id} aria-label="保存项目名称" onClick={() => void commitRename(project)} />
-          <Button size="small" type="text" icon={<X size={14} />} disabled={savingId === project.id} aria-label="取消编辑名称" onClick={cancelRename} />
-        </div>
-      ) : (
-        <div className="tf-project-title-row" onDoubleClick={() => startRename(project)} title={editable ? '双击可直接修改本地显示名称' : undefined}>
-          <Typography.Title level={3}>{project.name}</Typography.Title>
-          {editable && (
-            <Tooltip title="编辑名称（双击标题也可直接改）">
-              <Button
-                type="text"
-                size="small"
-                className="tf-project-rename-trigger"
-                icon={<Pencil size={13} />}
-                aria-label={`编辑 ${project.name} 名称`}
-                onClick={() => startRename(project)}
+    return <li key={project.id} className="tf-project-row">
+      <div className="tf-project-identity">
+        <span className="tf-project-symbol" aria-hidden="true"><FolderKanban size={18} /></span>
+        <div className="tf-project-text">
+          {isEditing ? (
+            <div className="tf-project-inline-rename">
+              <Input
+                autoFocus
+                aria-label={`编辑项目 ${project.key} 名称`}
+                value={draftName}
+                maxLength={100}
+                disabled={savingId === project.id}
+                onChange={event => setDraftName(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void commitRename(project);
+                  } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    cancelRename();
+                  }
+                }}
               />
-            </Tooltip>
+              <Button size="small" type="primary" icon={<Check size={14} />} loading={savingId === project.id} aria-label="保存项目名称" onClick={() => void commitRename(project)} />
+              <Button size="small" type="text" icon={<X size={14} />} disabled={savingId === project.id} aria-label="取消编辑名称" onClick={cancelRename} />
+            </div>
+          ) : (
+            <div className="tf-project-title-row">
+              <button type="button" className="tf-overview-task-title" title={project.name} onClick={() => onOpen(project.id, 'tasks')}>{project.name}</button>
+              {canRename(project) && (
+                <Tooltip title="编辑名称">
+                  <Button type="text" size="small" className="tf-project-rename-trigger" icon={<Pencil size={13} />} aria-label={`编辑 ${project.name} 名称`} onClick={() => startRename(project)} />
+                </Tooltip>
+              )}
+            </div>
           )}
+          <div className="tf-overview-task-meta">
+            <code>{project.key}</code>
+            <span className="tf-project-role-small">{roleLabel(project.role)}</span>
+            {repoBase && <span title={ws?.repoPath}>{repoBase}</span>}
+          </div>
         </div>
-      )}
-
-      <Flex gap={24} wrap>
-        <div>
-          <Typography.Text type="secondary">任务</Typography.Text>
-          <div className="tf-project-task-count">{work.length}</div>
-          {work.length > 0 && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              待办 {activeWorkCount} · 已完成 {doneWorkCount}
-            </Typography.Text>
-          )}
-        </div>
-        <div><Typography.Text type="secondary">本地角色</Typography.Text><div className="tf-project-role">{roleLabel(project.role)}</div></div>
-      </Flex>
-
-      <Flex gap={6} wrap className="tf-project-card-actions">
-        <Button type="primary" ghost onClick={() => onOpen(project.id, 'tasks')}>进入任务<ArrowRight size={14} /></Button>
-        {ws && (
-          <Button
-            size="middle"
-            icon={<FolderOpen size={14} />}
-            loading={openingKey === `${project.id}:finder`}
-            onClick={() => void openRepoDirect(project.id, ws.repoPath, 'finder')}
-          >
-            Finder 打开
-          </Button>
-        )}
-        {ws && (
-          <Tooltip title="在 Cursor 中打开该仓库">
-            <Button
-              type="text"
-              icon={<Terminal size={14} />}
-              loading={openingKey === `${project.id}:cursor`}
-              onClick={() => void openRepoDirect(project.id, ws.repoPath, 'cursor')}
-            >
-              Cursor
-            </Button>
-          </Tooltip>
-        )}
+      </div>
+      <div className="tf-project-work">
+        <strong>{activeCount}</strong><span>待办</span>
+        <strong>{work.length - activeCount}</strong><span>已完成</span>
+      </div>
+      <div className="tf-project-role">{roleLabel(project.role)}</div>
+      <div className="tf-project-card-actions">
+        {ws && <>
+          <Tooltip title="在 Finder 打开仓库"><Button type="text" icon={<FolderOpen size={15} />} loading={openingKey === `${project.id}:finder`} aria-label="在 Finder 打开仓库" onClick={() => void openRepoDirect(project.id, ws.repoPath, 'finder')} /></Tooltip>
+          <Tooltip title="在 Cursor 打开仓库"><Button type="text" icon={<Terminal size={15} />} loading={openingKey === `${project.id}:cursor`} aria-label="在 Cursor 打开仓库" onClick={() => void openRepoDirect(project.id, ws.repoPath, 'cursor')} /></Tooltip>
+        </>}
         <Button type="text" onClick={() => onOpen(project.id, 'members')}>成员</Button>
         {project.permissions?.manageConnections && <Button type="text" onClick={() => onOpen(project.id, 'connections')}>连接</Button>}
-      </Flex>
-    </Flex></Card></Col>;
+        <Button type="text" aria-label={`配置项目 ${project.key} 的 Skills`} onClick={() => setSkillsProjectId(project.id)}>Skills</Button>
+        {canDelete(project) && (
+          <Tooltip title="删除项目">
+            <Button type="text" danger icon={<Trash2 size={15} />} loading={deletingId === project.id} disabled={Boolean(deletingId && deletingId !== project.id)} aria-label={`删除项目 ${project.key}`} onClick={() => confirmDeleteProject(project, work.length)} />
+          </Tooltip>
+        )}
+        <Tooltip title="进入任务">
+          <Button type="text" icon={<ArrowRight size={16} />} aria-label={`进入项目 ${project.key} 任务`} onClick={() => onOpen(project.id, 'tasks')} />
+        </Tooltip>
+      </div>
+    </li>;
   };
 
-  const visibleGroups = [...new Map(filtered.map(project => { const group = projectGroup(project); return [group.id, group] as const; })).values()];
-  const showGrouped = !activeGroup && !search.trim() && visibleGroups.length > 1;
-  const allGroupsCollapsed = showGrouped && visibleGroups.every(group => collapsedGroups.includes(group.id));
-  const toggleAllGroups = () => {
-    const visibleIds = visibleGroups.map(group => group.id);
-    setCollapsedGroups(prev => {
-      const next = allGroupsCollapsed
-        ? prev.filter(id => !visibleIds.includes(id))
-        : [...new Set([...prev, ...visibleIds])];
-      writeStoredStringList(COLLAPSED_GROUPS_KEY, next);
-      return next;
-    });
-  };
-
+  const visibleGroups = groupId || search.trim() ? [] : groups;
   return <div className="tf-project-directory">
-    <Flex gap={12} wrap className="tf-project-directory-toolbar">
-      <Input
-        ref={searchInputRef}
-        prefix={<Search size={16} />}
-        aria-label="搜索项目"
-        placeholder="搜索项目名称或标识（按 / 聚焦，Esc 清空）"
-        value={search}
-        onChange={event => setSearch(event.target.value)}
-        onKeyDown={clearSearchOnEscape(search, () => setSearch(''))}
-        allowClear
-      />
-      <Select aria-label="项目分组" value={activeGroup} onChange={setGroupId} options={[{ value: '', label: '全部分组' }, ...groups.map(group => ({ value: group.id, label: group.name }))]} />
-      {showGrouped && <Button type="text" onClick={toggleAllGroups}>{allGroupsCollapsed ? '全部展开' : '全部收起'}</Button>}
-      {(!!search || !!activeGroup) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}
-      {onCreate && <Button className="tf-project-create" type="primary" onClick={onCreate}>新建本地项目</Button>}
-    </Flex>
-    <Typography.Paragraph type="secondary" className="tf-project-group-note">
-      {projects.some(project => project.jira?.category)
-        ? '按 Jira 项目分类展示（分组展开/折叠会自动记住）；双击项目标题可直接修改本地显示名称。'
-        : projects.some(project => project.jira)
-          ? '按项目名称前缀分组（分组展开/折叠会自动记住）；双击项目标题可直接修改本地显示名称，不影响远端 Jira。'
-          : '本地项目空间；双击项目标题可直接修改名称，连接 Jira 后可同步现有项目及其分类。'}
-    </Typography.Paragraph>
-    {!filtered.length ? (
-      <Card><Empty description="没有符合条件的项目" image={Empty.PRESENTED_IMAGE_SIMPLE}>{(!!search || !!activeGroup) && <Button onClick={resetFilters}>清空筛选</Button>}</Empty></Card>
-    ) : showGrouped ? (
-      <Flex vertical gap={14}>
-        {visibleGroups.map(group => {
-          const items = filtered.filter(project => projectGroup(project).id === group.id);
-          const isCollapsed = collapsedGroups.includes(group.id);
-          return (
-            <section key={group.id} className="tf-project-group-section">
-              <button
-                type="button"
-                className="tf-project-group-header"
-                aria-expanded={!isCollapsed}
-                onClick={() => toggleGroupCollapse(group.id)}
-              >
-                {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                <span className="tf-project-group-title">{group.name}</span>
-                <span className="tf-project-group-count">{items.length} 个项目</span>
-              </button>
-              {!isCollapsed && <Row gutter={[16, 16]}>{items.map(renderCard)}</Row>}
-            </section>
-          );
-        })}
-      </Flex>
-    ) : (
-      <Row gutter={[16, 16]}>{filtered.map(renderCard)}</Row>
-    )}
+    <div className="tf-project-directory-toolbar">
+      <div className="tf-project-filter">
+        <Input
+          ref={searchInputRef}
+          prefix={<Search size={16} />}
+          aria-label="搜索项目"
+          placeholder="搜索项目名称或标识"
+          value={search}
+          onChange={event => setSearch(event.target.value)}
+          onKeyDown={clearSearchOnEscape(search, () => setSearch(''))}
+          allowClear
+        />
+        <Select aria-label="项目分组" value={activeGroup} onChange={setGroupId} options={[{ value: '', label: '全部分组' }, ...groups.map(group => ({ value: group.id, label: group.name }))]} />
+        {(!!search || !!activeGroup) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}
+      </div>
+      <div className="tf-project-toolbar-actions">
+        {onSyncJiraProjects && <Button icon={<RefreshCw size={15} />} aria-label="按 Jira 权限同步项目" loading={syncingJiraProjects} onClick={onSyncJiraProjects}>同步 Jira 项目</Button>}
+        {onCreate && <Button type="primary" icon={<Plus size={16} />} onClick={onCreate}>新建项目</Button>}
+      </div>
+    </div>
+    <div className="tf-project-roster">
+      {!filtered.length ? (
+        <Empty description="没有符合条件的项目" image={Empty.PRESENTED_IMAGE_SIMPLE}>{(!!search || !!activeGroup) && <Button onClick={resetFilters}>清空筛选</Button>}</Empty>
+      ) : visibleGroups.length > 1 ? visibleGroups.map(group => {
+        const items = filtered.filter(project => projectGroup(project).id === group.id);
+        return <section key={group.id} className="tf-project-group-section">
+          <h2 className="tf-project-group-header">{group.name}<span>{items.length}</span></h2>
+          <ul className="tf-project-list">{items.map(renderProject)}</ul>
+        </section>;
+      }) : (
+        <ul className="tf-project-list">{filtered.map(renderProject)}</ul>
+      )}
+    </div>
+    {skillsProject && <ProjectSkillsDialog key={skillsProject.id} project={skillsProject} onClose={() => setSkillsProjectId('')} onUnauthorized={onUnauthorized} />}
   </div>;
 };

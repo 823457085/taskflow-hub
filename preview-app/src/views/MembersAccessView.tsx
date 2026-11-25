@@ -1,10 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Popconfirm, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { Download, Plus, RefreshCw, Search, ShieldCheck } from 'lucide-react';
-import { api, ApiError, MemberCandidate, Project, ProjectMember, ProjectPermissions, Role, ROLES, Stage, STAGES, timeText, User, WorkTask } from './workspaceApi';
+import { Download, Plus, RefreshCw, Search, ShieldCheck, Trash2 } from 'lucide-react';
+import { api, ApiError, MemberCandidate, Project, ProjectMember, ProjectPermissions, REVIEW_STAGE_OPTIONS, Role, ROLES, RuleEnforcement, Stage, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
-import { roleLabel, stageLabel } from './displayLabels';
+import { pluginStatusLabel, roleLabel, stageLabel } from './displayLabels';
 import { clearSearchOnEscape, isSubmitShortcut } from './uiPreferences';
 import { openTaskRoute } from './workspaceNavigation';
 import { ResetPasswordDrawer } from './PasswordDrawers';
@@ -35,12 +35,11 @@ export const MembersAccessView: React.FC<{
   const screens = Grid.useBreakpoint();
   const [form] = Form.useForm<{ userId: string; role: Role }>();
   const [newMemberForm] = Form.useForm<{ username: string; password: string; role: Role }>();
-  const [pluginForm] = Form.useForm<{ id: string; name: string; version: string; stages: Stage[] }>();
+  const [pluginForm] = Form.useForm<{ id: string; name: string; version: string; stages: Stage[]; enforcement: RuleEnforcement; rule?: string; evaluator?: string; ruleType?: 'regex_forbidden' | 'regex_required' | 'openapi_lint'; rulePattern?: string }>();
   const [open, setOpen] = useState(false);
   const [newMemberOpen, setNewMemberOpen] = useState(false);
   const [resetTarget, setResetTarget] = useState<{ id: string; username: string } | null>(null);
   const [pluginDrawerOpen, setPluginDrawerOpen] = useState(false);
-  const [editingId, setEditingId] = useState('');
   const [memberSearch, setMemberSearch] = useState('');
   const [busy, setBusy] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -60,11 +59,10 @@ export const MembersAccessView: React.FC<{
   const canManage = permissions.manageMembers && !accessDenied;
   const canCreateUsers = user.role === 'ADMIN' && canManageUsers && !accessDenied;
   const canRegisterPlugins = permissions.registerPlugins && !accessDenied;
-  const editingMember = members.find(member => member.id === editingId);
   const availableCandidates = candidates.filter(candidate => !members.some(member => member.id === candidate.id));
   const capabilityKey = JSON.stringify([projectId, user.id, user.role, role, permissions, canManageUsers]);
   const closeForms = () => {
-    setOpen(false); setNewMemberOpen(false); setPluginDrawerOpen(false); setEditingId(''); setResetTarget(null);
+    setOpen(false); setNewMemberOpen(false); setPluginDrawerOpen(false); setResetTarget(null);
     form.resetFields(); newMemberForm.resetFields(); pluginForm.resetFields();
   };
   const invalidate = () => { sequence.current += 1; pending.current = false; setBusy(false); };
@@ -77,10 +75,10 @@ export const MembersAccessView: React.FC<{
     if (!open) return;
     const userId = form.getFieldValue('userId');
     const selectedRole = form.getFieldValue('role');
-    if (!permissions.manageMembers || !permissions.grantRoles.length || selectedRole && !permissions.grantRoles.includes(selectedRole) || editingId && !editingMember?.canEditRole || !editingId && userId && !availableCandidates.some(candidate => candidate.id === userId)) {
-      invalidate(); setOpen(false); setEditingId(''); form.resetFields();
+    if (!permissions.manageMembers || !permissions.grantRoles.length || selectedRole && !permissions.grantRoles.includes(selectedRole) || userId && !availableCandidates.some(candidate => candidate.id === userId)) {
+      invalidate(); setOpen(false); form.resetFields();
     }
-  }, [open, editingId, members, candidates, capabilityKey]);
+  }, [open, members, candidates, capabilityKey]);
   const run = async (action: (isCurrent: () => boolean) => Promise<void>) => {
     if (!alive.current || accessLost.current || pending.current) return;
     const request = ++sequence.current;
@@ -97,11 +95,11 @@ export const MembersAccessView: React.FC<{
     } finally { if (isCurrent()) { pending.current = false; setBusy(false); } }
   };
   const saveMembership = (values: { userId: string; role: Role }) => {
-    if (!canManage || !permissions.grantRoles.includes(values.role) || (editingId ? values.userId !== editingId || !editingMember?.canEditRole : !availableCandidates.some(candidate => candidate.id === values.userId))) return;
+    if (!canManage || !permissions.grantRoles.includes(values.role) || !availableCandidates.some(candidate => candidate.id === values.userId)) return;
     void run(async isCurrent => {
       await api('projects/' + projectId + '/members', values);
       if (!isCurrent()) return;
-      setOpen(false); setEditingId(''); form.resetFields(); void message.success('项目成员已保存。');
+      setOpen(false); form.resetFields(); void message.success('项目成员已保存。');
       await onChanged();
     });
   };
@@ -123,7 +121,6 @@ export const MembersAccessView: React.FC<{
       await onChanged();
     });
   };
-  const editMember = (member: ProjectMember) => { form.resetFields(); setEditingId(member.id); form.setFieldsValue({ userId: member.id, role: member.role }); setOpen(true); };
   const renderMemberRoleControl = (member: ProjectMember) => {
     if (canManage && member.canEditRole && permissions.grantRoles.length > 0) {
       const roleOptions = [...new Set([member.role, ...permissions.grantRoles])].map(value => ({
@@ -145,8 +142,7 @@ export const MembersAccessView: React.FC<{
     }
     return <StatusBadge variant="neutral">{roleLabel(member.role)}</StatusBadge>;
   };
-  const membershipAction = (member: ProjectMember) => canManage && member.canEditRole ? <Button type="link" disabled={busy} onClick={() => editMember(member)}>编辑角色</Button> : null;
-  const closeMembership = () => { setOpen(false); setEditingId(''); form.resetFields(); };
+  const closeMembership = () => { setOpen(false); form.resetFields(); };
   const closeNewMember = () => { setNewMemberOpen(false); newMemberForm.resetFields(); };
   const resetPasswordAction = (member: User) => member.id === user.id
     ? <Tooltip title="请在顶部“修改密码”修改自己的密码"><Typography.Text type="secondary">当前账号</Typography.Text></Tooltip>
@@ -223,25 +219,37 @@ export const MembersAccessView: React.FC<{
         name: preset.name,
         version: preset.version,
         stages: preset.stages,
+        enforcement: preset.enforcement,
+        evaluator: preset.evaluator,
+        rule: preset.description,
       });
       if (!alive.current || accessLost.current) return;
-      void message.success(`已启用项目门禁策略插件「${preset.name}」！`);
+      void message.success(`已启用项目门禁规则「${preset.name}」！`);
       await Promise.all([loadPlugins(), loadAudit()]);
     } catch (error) {
       if (!alive.current || accessLost.current) return;
       if (error instanceof ApiError && error.status === 409) {
-        void message.info('该策略插件已登记。');
+        void message.info('该策略规则已登记。');
         await loadPlugins();
       } else {
-        void message.error(error instanceof Error ? error.message : '登记插件失败。');
+        void message.error(error instanceof Error ? error.message : '登记规则失败。');
       }
     } finally {
       if (alive.current) setInstallingPluginId('');
     }
   };
 
-  const registerCustomPlugin = (values: { id: string; name: string; version: string; stages: Stage[] }) => {
+  const registerCustomPlugin = (values: { id: string; name: string; version: string; stages: Stage[]; enforcement?: RuleEnforcement; rule?: string; evaluator?: string; ruleType?: 'regex_forbidden' | 'regex_required' | 'openapi_lint'; rulePattern?: string }) => {
     if (!canRegisterPlugins) return;
+    const declarativeRules = values.ruleType
+      ? [{
+        type: values.ruleType,
+        ...(values.ruleType !== 'openapi_lint' ? { pattern: (values.rulePattern || '').trim() } : {}),
+        severity: values.enforcement === 'BLOCK' ? 'CRITICAL' : 'WARN',
+        title: values.name.trim(),
+        detail: (values.rule || values.name).trim(),
+      }]
+      : undefined;
     void run(async isCurrent => {
       await api('plugins', {
         projectId,
@@ -249,10 +257,24 @@ export const MembersAccessView: React.FC<{
         name: values.name.trim(),
         version: values.version.trim(),
         stages: values.stages,
+        enforcement: values.enforcement || 'WARN',
+        ...(values.rule?.trim() ? { rule: values.rule.trim() } : {}),
+        ...(values.evaluator ? { evaluator: values.evaluator } : {}),
+        ...(declarativeRules ? { rules: declarativeRules } : {}),
       });
       if (!isCurrent()) return;
       closePluginDrawer();
-      void message.success(`已登记门禁策略插件「${values.name.trim()}」。`);
+      void message.success(`已登记门禁规则「${values.name.trim()}」。`);
+      await Promise.all([loadPlugins(), loadAudit()]);
+    });
+  };
+
+  const removePlugin = (pluginId: string) => {
+    if (!canRegisterPlugins || busy) return;
+    void run(async isCurrent => {
+      await api('plugins/' + encodeURIComponent(pluginId), undefined, 'DELETE');
+      if (!isCurrent()) return;
+      void message.success('已移除该门禁规则。');
       await Promise.all([loadPlugins(), loadAudit()]);
     });
   };
@@ -360,49 +382,48 @@ export const MembersAccessView: React.FC<{
   const columns: TableColumnsType<ProjectMember> = [
     { title: '成员', dataIndex: 'username' },
     { title: '项目角色', dataIndex: 'role', render: (_, member) => renderMemberRoleControl(member) },
-    ...(canManage ? [{ title: '操作', width: 120, render: (_: unknown, member: ProjectMember) => membershipAction(member) }] : []),
   ];
   if (accessDenied) return null;
-  return <Flex vertical gap={24} style={{ minWidth: 0 }}>
-    <Card title="当前项目权限">
-      <Typography.Paragraph type="secondary">项目角色与以下权限仅在当前项目生效。</Typography.Paragraph>
-      <Descriptions size="small" column={{ xs: 1, sm: 2, lg: 3 }} items={[
-        { key: 'role', label: '项目角色', children: <StatusBadge variant="neutral">{roleLabel(role)}</StatusBadge> },
-        { key: 'members', label: '成员管理', children: permissions.manageMembers ? '可管理' : '只读成员信息' },
-        { key: 'tasks', label: '任务分配', children: permissions.assignTasks ? '可分配' : '不可分配' },
-        { key: 'connections', label: '连接管理', children: permissions.manageConnections ? '可管理' : '不可管理' },
-        { key: 'plugins', label: '插件登记', children: permissions.registerPlugins ? '可登记' : '不可登记' },
-        { key: 'audit', label: '审计记录', children: permissions.viewAudit ? '可查看' : '不可查看' },
-        ...(permissions.manageMembers ? [{ key: 'roles', label: '可授予角色', children: permissions.grantRoles.map(roleLabel).join(' · ') || '—' }] : []),
-      ]} />
-    </Card>
-    <Card className="tf-members-card" title="项目成员" extra={canManage && <Button type="primary" icon={<Plus size={16} />} disabled={busy || !permissions.grantRoles.length || !availableCandidates.length} onClick={() => { setEditingId(''); form.resetFields(); form.setFieldsValue({ role: permissions.grantRoles.includes('DEV') ? 'DEV' : permissions.grantRoles[0] }); setOpen(true); }}>添加成员</Button>}>
-      {members.length > 2 && (
-        <div style={{ marginBottom: 12, maxWidth: 320 }}>
-          <Input
-            prefix={<Search size={15} />}
-            aria-label="搜索项目成员"
-            placeholder="搜索成员用户名或角色（按 Esc 清空）"
-            value={memberSearch}
-            allowClear
-            onChange={event => setMemberSearch(event.target.value)}
-            onKeyDown={clearSearchOnEscape(memberSearch, () => setMemberSearch(''))}
-          />
-        </div>
-      )}
-      {screens.md ? <Table rowKey="id" dataSource={visibleMembers} columns={columns} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} locale={{ emptyText: members.length ? '没有符合条件的成员。' : '当前项目暂无成员。' }} /> : <List className="tf-members-mobile-list" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} dataSource={visibleMembers} locale={{ emptyText: members.length ? '没有符合条件的成员。' : '当前项目暂无成员。' }} renderItem={member => <List.Item extra={membershipAction(member)}><List.Item.Meta title={member.username} description={renderMemberRoleControl(member)} /></List.Item>} />}
-    </Card>
+  return <Flex vertical gap={14} className="tf-members-workspace">
+    <div className="tf-members-summary">
+      <Card className="tf-members-card" title="项目成员" extra={canManage && <Button type="primary" icon={<Plus size={16} />} disabled={busy || !permissions.grantRoles.length || !availableCandidates.length} onClick={() => { form.resetFields(); form.setFieldsValue({ role: permissions.grantRoles.includes('DEV') ? 'DEV' : permissions.grantRoles[0] }); setOpen(true); }}>添加成员</Button>}>
+        {members.length > 2 && (
+          <div style={{ marginBottom: 12, maxWidth: 320 }}>
+            <Input
+              prefix={<Search size={15} />}
+              aria-label="搜索项目成员"
+              placeholder="搜索成员用户名或角色（按 Esc 清空）"
+              value={memberSearch}
+              allowClear
+              onChange={event => setMemberSearch(event.target.value)}
+              onKeyDown={clearSearchOnEscape(memberSearch, () => setMemberSearch(''))}
+            />
+          </div>
+        )}
+        {screens.md ? <Table rowKey="id" dataSource={visibleMembers} columns={columns} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} locale={{ emptyText: members.length ? '没有符合条件的成员。' : '当前项目暂无成员。' }} /> : <List className="tf-members-mobile-list" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} dataSource={visibleMembers} locale={{ emptyText: members.length ? '没有符合条件的成员。' : '当前项目暂无成员。' }} renderItem={member => <List.Item><List.Item.Meta title={member.username} description={renderMemberRoleControl(member)} /></List.Item>} />}
+      </Card>
+      <Card title="我的项目权限" size="small" className="tf-member-permissions">
+        <Descriptions size="small" column={1} items={[
+          { key: 'role', label: '项目角色', children: <StatusBadge variant="neutral">{roleLabel(role)}</StatusBadge> },
+          { key: 'members', label: '成员管理', children: permissions.manageMembers ? '可管理' : '只读成员信息' },
+          { key: 'tasks', label: '任务分配', children: permissions.assignTasks ? '可分配' : '不可分配' },
+          { key: 'connections', label: '连接管理', children: permissions.manageConnections ? '可管理' : '不可管理' },
+          { key: 'plugins', label: '插件登记', children: permissions.registerPlugins ? '可登记' : '不可登记' },
+          { key: 'audit', label: '审计记录', children: permissions.viewAudit ? '可查看' : '不可查看' },
+          ...(permissions.manageMembers ? [{ key: 'roles', label: '可授予角色', children: permissions.grantRoles.map(roleLabel).join(' · ') || '—' }] : []),
+        ]} />
+      </Card>
+    </div>
     {canCreateUsers && <Card className="tf-members-card" title="平台成员" extra={<Button icon={<Plus size={16} />} disabled={busy} onClick={() => { newMemberForm.resetFields(); setNewMemberOpen(true); }}>创建平台成员</Button>}>
-      <Typography.Paragraph type="secondary">创建后加入当前项目，项目角色决定其可访问的任务与操作。</Typography.Paragraph>
       {screens.md ? <Table rowKey="id" dataSource={users} columns={[{ title: '成员', dataIndex: 'username' }, { title: '平台角色', dataIndex: 'role', render: value => <StatusBadge variant="neutral">{roleLabel(value)}</StatusBadge> }, { title: '操作', key: 'actions', render: (_, member) => resetPasswordAction(member) }]} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} /> : <List className="tf-members-mobile-list" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} dataSource={users} renderItem={member => <List.Item extra={resetPasswordAction(member)}><List.Item.Meta title={member.username} description={<StatusBadge variant="neutral">{roleLabel(member.role)}</StatusBadge>} /></List.Item>} />}
     </Card>}
     <ResetPasswordDrawer target={canCreateUsers ? resetTarget : null} onClose={() => setResetTarget(null)} onUnauthorized={onUnauthorized} onForbidden={onForbidden} />
     <Card
       className="tf-members-card"
       title={
-        <Space size={8}>
+        <Space size={8} wrap>
           <ShieldCheck size={16} />
-          <span>项目门禁策略插件</span>
+          <span>项目门禁规则</span>
           <Typography.Text type="secondary" style={{ fontSize: 13, fontWeight: 400 }}>
             {plugins.length} 项已生效
           </Typography.Text>
@@ -421,7 +442,7 @@ export const MembersAccessView: React.FC<{
               disabled={busy}
               onClick={() => {
                 pluginForm.resetFields();
-                pluginForm.setFieldsValue({ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'] });
+                pluginForm.setFieldsValue({ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'], enforcement: 'WARN' });
                 setPluginDrawerOpen(true);
               }}
             >
@@ -432,10 +453,66 @@ export const MembersAccessView: React.FC<{
       }
     >
       <Flex vertical gap={14}>
-        <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-          登记后的门禁策略会自动冻结计入对应阶段评审快照（<code>policyHash</code>），并在调用本机 AI 评审时自动注入策略审查指令。
-        </Typography.Text>
-        {canRegisterPlugins && (
+        <Table<PolicyPlugin>
+          rowKey="id"
+          dataSource={plugins}
+          loading={pluginsLoading}
+          size="small"
+          pagination={false}
+          columns={[
+            {
+              title: '规则名称 / 要求说明',
+              key: 'name',
+              render: (_, p) => (
+                <Flex vertical gap={2}>
+                  <Space size={6} wrap>
+                    <Typography.Text strong>{p.name}</Typography.Text>
+                    <Tag color={p.enforcement === 'BLOCK' ? 'error' : 'warning'} style={{ marginInlineEnd: 0, fontSize: 11 }}>
+                      {p.enforcement === 'BLOCK' ? 'BLOCK · 违规阻断' : 'WARN · 建议提醒'}
+                    </Tag>
+                  </Space>
+                  {p.rule && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.rule}</Typography.Text>}
+                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>{p.id} · v{p.version}</Typography.Text>
+                </Flex>
+              ),
+            },
+            {
+              title: '生效环节',
+              key: 'stages',
+              render: (_, p) => (
+                <Space size={[4, 4]} wrap>
+                  {(p.stages || []).map(st => (
+                    <Tag key={st} color="geekblue" style={{ marginInlineEnd: 0 }}>{stageLabel(st)}</Tag>
+                  ))}
+                </Space>
+              ),
+            },
+            {
+              title: '规则状态',
+              key: 'status',
+              width: 150,
+              render: (_, p) => (
+                <StatusBadge variant={p.status === 'EXECUTABLE_DECLARATIVE' ? 'green' : 'blue'}>
+                  {pluginStatusLabel(p.status)}
+                </StatusBadge>
+              ),
+            },
+            ...(canRegisterPlugins ? [{
+              title: '操作',
+              key: 'actions',
+              width: 72,
+              render: (_: unknown, p: PolicyPlugin) => (
+                <Popconfirm title="移除此条门禁规则？" okText="移除" cancelText="取消" onConfirm={() => removePlugin(p.id)}>
+                  <Button type="text" danger size="small" icon={<Trash2 size={14} />} aria-label={`移除规则 ${p.name}`} />
+                </Popconfirm>
+              ),
+            }] : []),
+          ]}
+          scroll={{ x: 475 }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前项目暂无门禁规则。" /> }}
+        />
+        {canRegisterPlugins && <Flex vertical gap={8}>
+          <Typography.Text strong>可启用规则</Typography.Text>
           <div style={{ display: 'grid', gridTemplateColumns: screens.md ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 10 }}>
             {POLICY_PLUGIN_PRESETS.map(preset => {
               const installed = isPresetInstalled(preset.baseId, plugins, projectId, projectKey);
@@ -476,58 +553,15 @@ export const MembersAccessView: React.FC<{
               );
             })}
           </div>
-        )}
-        <Table<PolicyPlugin>
-          rowKey="id"
-          dataSource={plugins}
-          loading={pluginsLoading}
-          size="small"
-          pagination={false}
-          columns={[
-            {
-              title: '策略名称 / 标识',
-              key: 'name',
-              render: (_, p) => (
-                <Flex vertical gap={2}>
-                  <Typography.Text strong>{p.name}</Typography.Text>
-                  <Typography.Text type="secondary" code style={{ fontSize: 11 }}>{p.id}</Typography.Text>
-                </Flex>
-              ),
-            },
-            {
-              title: '版本',
-              dataIndex: 'version',
-              width: 96,
-              render: val => <Typography.Text code>v{val}</Typography.Text>,
-            },
-            {
-              title: '生效门禁阶段',
-              key: 'stages',
-              render: (_, p) => (
-                <Space size={[4, 4]} wrap>
-                  {(p.stages || []).map(st => (
-                    <Tag key={st} color="geekblue" style={{ marginInlineEnd: 0 }}>{stageLabel(st)}</Tag>
-                  ))}
-                </Space>
-              ),
-            },
-            {
-              title: '策略状态',
-              key: 'status',
-              width: 140,
-              render: () => <StatusBadge variant="green">快照与 AI 注入生效</StatusBadge>,
-            },
-          ]}
-          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={canRegisterPlugins ? '暂未登记项目门禁策略插件，可点击上方预设一键启用。' : '当前项目暂未登记门禁策略插件。'} /> }}
-        />
+        </Flex>}
       </Flex>
     </Card>
     {permissions.viewAudit && (
       <Card
         className="tf-members-card"
         title={
-          <Space size={8}>
-            <span>合规审计与操作轨迹</span>
+          <Space size={8} wrap>
+            <span>操作记录</span>
             <Typography.Text type="secondary" style={{ fontSize: 13, fontWeight: 400 }}>
               {filteredAudit.length} / {auditRecords.length}
             </Typography.Text>
@@ -616,9 +650,9 @@ export const MembersAccessView: React.FC<{
         </Flex>
       </Card>
     )}
-    <Drawer title={editingId ? '编辑项目角色' : '添加项目成员'} open={open && canManage} onClose={closeMembership} closable={!busy} maskClosable={!busy} keyboard={!busy} size={520} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeMembership}>取消</Button><Button type="primary" loading={busy} disabled={!canManage || !permissions.grantRoles.length} onClick={() => form.submit()}>保存</Button></Flex>}>
+    <Drawer title="添加项目成员" open={open && canManage} onClose={closeMembership} closable={!busy} maskClosable={!busy} keyboard={!busy} size={520} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeMembership}>取消</Button><Button type="primary" loading={busy} disabled={!canManage || !permissions.grantRoles.length} onClick={() => form.submit()}>保存</Button></Flex>}>
       <Form name="project-membership" form={form} layout="vertical" disabled={busy || !canManage} onFinish={saveMembership} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canManage) { event.preventDefault(); form.submit(); } }}>
-        <Form.Item label="成员" name="userId" rules={[{ required: true, message: '请选择成员。' }]}><Select placeholder="选择未加入当前项目的成员" disabled={busy || !!editingId || !canManage} showSearch={{ optionFilterProp: 'label' }} options={editingMember ? [{ value: editingMember.id, label: editingMember.username }] : availableCandidates.map(member => ({ value: member.id, label: member.username }))} /></Form.Item>
+        <Form.Item label="成员" name="userId" rules={[{ required: true, message: '请选择成员。' }]}><Select placeholder="选择未加入当前项目的成员" disabled={busy || !canManage} showSearch={{ optionFilterProp: 'label' }} options={availableCandidates.map(member => ({ value: member.id, label: member.username }))} /></Form.Item>
         <Form.Item label="项目角色" name="role" rules={[{ required: true }]}><Select options={choices(permissions.grantRoles)} /></Form.Item>
       </Form>
     </Drawer>
@@ -629,19 +663,53 @@ export const MembersAccessView: React.FC<{
         <Form.Item label="平台角色" name="role" rules={[{ required: true }]}><Select options={choices(ROLES)} /></Form.Item>
       </Form>
     </Drawer>
-    <Drawer title="自定义登记门禁策略插件" open={pluginDrawerOpen && canRegisterPlugins} onClose={closePluginDrawer} closable={!busy} maskClosable={!busy} keyboard={!busy} size={520} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closePluginDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canRegisterPlugins} onClick={() => pluginForm.submit()}>登记策略插件</Button></Flex>}>
-      <Form name="register-policy-plugin" form={pluginForm} layout="vertical" disabled={busy || !canRegisterPlugins} initialValues={{ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'] }} onFinish={registerCustomPlugin} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canRegisterPlugins) { event.preventDefault(); pluginForm.submit(); } }}>
-        <Form.Item label="插件标识（小写字母、数字与连字符）" name="id" rules={[{ required: true, message: '请输入插件标识。' }, { pattern: /^[a-z][a-z0-9-]*$/, message: '需以小写字母开头，仅含 a-z、0-9 和 -。' }]}>
-          <Input placeholder={buildScopedPluginId('payment-idempotency-guard', projectId, projectKey)} maxLength={64} />
+    <Drawer title="自定义自然语言门禁规则" open={pluginDrawerOpen && canRegisterPlugins} onClose={closePluginDrawer} closable={!busy} maskClosable={!busy} keyboard={!busy} size={540} forceRender footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closePluginDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canRegisterPlugins} onClick={() => pluginForm.submit()}>登记门禁规则</Button></Flex>}>
+      <Form name="register-policy-plugin" form={pluginForm} layout="vertical" disabled={busy || !canRegisterPlugins} initialValues={{ version: '1.0.0', stages: ['TECH_SPEC', 'CODE_REVIEW'], enforcement: 'WARN' }} onFinish={registerCustomPlugin} onKeyDown={event => { if (isSubmitShortcut(event) && !busy && canRegisterPlugins) { event.preventDefault(); pluginForm.submit(); } }}>
+        <Form.Item label="规则标识（小写字母、数字与连字符）" name="id" rules={[{ required: true, message: '请输入规则标识。' }, { pattern: /^[a-z][a-z0-9-]*$/, message: '需以小写字母开头，仅含 a-z、0-9 和 -。' }]}>
+          <Input placeholder={buildScopedPluginId('offline-door-token-expiry', projectId, projectKey)} maxLength={64} />
         </Form.Item>
-        <Form.Item label="策略名称" name="name" rules={[{ required: true, whitespace: true, message: '请输入策略名称。' }]}>
-          <Input placeholder="例如：核心清结算金额对账核验" maxLength={100} />
+        <Form.Item label="规则名称" name="name" rules={[{ required: true, whitespace: true, message: '请输入规则名称。' }]}>
+          <Input placeholder="例如：离线凭证有效期与密钥轮换核验" maxLength={100} />
+        </Form.Item>
+        <Form.Item label="自然语言审核规则（AI 审核时将逐条对照并体现在清单中）" name="rule" rules={[{ required: true, whitespace: true, message: '请输入具体审核要求。' }]}>
+          <Input.TextArea rows={3} maxLength={1000} placeholder="例如：所有涉及离线开门凭证缓存的代码与方案，必须写明失效时间校验、设备解绑清理和防重放机制。" />
+        </Form.Item>
+        <Form.Item label="规则强度（WARN 仅提醒 / BLOCK 违规阻断）" name="enforcement" rules={[{ required: true }]}>
+          <Segmented<RuleEnforcement> options={[{ value: 'WARN', label: 'WARN · 建议提醒' }, { value: 'BLOCK', label: 'BLOCK · 违规阻断' }]} />
+        </Form.Item>
+        <Form.Item label="绑定交付链路阶段" name="stages" rules={[{ required: true, message: '请至少选择一个交付阶段。' }]}>
+          <Select mode="multiple" options={REVIEW_STAGE_OPTIONS} placeholder="选择生效的评审阶段" />
+        </Form.Item>
+        <Form.Item label="内置确定性执行引擎（可选）" name="evaluator" extra="选择后评审预检与云端 AI 将自动运行该确定性检查包">
+          <Select allowClear placeholder="可选：仅靠自然语言提示词审核，或绑定内置引擎" options={[
+            { value: 'idempotency-contract-guard', label: '接口幂等与契约核验 (idempotency-contract-guard)' },
+            { value: 'sql-migration-safety', label: 'SQL 变更与回滚门禁 (sql-migration-safety)' },
+            { value: 'sensitive-log-redaction', label: '敏感凭据与日志脱敏 (sensitive-log-redaction)' },
+            { value: 'canary-rollback-gate', label: '灰度放量与回滚预案 (canary-rollback-gate)' },
+            { value: 'openapi-contract-lint', label: 'OpenAPI 接口契约规范检查 (openapi-contract-lint)' },
+            { value: 'prd-completeness-lint', label: 'PRD 需求完整性检查 (prd-completeness-lint)' },
+          ]} />
+        </Form.Item>
+        <Form.Item label="自定义声明式自动校验规则（可选）" name="ruleType" extra="配置后将在服务端规则引擎中实时执行并产出结构化发现项">
+          <Select allowClear placeholder="可选：正则禁止、正则必含或 OpenAPI 契约校验" options={[
+            { value: 'regex_forbidden', label: '正则禁用匹配 (regex_forbidden)' },
+            { value: 'regex_required', label: '正则必含匹配 (regex_required)' },
+            { value: 'openapi_lint', label: 'OpenAPI 规范校验 (openapi_lint)' },
+          ]} />
+        </Form.Item>
+        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.ruleType !== cur.ruleType}>
+          {({ getFieldValue }) => {
+            const rt = getFieldValue('ruleType');
+            if (rt !== 'regex_forbidden' && rt !== 'regex_required') return null;
+            return (
+              <Form.Item label="匹配正则表达式" name="rulePattern" rules={[{ required: true, whitespace: true, message: '请输入正则表达式。' }]}>
+                <Input placeholder="例如：http://internal\\.legacy|SELECT\\s+\\*" maxLength={300} />
+              </Form.Item>
+            );
+          }}
         </Form.Item>
         <Form.Item label="语义化版本号" name="version" rules={[{ required: true, message: '请输入版本号。' }, { pattern: /^\d+\.\d+\.\d+$/, message: '版本号需符合 x.y.z 格式（如 1.0.0）。' }]}>
           <Input placeholder="1.0.0" maxLength={32} />
-        </Form.Item>
-        <Form.Item label="绑定门禁阶段" name="stages" rules={[{ required: true, message: '请至少选择一个门禁阶段。' }]}>
-          <Select mode="multiple" options={STAGES} placeholder="选择生效的评审阶段" />
         </Form.Item>
       </Form>
     </Drawer>

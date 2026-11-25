@@ -37,7 +37,7 @@ test('project isolation, assignees, claims, concurrent versions and scoped audit
     const outsider = (await f.expect('/api/users', 'POST', { username: 'outsider', password, role: 'LEAD', projectId: project.id }, admin.token, 201)).user;
     const outsiderToken = await f.login('outsider');
     const hidden = (await f.expect('/api/tasks', 'POST', { projectId: project.id, jiraKey: 'SEC-1', title: 'Private work' }, outsiderToken, 201)).task;
-    const hiddenJob = (await f.expect('/api/reviews', 'POST', { taskId: hidden.id, stage: 'CODE_REVIEW' }, outsiderToken, 201)).job;
+    const hiddenJob = (await f.expect('/api/reviews', 'POST', { taskId: hidden.id, stage: 'CODE_REVIEW', executionMode: 'CLOUD_AI' }, outsiderToken, 201)).job;
     for (const suffix of ['', '/context', '/assets', '/gates']) await f.expect(`/api/tasks/${hidden.id}${suffix}`, 'GET', undefined, dev.token, 403);
     for (const suffix of ['/progress', '/claim', '/heartbeat']) await f.expect(`/api/tasks/${hidden.id}${suffix}`, 'POST', {}, dev.token, 403);
     await f.expect(`/api/jobs/${hiddenJob.id}`, 'GET', undefined, dev.token, 403);
@@ -91,8 +91,9 @@ test('immutable reports, independent approvals, stage invalidation, frozen DONE 
     await f.expect(`/api/jobs/${cloud.id}/report`, 'POST', { summary: 'No AI executed', source: 'MANUAL', findings: [] }, admin.token, 409);
     for (const kind of ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE', 'RELEASE_PLAN']) await addAsset(kind, `  Original ${kind} L003\n`);
     await f.expect(`${taskPath}/assets`, 'POST', { kind: 'CODE', title: 'Credential URL', content: 'source', sourceUrl: 'https://user:password@example.invalid/source' }, admin.token, 400);
-    await f.expect(`${taskPath}/assets`, 'POST', { kind: 'PRD', title: 'Unauthorized source', content: 'source' }, dev.token, 403);
+    await f.expect(`${taskPath}/assets`, 'POST', { kind: 'PRD', title: 'Unauthorized source', content: 'source' }, sre.token, 403);
     const prematureRelease = await newReview('RELEASE'); await report(prematureRelease);
+    await f.expect(`/api/jobs/${prematureRelease.id}/decision`, 'POST', { decision: 'APPROVE', reason: 'DEV cannot approve gate' }, dev.token, 403);
     await f.expect(`/api/jobs/${prematureRelease.id}/decision`, 'POST', { decision: 'APPROVE', reason: 'Prerequisites are incomplete' }, sre.token, 409);
     const jobs = {};
     for (const stage of ['PRD', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE', 'RELEASE']) {
@@ -193,6 +194,31 @@ test('single-account solo mode allows full 7-step delivery to DONE and immediate
     task = (await f.expect(`/api/tasks/${task.id}/claim`, 'POST', { expectedVersion: task.version }, adminToken)).task;
     assert.equal(task.status, 'IN_PROGRESS');
 
+    // A legacy report remains readable after its task is linked under the main task.
+    const referenced = (await f.expect('/api/tasks', 'POST', { jiraKey: 'SOLO-3', title: 'Associated Jira subtask' }, adminToken, 201)).task;
+    for (const kind of ['PRD', 'TECH_SPEC', 'CODE']) {
+      await f.expect(`/api/tasks/${referenced.id}/assets`, 'POST', { kind, title: `Historical ${kind}`, content: 'historical' }, adminToken, 201);
+    }
+    const oldReview = (await f.expect('/api/reviews', 'POST', { taskId: referenced.id, stage: 'CODE_REVIEW', executionMode: 'LOCAL_REPORT' }, adminToken, 201)).job;
+    const reportedChild = (await f.expect(`/api/jobs/${oldReview.id}/report`, 'POST', {
+      summary: 'Historical review', source: 'LOCAL_TOOL', tool: 'codex-cli',
+      findings: [{ severity: 'CRITICAL', title: 'Historical issue', detail: 'Historical evidence' }],
+    }, adminToken, 201)).job;
+    f.app.db.prepare('UPDATE tasks SET parent_id=? WHERE id=?').run(task.id, referenced.id);
+    assert.deepEqual(await f.expect(`/api/tasks/${referenced.id}/gates`, 'GET', undefined, adminToken), { overall: 'NOT_REQUIRED', gates: [] });
+    assert.equal((await f.expect(`/api/jobs/${oldReview.id}`, 'GET', undefined, adminToken)).job.reviewRequired, false);
+    const childRejection = await f.expect('/api/reviews', 'POST', { taskId: referenced.id, stage: 'CODE_REVIEW' }, adminToken, 409);
+    assert.equal(childRejection.error.code, 'SUBTASK_REVIEW_NOT_REQUIRED');
+    const childDecision = await f.expect(`/api/jobs/${oldReview.id}/decision`, 'POST', { decision: 'APPROVE', reason: 'Historical' }, adminToken, 409);
+    assert.equal(childDecision.error.code, 'SUBTASK_REVIEW_NOT_REQUIRED');
+    const childWaiver = await f.expect(`/api/jobs/${oldReview.id}/findings/${reportedChild.findings[0].id}/waiver`, 'POST', { reason: 'Historical' }, adminToken, 409);
+    assert.equal(childWaiver.error.code, 'SUBTASK_REVIEW_NOT_REQUIRED');
+    assert.deepEqual((await f.expect('/api/jobs?projectId=default', 'GET', undefined, adminToken)).jobs, []);
+    const summary = await f.expect('/api/overview-summary?projectId=default', 'GET', undefined, adminToken);
+    assert.equal(summary.reviewCount, 0);
+    assert.equal(summary.openBlockersCount, 0);
+    assert.deepEqual(summary.pendingJobs, []);
+
     for (const kind of ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE', 'RELEASE_PLAN']) {
       await f.expect(`/api/tasks/${task.id}/assets`, 'POST', { kind, title: `${kind} v1`, content: `# ${kind}\nsolo delivery` }, adminToken, 201);
     }
@@ -215,6 +241,7 @@ test('single-account solo mode allows full 7-step delivery to DONE and immediate
     task = (await f.expect(`/api/tasks/${task.id}`, 'GET', undefined, adminToken)).task;
     const completed = (await f.expect(`/api/tasks/${task.id}`, 'PATCH', { expectedVersion: task.version, status: 'DONE' }, adminToken)).task;
     assert.equal(completed.status, 'DONE');
+    assert.equal((await f.expect(`/api/tasks/${referenced.id}`, 'GET', undefined, adminToken)).task.status, 'OPEN');
 
     // Once a second eligible approver (LEAD) joins the project, solo self-approval immediately fails with 403 INDEPENDENT_REVIEW_REQUIRED
     await f.expect('/api/users', 'POST', { username: 'peer-lead', password, role: 'LEAD' }, adminToken, 201);
@@ -243,10 +270,12 @@ test('task deletion removes local task, subtasks, assets, and reviews cleanly wh
     const dev2Token = await f.login('del-dev2');
 
     const parent = (await f.expect('/api/tasks', 'POST', { jiraKey: 'BOARD-934', title: '【重构】主任务' }, adminToken, 201)).task;
-    const child = (await f.expect('/api/tasks', 'POST', { jiraKey: 'BOARD-1147', title: '【重构】子任务', parentId: parent.id }, adminToken, 201)).task;
+    const child = (await f.expect('/api/tasks', 'POST', { jiraKey: 'BOARD-1147', title: '【重构】子任务' }, adminToken, 201)).task;
     await f.expect(`/api/tasks/${child.id}/assets`, 'POST', { kind: 'PRD', title: 'Refactor PRD', content: 'Refactor body' }, adminToken, 201);
     const job = (await f.expect('/api/reviews', 'POST', { taskId: child.id, stage: 'PRD', executionMode: 'HUMAN_REVIEW' }, adminToken, 201)).job;
     await f.expect(`/api/jobs/${job.id}/report`, 'POST', { summary: 'Refactor report', source: 'MANUAL', findings: [{ severity: 'WARN', title: 'Note', detail: 'Detail' }] }, adminToken, 201);
+
+    f.app.db.prepare('UPDATE tasks SET parent_id=? WHERE id=?').run(parent.id, child.id);
 
     // Other DEV who neither owns the task nor has assignTasks permission is blocked
     const forbidden = await f.call(`/api/tasks/${child.id}`, 'DELETE', undefined, dev2Token);
@@ -436,6 +465,7 @@ test('workflow createMemo deduplicates assets, plugins, gates and approver SQL q
   }
 });
 
+
 test('GET /api/tasks/:id/bundle returns exact single-roundtrip parity with individual endpoints and enforces project isolation', async () => {
   const f = await fixture();
   try {
@@ -477,6 +507,7 @@ test('GET /api/tasks/:id/bundle returns exact single-roundtrip parity with indiv
     await f.app.close();
   }
 });
+
 
 test('GET /api/overview-summary computes DORA flowTelemetry (Lead Time, Review Turnaround, First-Time Pass Rate, 7d Throughput) with strict project isolation', async () => {
   const f = await fixture();
@@ -540,4 +571,31 @@ test('GET /api/overview-summary computes DORA flowTelemetry (Lead Time, Review T
   } finally {
     await f.app.close();
   }
+});
+
+test('reviews default to LOCAL_REPORT and explicit STAGE_INPUTS governs TASK_BREAKDOWN independently of five gates', async () => {
+  const f = await fixture();
+  try {
+    const { ADMIN: admin, DEV: dev, LEAD: lead } = await accounts(f);
+    const parent = (await f.expect('/api/tasks', 'POST', { jiraKey: 'EX-1', title: 'Requirement carrier', assigneeId: dev.id }, admin.token, 201)).task;
+    await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TASK_BREAKDOWN' }, dev.token, 409);
+    const child = (await f.expect('/api/tasks', 'POST', { jiraKey: 'EX-2', title: 'Child task', parentId: parent.id }, admin.token, 201)).task;
+    const breakdownJob = (await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TASK_BREAKDOWN' }, dev.token, 201)).job;
+    assert.equal(breakdownJob.executionMode, 'LOCAL_REPORT');
+    assert.equal(breakdownJob.status, 'AWAITING_REPORT');
+    assert.deepEqual(breakdownJob.snapshot.children.map(item => item.jiraKey), ['EX-2']);
+    await f.expect(`/api/jobs/${breakdownJob.id}/report`, 'POST', { source: 'LOCAL_TOOL', tool: 'antigravity', summary: 'Breakdown checked', verdict: 'PASS', score: 92, findings: [] }, dev.token, 201);
+    await f.expect(`/api/jobs/${breakdownJob.id}/decision`, 'POST', { decision: 'APPROVE', reason: 'Looks good' }, lead.token, 201);
+    await f.expect(`/api/tasks/${parent.id}/assets`, 'POST', { kind: 'PRD', title: 'Product requirement', content: 'Acceptance criteria' }, dev.token, 201);
+    await f.expect(`/api/tasks/${parent.id}/assets`, 'POST', { kind: 'TEST_CASE', title: 'Acceptance cases', content: 'TC1 · Expected result' }, dev.token, 201);
+    const cases = (await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TEST_CASE' }, dev.token, 201)).job;
+    assert.deepEqual(cases.snapshot.assets.map(item => item.kind), ['PRD', 'TEST_CASE']);
+    await f.expect(`/api/tasks/${parent.id}/assets`, 'POST', { kind: 'CODE', title: 'MR patch', content: 'Verified diff' }, dev.token, 201);
+    const code = (await f.expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'CODE_REVIEW' }, dev.token, 201)).job;
+    assert.deepEqual(code.snapshot.assets.map(item => item.kind), ['CODE', 'PRD']);
+    const gates = await f.expect(`/api/tasks/${parent.id}/gates`, 'GET', undefined, admin.token);
+    assert.equal(gates.gates.length, 5);
+    assert.equal(gates.overall, 'BLOCKED');
+    assert.equal(child.parentId, parent.id);
+  } finally { await f.app.close(); }
 });

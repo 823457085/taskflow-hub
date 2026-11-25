@@ -1,6 +1,6 @@
 import { api } from './workspaceApi';
 
-export type AccountProvider = 'jira' | 'confluence' | 'gitlab' | 'jenkins' | 'yunxiao' | 'openai' | 'anthropic' | 'custom-ai';
+export type AccountProvider = 'jira' | 'confluence' | 'gitlab' | 'github' | 'jenkins' | 'yunxiao' | 'openai' | 'anthropic' | 'custom-ai';
 export type AccountAuthMode = 'BEARER' | 'BASIC' | 'PRIVATE_TOKEN' | 'NONE';
 export interface ExternalAccount {
   id: string; provider: string; name: string; scope: 'PERSONAL' | 'PROJECT';
@@ -16,10 +16,12 @@ export interface AccountDraft {
   name: string; provider: AccountProvider; scope: 'PERSONAL' | 'PROJECT'; projectId?: string;
   baseUrl: string; authMode: AccountAuthMode; username?: string; token?: string; organizationId?: string;
 }
+export const GITHUB_API_ORIGIN = 'https://api.github.com';
 export const ACCOUNT_PROVIDERS: { value: AccountProvider; label: string; authMode: AccountAuthMode; ai?: boolean; defaultUrl?: string }[] = [
   { value: 'jira', label: 'Jira', authMode: 'BEARER' },
   { value: 'confluence', label: 'Confluence', authMode: 'BEARER' },
   { value: 'gitlab', label: 'GitLab', authMode: 'PRIVATE_TOKEN' },
+  { value: 'github', label: 'GitHub', authMode: 'BEARER', defaultUrl: GITHUB_API_ORIGIN },
   { value: 'jenkins', label: 'Jenkins', authMode: 'BASIC' },
   { value: 'yunxiao', label: '云效', authMode: 'PRIVATE_TOKEN' },
   { value: 'openai', label: 'OpenAI API', authMode: 'BEARER', ai: true, defaultUrl: 'https://api.openai.com' },
@@ -32,4 +34,24 @@ export const createAccount = (draft: AccountDraft) => api<{ account: ExternalAcc
 export const updateAccount = (id: string, expectedVersion: number, draft: Partial<Omit<AccountDraft, 'provider' | 'scope' | 'projectId'>> & { enabled?: boolean }) => api<{ account: ExternalAccount }>('accounts/' + encodeURIComponent(id), { expectedVersion, ...draft }, 'PATCH');
 export const deleteAccount = (id: string, expectedVersion: number) => api<void>('accounts/' + encodeURIComponent(id) + '?expectedVersion=' + expectedVersion, undefined, 'DELETE');
 export const selectAccount = (projectId: string, provider: string, accountId: string | null) => api<unknown>('accounts/select', { projectId, provider, accountId });
+export interface PersonalJiraProjectMatch {
+  id: string;
+  key: string;
+  name: string;
+  role: string;
+  jiraKey: string;
+  joined: boolean;
+}
+export interface PersonalJiraProjectSyncResult {
+  account?: ExternalAccount;
+  identity?: { id?: string; displayName?: string; name?: string };
+  joinedProjects: PersonalJiraProjectMatch[];
+  matchedProjects: PersonalJiraProjectMatch[];
+  joinedCount: number;
+  matchedCount: number;
+  autoSelectedCount: number;
+  remoteVisibleCount: number;
+  unmatchedRemoteCount: number;
+}
 export const verifyAccount = (id: string, expectedVersion: number, projectId?: string) => api<{ account?: ExternalAccount; identity?: { displayName?: string; name?: string } }>('accounts/' + encodeURIComponent(id) + '/test', { expectedVersion, ...(projectId ? { projectId } : {}) });
+export const syncPersonalJiraProjects = (id: string, expectedVersion: number, autoSelect = true) => api<PersonalJiraProjectSyncResult>('accounts/' + encodeURIComponent(id) + '/sync-jira-projects', { expectedVersion, autoSelect });

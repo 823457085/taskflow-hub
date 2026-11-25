@@ -1,15 +1,22 @@
-.tf-accounts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; min-width: 0; }
+.tf-accounts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
 .tf-accounts-card, .tf-accounts-card .ant-card-body { min-width: 0; }
 .tf-accounts-card .ant-card-head-wrapper { gap: 12px; flex-wrap: wrap; }
 .tf-accounts-card .ant-card-head-title { min-width: 0; white-space: normal; }
 .tf-accounts-card .ant-card-extra { max-width: 100%; }
-.tf-account-toolbar { margin-bottom: 20px; }
-.tf-account-toolbar > .ant-select { width: 200px; max-width: 100%; }
+.tf-account-toolbar { margin-bottom: 12px; }
+.tf-account-toolbar > .ant-segmented { flex: 0 0 auto; max-width: 100%; }
+.tf-account-toolbar > .ant-select { flex: 0 1 200px; min-width: min(100%, 140px); }
+.tf-account-toolbar > .ant-input-affix-wrapper { flex: 1 1 200px; min-width: min(100%, 160px); max-width: 300px; }
+.tf-accounts .ant-space-item > .ant-tag { margin-inline-end: 0; }
 .tf-account-name { display: grid; gap: 4px; min-width: 0; }
 .tf-account-name .ant-typography { overflow-wrap: anywhere; }
 .tf-account-name .ant-typography-secondary, .tf-account-meta { font-size: 12px; }
 .tf-account-url { overflow-wrap: anywhere; font-size: 12px; }
-.tf-account-note.ant-typography { margin: 20px 0 0; font-size: 12px; }
+.tf-account-note.ant-typography { display: block; margin: 12px 0 0; font-size: 12px; }
+.tf-account-project-settings { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+@media (max-width: 979px) {
+  .tf-account-project-settings { grid-template-columns: minmax(0, 1fr); }
+}
 .tf-account-selections { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px; }
 .tf-account-selections .ant-select, .tf-account-drawer .ant-select { width: 100%; }
 .tf-account-selections .ant-form-item { min-width: 0; margin-bottom: 20px; }
@@ -23,5 +30,14 @@
   .tf-accounts-card .ant-card-extra { margin-inline-start: 0; }
   .tf-accounts-card .ant-card-body { padding: 16px; }
   .tf-account-selections { grid-template-columns: minmax(0, 1fr); }
-  .tf-account-toolbar > .ant-select { flex: 1; min-width: 140px; }
+  .tf-account-toolbar > .ant-select { flex: 1 1 140px; }
+  .tf-account-toolbar > .ant-input-affix-wrapper { max-width: none; }
+}
+
+.tf-account-registry .ant-table-cell { vertical-align: top; }
+.tf-account-registry .ant-table-thead .ant-table-cell { white-space: nowrap; }
+@media (min-width: 1540px) {
+  .tf-accounts { grid-template-columns: minmax(0, 1fr) minmax(320px, 29%); align-items: start; }
+  .tf-account-project-settings { grid-template-columns: minmax(0, 1fr); }
+  .tf-account-selections { grid-template-columns: minmax(0, 1fr); }
 }

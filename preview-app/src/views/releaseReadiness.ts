@@ -1,4 +1,4 @@
-import { memberName, STAGES, type Asset, type AssetKind, type Gates, type ReviewJob, type Stage, type User, type WorkTask } from './workspaceApi.ts';
+import { memberName, STAGES, type Asset, type AssetKind, type Gates, type GateStage, type ReviewJob, type Stage, type User, type WorkTask } from './workspaceApi.ts';
 import { assetKindLabel, gateStatusLabel, stageLabel, taskStatusLabel } from './displayLabels.ts';
 import { analyzeAssetRiskSignals } from './assetDiff.ts';
 import { selectLatestAssets } from './taskContextPack.ts';
@@ -41,7 +41,7 @@ export interface ReleaseReadinessEvaluation {
   waivedCriticalCount: number;
 }
 
-const STAGE_TO_ASSET: Record<Stage, AssetKind> = {
+const STAGE_TO_ASSET: Record<GateStage, AssetKind> = {
   PRD: 'PRD',
   TECH_SPEC: 'TECH_SPEC',
   CODE_REVIEW: 'CODE',

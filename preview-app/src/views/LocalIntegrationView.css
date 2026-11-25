@@ -12,24 +12,10 @@
   min-width: 0;
 }
 
-/* 12-Column Asymmetric Bento Command Deck */
-.tf-local-hero-deck {
-  display: grid;
-  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
-  gap: 12px;
-  align-items: stretch;
-}
-
-.tf-local-bridge-card.ant-card {
-  height: 100%;
-}
-
-.tf-local-side-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
+.tf-local-integration .ant-space-item > .ant-tag { margin-inline-end: 0; }
+.tf-local-integration > .ant-card > .ant-card-head .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+.tf-local-integration > .ant-card > .ant-card-head .ant-card-head-title { min-width: 0; white-space: normal; }
+.tf-local-integration > .ant-card > .ant-card-head .ant-card-extra { max-width: 100%; }
 
 .tf-local-card-title-row {
   display: inline-flex;
@@ -52,35 +38,19 @@
   border: 1px solid color-mix(in srgb, var(--tf-accent) 24%, var(--tf-border));
 }
 
-/* Engine Readiness Matrix */
-.tf-engine-readiness {
-  display: grid;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--tf-border);
-  border-radius: var(--tf-control-radius, 8px);
-  background: var(--tf-raised);
-}
-
-.tf-engine-readiness-label {
-  font-size: 11.5px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--tf-muted);
-}
-
 .tf-engine-pill-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(196px, 100%), 1fr));
   gap: 8px;
 }
 
 .tf-engine-pill {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 7px;
+  gap: 4px 8px;
   min-width: 0;
-  padding: 6px 10px;
+  padding: 7px 10px;
   border: 1px solid var(--tf-border);
   border-radius: var(--tf-control-radius, 8px);
   background: var(--tf-surface);
@@ -91,7 +61,6 @@
 .tf-engine-pill > i {
   width: 7px;
   height: 7px;
-  flex: 0 0 7px;
   border-radius: 999px;
   background: var(--tf-muted);
 }
@@ -109,8 +78,17 @@
   text-overflow: ellipsis;
 }
 
+.tf-engine-pill > code {
+  grid-column: 2 / -1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tf-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tf-engine-pill > small {
-  margin-left: auto;
   font-size: 11px;
   color: var(--tf-muted);
   white-space: nowrap;
@@ -124,7 +102,7 @@
 .tf-local-bridge-fields {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(240px, 1.85fr);
-  gap: 14px;
+  column-gap: 14px;
 }
 
 .tf-local-bridge-fields .ant-form-item {
@@ -136,127 +114,6 @@
   gap: 8px;
   padding-top: 14px;
   border-top: 1px solid var(--tf-divider);
-}
-
-/* Right Column: 2x2 Telemetry KPI Matrix */
-.tf-local-kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.tf-local-kpi-tile {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 3px;
-  min-height: 76px;
-  padding: 11px 14px;
-  border: 1px solid var(--tf-border);
-  border-radius: var(--tf-card-radius, 10px);
-  background: var(--tf-surface);
-  box-shadow: var(--tf-shadow-card);
-}
-
-.tf-local-kpi-tile.is-connected {
-  border-color: color-mix(in srgb, var(--tf-success) 38%, var(--tf-border));
-}
-
-.tf-local-kpi-tile > span {
-  font-size: 12px;
-  font-weight: 500;
-  color: var(--tf-secondary);
-}
-
-.tf-local-kpi-tile > strong {
-  font-family: var(--font-mono);
-  font-size: 22px;
-  font-weight: 600;
-  line-height: 26px;
-  letter-spacing: -0.025em;
-  font-variant-numeric: tabular-nums;
-  color: var(--tf-text);
-}
-
-.tf-local-kpi-tile.is-connected > strong {
-  color: var(--tf-success);
-  font-size: 16px;
-  letter-spacing: 0.04em;
-}
-
-.tf-local-kpi-tile > small {
-  font-size: 11.5px;
-  line-height: 16px;
-  color: var(--tf-muted);
-}
-
-/* Right Column: Zero-Copy Workflow Card */
-.tf-local-workflow-card.ant-card {
-  flex: 1;
-}
-
-.tf-local-workflow-steps {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-
-.tf-workflow-step-item {
-  display: grid;
-  grid-template-columns: 26px minmax(0, 1fr);
-  gap: 10px;
-  align-items: start;
-}
-
-.tf-workflow-step-item > em {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  height: 22px;
-  margin-top: 1px;
-  border-radius: 6px;
-  background: var(--tf-raised);
-  border: 1px solid var(--tf-border);
-  color: var(--tf-accent);
-  font: 600 11px/1 var(--font-mono);
-  font-style: normal;
-}
-
-.tf-workflow-step-item strong {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--tf-text);
-}
-
-.tf-workflow-step-item > div > strong {
-  display: block;
-  margin-bottom: 3px;
-}
-
-.tf-workflow-step-item p {
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: var(--tf-secondary);
-}
-
-.tf-workflow-step-item code,
-.tf-inline-pill {
-  padding: 1px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--tf-border);
-  background: var(--tf-raised);
-  color: var(--tf-text);
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-}
-
-.tf-inline-pill {
-  border-color: color-mix(in srgb, var(--tf-accent) 32%, var(--tf-border));
-  background: var(--tf-accent-soft);
-  color: var(--tf-accent);
-  font-family: var(--font-sans);
-  font-weight: 600;
 }
 
 /* Project Local Repository Binding Card */
@@ -293,6 +150,7 @@
 
 .tf-bound-workspaces {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding-top: 14px;
   border-top: 1px solid var(--tf-divider);
@@ -312,6 +170,7 @@
 
 .tf-bound-workspaces-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -341,6 +200,11 @@
 }
 
 .tf-bound-repo-path {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 2px 8px;
   border-radius: 6px;
   border: 1px solid var(--tf-border);
@@ -349,7 +213,6 @@
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 18px;
-  overflow-wrap: anywhere;
 }
 
 .tf-bound-target-pill {
@@ -482,61 +345,12 @@
   overflow-wrap: anywhere;
 }
 
-/* Capabilities Collapse & Tags */
-.tf-local-help .ant-collapse-header-text {
-  font-size: 13.5px;
-  font-weight: 500;
-}
-
 .tf-local-capabilities {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 20px;
-}
-
-.tf-capability-group {
-  padding: 14px 16px;
-  border: 1px solid var(--tf-border);
-  border-radius: var(--tf-control-radius, 8px);
-  background: var(--tf-raised);
-}
-
-.tf-local-capabilities .ant-typography {
-  margin: 6px 0 12px;
-  font-size: 12.5px;
-}
-
-.tf-mcp-tool-tag.ant-tag {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  padding: 2px 8px;
-  border-color: var(--tf-border);
-  background: var(--tf-surface);
-  color: var(--tf-text);
-}
-
-.tf-mcp-tool-tag.is-write.ant-tag {
-  border-color: color-mix(in srgb, var(--tf-accent) 30%, var(--tf-border));
-  background: var(--tf-accent-soft);
-  color: var(--tf-accent);
-}
-
-.tf-local-capabilities-footer {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  flex-wrap: wrap;
-  padding-top: 12px;
-  border-top: 1px solid var(--tf-divider);
 }
-
-.tf-local-capabilities-footer .ant-typography {
-  font-size: 12px;
-  margin: 0;
-}
+.tf-capability-group { display: grid; gap: 4px; min-width: 0; }
 
 /* Setup Guide Drawer */
 .tf-local-setup {
@@ -690,9 +504,6 @@
 }
 
 @media (max-width: 1180px) {
-  .tf-local-hero-deck {
-    grid-template-columns: minmax(0, 1fr);
-  }
   .tf-workspace-bind-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -724,4 +535,13 @@
   .tf-local-command .ant-btn {
     margin-inline-start: auto;
   }
+}
+
+.tf-bound-workspace-actions {
+  min-width: 0;
+  max-width: 100%;
+}
+@media (max-width: 639px) {
+  .tf-bound-workspace-row { padding: 9px; gap: 8px; }
+  .tf-bound-workspace-meta { max-width: 100%; }
 }

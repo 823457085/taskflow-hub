@@ -1,4 +1,4 @@
-import type { ReviewJob, Stage, WorkTask } from './workspaceApi.ts';
+import { isLocalTaskKey, type ReviewJob, type Stage, type WorkTask } from './workspaceApi.ts';
 
 export type LocalTaskMode = 'read' | 'develop' | 'review';
 export type LocalTaskTarget = 'workbench' | 'antigravity' | 'codex' | 'claude' | 'cursor';
@@ -25,10 +25,11 @@ export function localReviewCandidates(task: WorkTask, jobs: readonly ReviewJob[]
     job.report === null && job.decision === null && access.allowedStages.includes(job.stage));
 }
 
-export function buildCompanionSyncCommand({ jiraKey, target, repoPath }: { jiraKey: string; target: LocalTaskTarget; repoPath?: string | null }): string {
-  const tool = target === 'codex' ? 'codex-cli' : target === 'claude' ? 'claude-code' : target === 'cursor' ? 'cursor' : 'custom';
+export function buildCompanionSyncCommand({ task, target, repoPath }: { task: Pick<WorkTask, 'id' | 'jiraKey'>; target: LocalTaskTarget; repoPath?: string | null }): string {
+  const taskRef = isLocalTaskKey(task.jiraKey) ? task.id : task.jiraKey;
+  const tool = target === 'codex' ? 'codex-cli' : target === 'claude' ? 'claude-code' : target === 'cursor' ? 'cursor' : target === 'antigravity' ? 'antigravity' : 'custom';
   const bound = validRepoPath(repoPath) ? ` --repo ${shellQuote(repoPath)}` : '';
-  return `taskflow-hub start --task ${shellQuote(jiraKey)} --tool ${tool}${bound}`;
+  return `taskflow-hub start --task ${shellQuote(taskRef)} --tool ${tool}${bound}`;
 }
 
 export function buildLocalTaskPrompt({ task, jobs, mode, target, selectedJobId, canDevelop, frozen, allowedStages, repoPath }: {

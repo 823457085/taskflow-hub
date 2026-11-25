@@ -1,4 +1,4 @@
-import { APPROVE_ROLES, type ReviewJob, type Role, type User, type WorkTask } from './workspaceApi.ts';
+import { APPROVE_ROLES, isChildTask, type ReviewJob, type Role, type Stage, type User, type WorkTask } from './workspaceApi.ts';
 
 export interface TaskAvailabilityNode {
   id: string;
@@ -38,14 +38,19 @@ export function hasDoneAncestor(task: TaskAvailabilityNode | undefined, tasks: r
   return false;
 }
 
+export function requiresTaskReview(task: Pick<WorkTask, 'parentId' | 'externalRef'>, stage: Stage): boolean {
+  return !isChildTask(task) && (stage !== 'TASK_BREAKDOWN' || task.externalRef?.provider !== 'jira');
+}
+
 export function canQuickApproveReview(
-  job: Pick<ReviewJob, 'stage' | 'stale' | 'report' | 'decision' | 'soloMode' | 'findings' | 'snapshot'>,
-  task: (TaskAvailabilityNode & Pick<WorkTask, 'assigneeId'>) | undefined,
+  job: Pick<ReviewJob, 'reviewRequired' | 'stage' | 'stale' | 'report' | 'decision' | 'soloMode' | 'findings' | 'snapshot'>,
+  task: (TaskAvailabilityNode & Pick<WorkTask, 'assigneeId' | 'externalRef'>) | undefined,
   tasks: readonly TaskAvailabilityNode[],
   user: Pick<User, 'id'> | null | undefined,
   role: Role | undefined,
 ): boolean {
   if (!user || !role || !task || isTaskFrozen(task, tasks)) return false;
+  if (job.reviewRequired === false || !requiresTaskReview(task, job.stage)) return false;
   if (job.stale || !job.report || job.decision) return false;
   const independent = job.report.actorId !== user.id && task.assigneeId !== user.id;
   if (!(independent || !!job.soloMode) || !APPROVE_ROLES[job.stage].includes(role)) return false;

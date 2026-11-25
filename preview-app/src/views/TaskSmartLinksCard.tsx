@@ -11,13 +11,14 @@ type ImportProvider = 'confluence' | 'gitlab' | 'jenkins' | 'jira' | 'yunxiao';
 export const TaskSmartLinksCard: React.FC<{
   hints: SmartHints; tasks: WorkTask[]; allowedKinds: AssetKind[]; busy: boolean;
   showRepos: boolean; showSelfPrd: boolean; hasAssetKind: (kind: AssetKind) => boolean;
+  canImportFrom: (provider: ImportProvider) => boolean;
   onBindRepo: (path: string) => void;
   onOpenRepo: (app: 'finder' | 'cursor', path: string) => void;
   onImport: (params: { provider: ImportProvider; url?: string; issueKey?: string; kind: AssetKind }) => void;
   onSaveSelfPrd: () => void;
   onOpenTask: (id: string) => void;
-}> = ({ hints, tasks, allowedKinds, busy, showRepos, showSelfPrd, hasAssetKind, onBindRepo, onOpenRepo, onImport, onSaveSelfPrd, onOpenTask }) => (
-  <Card size="small" className="tf-smart-hints-card" title={<Space size={8}><Sparkles size={16} /><span>智能识别的关联来源（一键导入为材料）</span></Space>}>
+}> = ({ hints, tasks, allowedKinds, busy, showRepos, showSelfPrd, hasAssetKind, canImportFrom, onBindRepo, onOpenRepo, onImport, onSaveSelfPrd, onOpenTask }) => (
+  <Card size="small" className="tf-smart-hints-card" title={<Space size={8}><Sparkles size={16} /><span>关联来源</span></Space>}>
     <div className="tf-detail-stack tf-detail-stack-small">
       {showRepos && hints.matchedRepos.map(repo => (
         <Flex key={repo.path} justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
@@ -43,7 +44,7 @@ export const TaskSmartLinksCard: React.FC<{
             <Typography.Link href={link.url} target="_blank" rel="noreferrer" className="tf-break">{link.label}</Typography.Link>
           </Space>
           <Space size={6} wrap>
-            {link.provider !== 'external' && link.suggestedKinds.filter(k => allowedKinds.includes(k)).map(k => (
+            {link.provider !== 'external' && canImportFrom(link.provider) && link.suggestedKinds.filter(k => allowedKinds.includes(k)).map(k => (
               <Button
                 key={k}
                 size="small"
@@ -61,6 +62,7 @@ export const TaskSmartLinksCard: React.FC<{
 
       {hints.relatedJira.map(rel => {
         const localTask = tasks.find(t => t.jiraKey === rel.key);
+        const canImportRelated = rel.sameProject && canImportFrom('jira');
         return (
           <Flex key={rel.key} justify="space-between" align="center" gap={8} wrap className="tf-smart-hint-row">
             <Space size={8} wrap>
@@ -68,10 +70,10 @@ export const TaskSmartLinksCard: React.FC<{
               {rel.url ? <Typography.Link href={rel.url} target="_blank" rel="noreferrer">{rel.key}</Typography.Link> : <Typography.Text strong>{rel.key}</Typography.Text>}
             </Space>
             <Space size={6} wrap>
-              {rel.sameProject && allowedKinds.includes('PRD') && (
+              {canImportRelated && allowedKinds.includes('PRD') && (
                 <Button size="small" disabled={busy} onClick={() => onImport({ provider: 'jira', issueKey: rel.key, kind: 'PRD' })}>拉取为需求文档</Button>
               )}
-              {rel.sameProject && allowedKinds.includes('TECH_SPEC') && (
+              {canImportRelated && allowedKinds.includes('TECH_SPEC') && (
                 <Button size="small" disabled={busy} onClick={() => onImport({ provider: 'jira', issueKey: rel.key, kind: 'TECH_SPEC' })}>拉取为技术方案</Button>
               )}
               {localTask && <Button size="small" type="link" onClick={() => onOpenTask(localTask.id)}>打开本地任务</Button>}

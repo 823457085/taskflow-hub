@@ -127,6 +127,18 @@ export function isReviewActionableByUser(
   return false;
 }
 
+/** Picks the latest valid AI review per task and stage. Other records remain available as history. */
+export function currentAiReviews(jobs: readonly ReviewJob[]): ReviewJob[] {
+  const latest = new Map<string, ReviewJob>();
+  for (const job of jobs) {
+    if (job.stale || job.reviewRequired === false || job.executionMode === 'HUMAN_REVIEW') continue;
+    const key = `${job.taskId}:${job.stage}`;
+    const previous = latest.get(key);
+    if (!previous || job.createdAt > previous.createdAt) latest.set(key, job);
+  }
+  return [...latest.values()];
+}
+
 export function sortReviewsByQueuePriority<T extends SlaJobInput>(
   jobs: readonly T[],
   mode: 'newest' | 'oldest_waiting',

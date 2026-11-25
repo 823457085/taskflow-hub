@@ -1,12 +1,13 @@
 import React, { useMemo, useState } from 'react';
-import { Button, Flex, Segmented, Select, Space, Tag, Typography } from 'antd';
-import { ChevronDown, ChevronRight, GripVertical, UserCheck } from 'lucide-react';
+import { Button, Flex, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd';
+import { GripVertical, UserCheck } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import { memberName, ProjectMember, TaskStatus, timeText, WorkTask } from './workspaceApi';
 import { TASK_STATUS_OPTIONS, taskTypeLabel } from './displayLabels';
 import { hasDoneAncestor } from './taskAvailability';
 import { buildKanbanSwimlanes, evaluateColumnWip, type KanbanGroupBy } from './kanbanSwimlanes';
-import { readStoredChoice, readStoredStringList, writeStoredString, writeStoredStringList } from './uiPreferences';
+import { readStoredChoice, writeStoredString } from './uiPreferences';
+import './TaskListTable.css';
 
 const { Text } = Typography;
 
@@ -19,7 +20,6 @@ const COLUMN_VARIANT: Record<TaskStatus, 'neutral' | 'blue' | 'green'> = {
 
 const KANBAN_GROUP_KEY = 'taskflow.tasks.kanbanGroupBy';
 const KANBAN_WIP_KEY = 'taskflow.tasks.kanbanWipLimit';
-const KANBAN_COLLAPSED_KEY = 'taskflow.tasks.kanbanCollapsedLanes';
 const GROUP_OPTIONS = ['none', 'assignee', 'type'] as const;
 const WIP_OPTIONS = ['0', '3', '5', '8'] as const;
 
@@ -32,6 +32,9 @@ export const TaskKanbanBoard: React.FC<{
   isProjectMember: boolean;
   busy: boolean;
   updatingTaskId: string;
+  activeTaskId?: string;
+  readOnly?: boolean;
+  projectKeys?: ReadonlyMap<string, string>;
   onOpenTask: (taskId: string) => void;
   onMoveStatus: (task: WorkTask, nextStatus: TaskStatus) => void;
   onClaimTask: (task: WorkTask) => void;
@@ -44,6 +47,9 @@ export const TaskKanbanBoard: React.FC<{
   isProjectMember,
   busy,
   updatingTaskId,
+  activeTaskId,
+  readOnly = false,
+  projectKeys,
   onOpenTask,
   onMoveStatus,
   onClaimTask,
@@ -52,12 +58,12 @@ export const TaskKanbanBoard: React.FC<{
   const [dropCell, setDropCell] = useState<string | null>(null);
   const [groupBy, setGroupBy] = useState<KanbanGroupBy>(() => readStoredChoice(KANBAN_GROUP_KEY, GROUP_OPTIONS, 'none'));
   const [wipLimitStr, setWipLimitStr] = useState<typeof WIP_OPTIONS[number]>(() => readStoredChoice(KANBAN_WIP_KEY, WIP_OPTIONS, '5'));
-  const [collapsedLanes, setCollapsedLanes] = useState<string[]>(() => readStoredStringList(KANBAN_COLLAPSED_KEY));
 
+  const activeGroupBy = readOnly && groupBy === 'assignee' ? 'none' : groupBy;
   const wipLimit = Number(wipLimitStr) || 0;
 
   const canDragTask = (task: WorkTask): boolean =>
-    !busy &&
+    !readOnly && !busy &&
     updatingTaskId !== task.id &&
     (canAssign || task.assigneeId === userId) &&
     !hasDoneAncestor(task, allTasks);
@@ -65,8 +71,8 @@ export const TaskKanbanBoard: React.FC<{
   const draggingTask = draggingId ? tasks.find(item => item.id === draggingId) : undefined;
 
   const swimlanes = useMemo(
-    () => buildKanbanSwimlanes(tasks, members, userId, groupBy),
-    [tasks, members, userId, groupBy],
+    () => buildKanbanSwimlanes(tasks, members, userId, activeGroupBy),
+    [tasks, members, userId, activeGroupBy],
   );
 
   const globalWipByCol = useMemo(() => {
@@ -77,16 +83,6 @@ export const TaskKanbanBoard: React.FC<{
     }
     return map;
   }, [tasks, wipLimit]);
-
-  const overloadedColumns = TASK_STATUS_OPTIONS.filter(col => globalWipByCol.get(col.value)?.isOverloaded);
-
-  const toggleLane = (laneKey: string) => {
-    setCollapsedLanes(prev => {
-      const next = prev.includes(laneKey) ? prev.filter(k => k !== laneKey) : [...prev, laneKey];
-      writeStoredStringList(KANBAN_COLLAPSED_KEY, next);
-      return next;
-    });
-  };
 
   const renderColumnsGrid = (laneKey: string, laneTasks: WorkTask[], showGlobalWipBadge: boolean) => (
     <div className="tf-kanban-board">
@@ -133,14 +129,12 @@ export const TaskKanbanBoard: React.FC<{
               </Space>
               {wipEval?.isOverloaded ? (
                 <Tag color="warning" style={{ marginInlineEnd: 0, fontSize: 11 }}>
-                  WIP 超载
+                  超出上限
                 </Tag>
               ) : wipEval?.isNearLimit ? (
                 <Tag color="processing" style={{ marginInlineEnd: 0, fontSize: 11 }}>
                   达上限
                 </Tag>
-              ) : col.value === 'DONE' ? (
-                <Text type="secondary" style={{ fontSize: 11 }}>需门禁全通</Text>
               ) : null}
             </Flex>
             <div className="tf-kanban-cards">
@@ -152,12 +146,12 @@ export const TaskKanbanBoard: React.FC<{
                 </div>
               ) : colTasks.map(task => {
                 const draggable = canDragTask(task);
-                const canClaimCard = isProjectMember && !task.assigneeId && task.status !== 'DONE';
+                const canClaimCard = !readOnly && isProjectMember && !task.assigneeId && task.status !== 'DONE';
                 return (
                   <div
                     key={task.id}
                     draggable={draggable}
-                    className={`tf-kanban-card ${draggable ? 'tf-kanban-card-draggable' : ''} ${draggingId === task.id ? 'tf-kanban-card-dragging' : ''}`}
+                    className={`tf-kanban-card ${draggable ? 'tf-kanban-card-draggable' : ''} ${draggingId === task.id ? 'tf-kanban-card-dragging' : ''} ${activeTaskId === task.id ? 'tf-kanban-card-active' : ''}`}
                     onDragStart={event => {
                       if (!draggable) {
                         event.preventDefault();
@@ -177,26 +171,26 @@ export const TaskKanbanBoard: React.FC<{
                       }
                     }}
                   >
-                    <Flex justify="space-between" align="center" gap={6}>
-                      <Space size={6} wrap>
-                        {draggable && <GripVertical size={13} className="tf-kanban-grip" aria-hidden="true" />}
-                        <Text className="tf-task-key">{task.jiraKey}</Text>
-                        <Tag style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: '18px', paddingInline: 5 }}>
-                          {task.externalRef ? task.externalRef.type : taskTypeLabel(task.type)}
-                        </Tag>
-                      </Space>
+                    <div className="tf-kanban-card-meta">
+                      {draggable && <GripVertical size={13} className="tf-kanban-grip" aria-hidden="true" />}
+                      <Text className="tf-task-key">{task.jiraKey}</Text>
+                      {projectKeys?.has(task.projectId) && <Text type="secondary">{projectKeys.get(task.projectId)}</Text>}
+                      <Text type="secondary" ellipsis={{ tooltip: true }}>{task.externalRef ? task.externalRef.type : taskTypeLabel(task.type)}</Text>
                       {task.externalRef?.priority?.name && (
-                        <Text type="secondary" style={{ fontSize: 11 }}>{task.externalRef.priority.name}</Text>
+                        <Text type="secondary" className="tf-kanban-card-priority" ellipsis={{ tooltip: true }}>{task.externalRef.priority.name}</Text>
                       )}
-                    </Flex>
-                    <Button
-                      type="link"
-                      className="tf-kanban-card-title"
-                      disabled={busy}
-                      onClick={() => onOpenTask(task.id)}
-                    >
-                      {task.title}
-                    </Button>
+                    </div>
+                    <Tooltip title={task.title} placement="topLeft">
+                      <Button
+                        type="link"
+                        className="tf-kanban-card-title"
+                        aria-current={activeTaskId === task.id || undefined}
+                        disabled={busy}
+                        onClick={() => onOpenTask(task.id)}
+                      >
+                        {task.title}
+                      </Button>
+                    </Tooltip>
                     {task.progress > 0 && task.status !== 'DONE' && (
                       <div className="tf-kanban-progress-wrap" aria-label={`自报进度 ${task.progress}%`}>
                         <div className="tf-kanban-progress-bar">
@@ -220,12 +214,12 @@ export const TaskKanbanBoard: React.FC<{
                         >
                           认领
                         </Button>
-                      ) : (
-                        <Text type="secondary" style={{ fontSize: 11.5 }} ellipsis>
+                      ) : !readOnly && (
+                        <Text type="secondary" style={{ fontSize: 11.5 }} ellipsis={{ tooltip: true }}>
                           {memberName(members, task.assigneeId)}
                         </Text>
                       )}
-                      <Text type="secondary" style={{ fontSize: 11 }}>
+                      <Text type="secondary" className="tf-kanban-updated">
                         {timeText(task.updatedAt).slice(5, 16)}
                       </Text>
                     </Flex>
@@ -240,32 +234,25 @@ export const TaskKanbanBoard: React.FC<{
   );
 
   return (
-    <div role="region" aria-label="任务状态看板" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Flex justify="space-between" align="center" gap={8} wrap className="tf-kanban-toolbar">
-        <Space size={8} wrap>
-          <Segmented<KanbanGroupBy>
-            size="small"
-            aria-label="看板水平泳道分组"
-            value={groupBy}
-            onChange={val => {
-              setGroupBy(val);
-              writeStoredString(KANBAN_GROUP_KEY, val);
-            }}
-            options={[
-              { value: 'none', label: '不分组' },
-              { value: 'assignee', label: '按负责人泳道' },
-              { value: 'type', label: '按类型泳道' },
-            ]}
-          />
-          {overloadedColumns.length > 0 && (
-            <Tag color="warning" style={{ marginInlineEnd: 0 }}>
-              {overloadedColumns.map(c => c.label).join(' / ')} 超出在制品上限 ({wipLimit})
-            </Tag>
-          )}
-        </Space>
+    <div role="region" aria-label="任务状态看板" className="tf-kanban-workbench">
+      <Flex justify="space-between" align="center" gap={8} className="tf-kanban-toolbar">
+        <Segmented<KanbanGroupBy>
+          size="small"
+          aria-label="看板分组"
+          value={activeGroupBy}
+          onChange={val => {
+            setGroupBy(val);
+            writeStoredString(KANBAN_GROUP_KEY, val);
+          }}
+          options={[
+            { value: 'none', label: '不分组' },
+            ...(!readOnly ? [{ value: 'assignee' as const, label: '按负责人' }] : []),
+            { value: 'type', label: '按类型' },
+          ]}
+        />
         <Select<typeof WIP_OPTIONS[number]>
           size="small"
-          aria-label="列在制品 WIP 上限"
+          aria-label="每列任务上限"
           value={wipLimitStr}
           popupMatchSelectWidth={false}
           onChange={val => {
@@ -273,50 +260,31 @@ export const TaskKanbanBoard: React.FC<{
             writeStoredString(KANBAN_WIP_KEY, val);
           }}
           options={[
-            { value: '0', label: 'WIP 上限：不限' },
-            { value: '3', label: 'WIP 上限：3 / 列' },
-            { value: '5', label: 'WIP 上限：5 / 列' },
-            { value: '8', label: 'WIP 上限：8 / 列' },
+            { value: '0', label: '每列上限 · 不限' },
+            { value: '3', label: '每列上限 · 3 / 列' },
+            { value: '5', label: '每列上限 · 5 / 列' },
+            { value: '8', label: '每列上限 · 8 / 列' },
           ]}
         />
       </Flex>
 
-      {groupBy === 'none' ? (
-        renderColumnsGrid('all', tasks, true)
-      ) : (
-        <Flex vertical gap={12}>
-          {swimlanes.map(lane => {
-            const isCollapsed = collapsedLanes.includes(lane.key);
-            return (
+      <div className="tf-kanban-scroll" tabIndex={0} role="region" aria-label="看板任务列">
+        {activeGroupBy === 'none' ? (
+          renderColumnsGrid('all', tasks, true)
+        ) : (
+          <Flex vertical gap={10} className="tf-kanban-lanes">
+            {swimlanes.map(lane => (
               <section key={lane.key} className="tf-kanban-swimlane">
-                <button
-                  type="button"
-                  className="tf-kanban-swimlane-header"
-                  aria-expanded={!isCollapsed}
-                  onClick={() => toggleLane(lane.key)}
-                >
-                  <Space size={8} wrap>
-                    {isCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                    <span className="tf-kanban-swimlane-title">{lane.title}</span>
-                    <Tag style={{ marginInlineEnd: 0 }}>共 {lane.tasks.length} 项</Tag>
-                    {lane.activeWip > 0 && (
-                      <Tag color={wipLimit > 0 && lane.activeWip > wipLimit ? 'warning' : 'processing'} style={{ marginInlineEnd: 0 }}>
-                        活跃 WIP {lane.activeWip}
-                      </Tag>
-                    )}
-                    {lane.doneCount > 0 && (
-                      <Tag color="success" style={{ marginInlineEnd: 0 }}>
-                        已完成 {lane.doneCount}
-                      </Tag>
-                    )}
-                  </Space>
-                </button>
-                {!isCollapsed && renderColumnsGrid(lane.key, lane.tasks, false)}
+                <header className="tf-kanban-swimlane-header">
+                  <span className="tf-kanban-swimlane-title" title={lane.title}>{lane.title}</span>
+                  <Text type="secondary">{lane.tasks.length} 项</Text>
+                </header>
+                {renderColumnsGrid(lane.key, lane.tasks, false)}
               </section>
-            );
-          })}
-        </Flex>
-      )}
+            ))}
+          </Flex>
+        )}
+      </div>
     </div>
   );
 };

@@ -71,6 +71,14 @@ export function readStoredChoice<T extends string>(
   }
 }
 
+export function readStoredString(key: string, storage: MinimalStorage | null = defaultStorage()): string {
+  try {
+    return storage?.getItem(key) || '';
+  } catch {
+    return '';
+  }
+}
+
 export function writeStoredString(key: string, value: string, storage: MinimalStorage | null = defaultStorage()): void {
   if (!storage) return;
   try {
@@ -124,7 +132,7 @@ export interface SavedTaskFilterView {
   jiraTypeFilter?: string;
   jiraStatusFilter?: string;
   jiraVersionFilter?: string;
-  viewMode?: 'list' | 'board';
+  viewMode?: 'split' | 'list' | 'board';
 }
 
 const ALLOWED_SAVED_SCOPES: readonly SavedQuickScope[] = ['all', 'mine', 'unclaimed', 'active', 'done'];
@@ -168,7 +176,7 @@ export function readSavedTaskViews(
         ...(sanitizeOptionalFilter(obj.jiraTypeFilter) ? { jiraTypeFilter: sanitizeOptionalFilter(obj.jiraTypeFilter) } : {}),
         ...(sanitizeOptionalFilter(obj.jiraStatusFilter) ? { jiraStatusFilter: sanitizeOptionalFilter(obj.jiraStatusFilter) } : {}),
         ...(sanitizeOptionalFilter(obj.jiraVersionFilter) ? { jiraVersionFilter: sanitizeOptionalFilter(obj.jiraVersionFilter) } : {}),
-        ...(obj.viewMode === 'list' || obj.viewMode === 'board' ? { viewMode: obj.viewMode } : {}),
+        ...(obj.viewMode === 'split' || obj.viewMode === 'list' || obj.viewMode === 'board' ? { viewMode: obj.viewMode } : {}),
       });
       if (out.length >= 12) break;
     }
@@ -201,7 +209,7 @@ export function saveTaskFilterView(
     ...(sanitizeOptionalFilter(draft.jiraTypeFilter) ? { jiraTypeFilter: sanitizeOptionalFilter(draft.jiraTypeFilter) } : {}),
     ...(sanitizeOptionalFilter(draft.jiraStatusFilter) ? { jiraStatusFilter: sanitizeOptionalFilter(draft.jiraStatusFilter) } : {}),
     ...(sanitizeOptionalFilter(draft.jiraVersionFilter) ? { jiraVersionFilter: sanitizeOptionalFilter(draft.jiraVersionFilter) } : {}),
-    ...(draft.viewMode === 'list' || draft.viewMode === 'board' ? { viewMode: draft.viewMode } : {}),
+    ...(draft.viewMode === 'split' || draft.viewMode === 'list' || draft.viewMode === 'board' ? { viewMode: draft.viewMode } : {}),
   };
 
   const next = [normalized, ...existing.filter(v => v.id !== id)].slice(0, 12);

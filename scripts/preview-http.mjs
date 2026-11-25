@@ -40,7 +40,11 @@ const server = http.createServer(async (req, res) => {
     const target = resolve(publicDir, `.${pathname === '/' ? '/index.html' : pathname}`);
     if (!target.startsWith(publicDir + sep)) { res.writeHead(403); res.end(); return; }
     if (!(await stat(target)).isFile()) throw new Error('not a file');
-    res.writeHead(200, { 'Content-Type': mime[extname(target)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff' });
+    const ext = extname(target);
+    const cacheHeaders = ext === '.html'
+      ? { 'Cache-Control': 'no-store, no-cache, must-revalidate', Pragma: 'no-cache' }
+      : { 'Cache-Control': 'no-cache' };
+    res.writeHead(200, { 'Content-Type': mime[ext] || 'application/octet-stream', ...cacheHeaders, 'X-Content-Type-Options': 'nosniff' });
     if (req.method === 'HEAD') res.end();
     else createReadStream(target).on('error', () => res.destroy()).pipe(res);
   } catch { res.writeHead(404); res.end('Not found'); }

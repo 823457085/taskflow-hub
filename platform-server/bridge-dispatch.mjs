@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { REVIEW_ROLES, STAGES, fail, textField } from './common.mjs';
+import { REVIEW_ROLES, REVIEW_STAGES, fail, optionalModelId, textField } from './common.mjs';
 import { projectPermissions } from './permissions.mjs';
 import { buildAiPrompt } from './ai-prompt.mjs';
 import { extractReviewDraft } from './local-automation.mjs';
+import { requireReviewableTask } from './workflow.mjs';
 
 export const CONTEXT_FILE_PLACEHOLDER = '{{TASKFLOW_CONTEXT_FILE}}';
 export const REPO_PATH_PLACEHOLDER = '{{TASKFLOW_REPO_PATH}}';
@@ -37,7 +38,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
     return {
       deviceName: target?.device_name || null, deviceOwner: target ? { id: target.user_id, username: target.username } : null,
       id: row.id, taskId: row.task_id, projectId: row.project_id, jobId: row.job_id || null,
-      actorId: row.actor_id, mode: row.mode, engine: row.engine, tool: row.tool, repoPath: null,
+      actorId: row.actor_id, mode: row.mode, engine: row.engine, model: row.model ?? null, effectiveModel: row.effective_model ?? null, tool: row.tool, repoPath: null,
       status: row.status, exitCode: row.exit_code ?? null, output: row.output || '', draft,
       error: row.error || null, startedAt: row.started_at, finishedAt: row.finished_at || null, updatedAt: row.updated_at,
       runner: 'bridge', deviceId: row.device_id, bridgePhase: row.phase, cancelRequested: !!row.cancel_requested,
@@ -52,6 +53,8 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
   };
   const isOnline = row => !!row.last_seen_at && now() - Date.parse(row.last_seen_at) <= ONLINE_MS;
 
+  const modelEnginesFor = row => isOnline(row) ? JSON.parse(row.model_engines) : [];
+
   function agentsFor(user, projectId) {
     const canAssign = projectPermissions(user, projectRole(user, projectId)).assignTasks;
     return db.prepare(`SELECT d.*,u.username FROM local_device_sessions d JOIN sessions s ON s.token_hash=d.token_hash JOIN users u ON u.id=d.user_id
@@ -62,7 +65,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
         const mine = row.user_id === user.id; const teamDispatch = !!row.team_dispatch;
         return {
           id: row.id, deviceName: row.device_name, tool: row.tool, owner: { id: row.user_id, username: row.username },
-          lastSeenAt: row.last_seen_at, online: isOnline(row), teamDispatch, mine, dispatchable: mine || canAssign && teamDispatch,
+          lastSeenAt: row.last_seen_at, online: isOnline(row), modelEngines: modelEnginesFor(row), teamDispatch, mine, dispatchable: mine || canAssign && teamDispatch,
         };
       });
   }
@@ -74,7 +77,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       .map(row => ({
         id: row.id, deviceName: row.device_name, tool: row.tool, projectIds: JSON.parse(row.project_ids),
         lastSeenAt: row.last_seen_at, expiresAt: new Date(row.expires_at).toISOString(),
-        online: !!row.last_seen_at && now() - Date.parse(row.last_seen_at) <= ONLINE_MS,
+        online: isOnline(row), modelEngines: modelEnginesFor(row),
       }));
   }
 
@@ -111,9 +114,10 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
   };
 
   function start(req, user, task, body) {
-    keys(body, ['mode', 'engine', 'jobId', 'stage', 'autoClaim', 'customInstruction', 'runner', 'deviceId']);
+    keys(body, ['mode', 'engine', 'model', 'jobId', 'stage', 'autoClaim', 'customInstruction', 'runner', 'deviceId']);
     if (body.runner !== undefined && body.runner !== 'bridge') fail(400, 'INVALID_AI_RUNNER', '服务器部署仅支持派发到已配对的本机 Bridge');
     const mode = body.mode || 'read';
+    if (mode === 'review') requireReviewableTask(task, body.stage);
     if (!BRIDGE_MODES.includes(mode)) fail(400, 'INVALID_AI_MODE', '不支持的 AI 执行模式');
     if (!allowedModes.includes(mode)) fail(403, 'BRIDGE_MODE_DISABLED', `当前服务器未开放「${MODE_LABELS[mode]}」派发`);
     const engine = BRIDGE_ENGINES.find(item => item.id === (body.engine || 'codex'));
@@ -124,6 +128,8 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
     if (!device || foreign && (!teamDispatcher || !memberRole(device.user_id, task.projectId))) fail(404, 'BRIDGE_DEVICE_UNAVAILABLE', '所选本机 Bridge 不存在、已撤销或已过期，请重新配对');
     if (!JSON.parse(device.project_ids).includes(task.projectId)) fail(403, 'BRIDGE_DEVICE_PROJECT_SCOPE', '所选本机 Bridge 未获授权访问该项目');
     if (foreign && !device.team_dispatch) fail(403, 'BRIDGE_TEAM_DISPATCH_DISABLED', '该成员尚未在「本机接入」中开启「允许团队派发」');
+    const model = optionalModelId(body.model);
+    if (model && !modelEnginesFor(device).includes(engine.id)) fail(409, 'AI_MODEL_SELECTION_UNAVAILABLE', '目标设备暂未提供该 CLI 的模型选择');
     sweep();
     const active = db.prepare("SELECT COUNT(*) AS count FROM local_ai_runs WHERE actor_id=? AND runner='bridge' AND status='RUNNING'").get(user.id).count;
     if (active >= MAX_ACTIVE) fail(429, 'AI_RUN_BUSY', `当前已有 ${MAX_ACTIVE} 个派发在排队或执行，请等待完成或停止后再发起`);
@@ -155,12 +161,13 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       if (body.jobId) {
         const row = db.prepare('SELECT * FROM jobs WHERE id=?').get(textField(body.jobId, 'jobId', { max: 64 }));
         if (!row || row.task_id !== currentTask.id) fail(404, 'JOB_NOT_FOUND', '指定的本地评审申请不存在');
+        requireReviewableTask(currentTask, row.stage);
         const hydrated = workflow.jobRow(row, currentTask);
         if (hydrated.executionMode !== 'LOCAL_REPORT' || hydrated.report || hydrated.decision || hydrated.stale) fail(409, 'JOB_NOT_ELIGIBLE', '该评审申请已过期或已提交报告，请重新发起本地评审');
         if (!REVIEW_ROLES[role]?.includes(hydrated.stage)) fail(403, 'FORBIDDEN', '当前角色无权执行该阶段评审');
         targetJob = hydrated;
       } else {
-        if (!STAGES.includes(body.stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
+        if (!REVIEW_STAGES.includes(body.stage)) fail(400, 'STAGE_REQUIRED', '请选择要执行的评审阶段或已有本地评审申请');
         targetJob = workflow.createReview(currentTask, user, role, { stage: body.stage, executionMode: 'LOCAL_REPORT' }).job;
       }
     }
@@ -184,9 +191,9 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       if (mode !== 'read') assertWritable(fresh, user);
       const latest = liveDevice(device.id);
       if (!latest || latest.user_id !== device.user_id || foreign && !latest.team_dispatch) fail(404, 'BRIDGE_DEVICE_UNAVAILABLE', '所选本机 Bridge 已撤销、已过期或已关闭团队派发');
-      db.prepare(`INSERT INTO local_ai_runs (id,task_id,project_id,job_id,actor_id,mode,engine,tool,repo_path,status,output,started_at,updated_at,runner,device_id,phase,cancel_requested,payload)
-        VALUES (?,?,?,?,?,?,?,?,NULL,'RUNNING','',?,?,'bridge',?,'QUEUED',0,?)`)
-        .run(id, currentTask.id, currentTask.projectId, targetJob?.id || null, user.id, mode, engine.id, engine.tool, at, at, device.id, payload);
+      db.prepare(`INSERT INTO local_ai_runs (id,task_id,project_id,job_id,actor_id,mode,engine,tool,repo_path,status,output,started_at,updated_at,runner,device_id,phase,cancel_requested,payload,model)
+        VALUES (?,?,?,?,?,?,?,?,NULL,'RUNNING','',?,?,'bridge',?,'QUEUED',0,?,?)`)
+        .run(id, currentTask.id, currentTask.projectId, targetJob?.id || null, user.id, mode, engine.id, engine.tool, at, at, device.id, payload, model);
       audit(user.id, 'BRIDGE_RUN_QUEUE', id, currentTask.projectId);
     });
     return { run: runRow(db.prepare('SELECT * FROM local_ai_runs WHERE id=?').get(id)), task: getTask(currentTask.id, user), ...(targetJob ? { job: targetJob } : {}) };
@@ -213,27 +220,32 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
     return runRow(db.prepare('SELECT * FROM local_ai_runs WHERE id=?').get(id));
   }
 
-  async function next(req, reauthorize, waitSeconds) {
+  async function next(req, reauthorize, waitSeconds, advertisedModelEngines) {
     const deadline = now() + Math.min(Math.max(waitSeconds, 0), WAIT_MAX_S) * 1000;
     let closed = false;
     req.once('close', () => { closed = true; });
+    const engineJson = JSON.stringify(advertisedModelEngines);
+    db.prepare('UPDATE local_device_sessions SET model_engines=? WHERE id=? AND model_engines!=?').run(engineJson, requireDevice(reauthorize()).id, engineJson);
     for (;;) {
       const device = requireDevice(reauthorize());
       sweep();
-      const row = db.prepare("SELECT * FROM local_ai_runs WHERE runner='bridge' AND device_id=? AND status='RUNNING' AND phase='QUEUED' ORDER BY started_at, rowid LIMIT 1").get(device.id);
+      const row = db.prepare(`SELECT * FROM local_ai_runs WHERE runner='bridge' AND device_id=? AND status='RUNNING' AND phase='QUEUED'
+        AND (model IS NULL OR engine IN (SELECT value FROM json_each(?))) ORDER BY started_at, rowid LIMIT 1`).get(device.id, engineJson);
       if (row) return { run: { id: row.id, taskId: row.task_id, projectId: row.project_id, mode: row.mode, engine: row.engine, startedAt: row.started_at } };
       if (closed || now() >= deadline) return { run: null };
       await sleep(1000);
     }
   }
 
-  function claim(user, id) {
+  function claim(user, id, body) {
     const device = requireDevice(user);
     let claimed;
     transaction(() => {
       const row = deviceRun(device, id);
       if (row.status !== 'RUNNING' || row.phase !== 'QUEUED') fail(409, 'BRIDGE_RUN_NOT_QUEUED', '该派发已被领取、取消或结束');
+      if (row.model && body?.supportsModel !== true) fail(409, 'AI_MODEL_SELECTION_UNAVAILABLE', '本机 Bridge 暂不支持指定模型');
       const task = getTask(row.task_id, user);
+      if (row.mode === 'review') requireReviewableTask(task, db.prepare('SELECT stage FROM jobs WHERE id=?').get(row.job_id)?.stage);
       if (row.mode !== 'read') assertWritable(task, user);
       if (row.mode === 'develop' && task.assigneeId !== user.id && !projectPermissions(user, taskRole(task, user)).assignTasks) fail(403, 'FORBIDDEN', '任务已改派，派发失效');
       db.prepare("UPDATE local_ai_runs SET phase='CLAIMED',lease_until=?,updated_at=? WHERE id=?").run(now() + LEASE_MS, iso(), id);
@@ -241,7 +253,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       claimed = row;
     });
     return {
-      run: { id: claimed.id, taskId: claimed.task_id, projectId: claimed.project_id, jobId: claimed.job_id, mode: claimed.mode, engine: claimed.engine, tool: claimed.tool },
+      run: { id: claimed.id, taskId: claimed.task_id, projectId: claimed.project_id, jobId: claimed.job_id, mode: claimed.mode, engine: claimed.engine, model: claimed.model ?? null, tool: claimed.tool },
       payload: JSON.parse(claimed.payload), leaseMs: LEASE_MS,
       placeholders: { contextFile: CONTEXT_FILE_PLACEHOLDER, repoPath: REPO_PATH_PLACEHOLDER },
     };
@@ -269,16 +281,17 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
 
   function result(user, id, body) {
     const device = requireDevice(user);
-    keys(body, ['status', 'output', 'error', 'exitCode']);
+    keys(body, ['status', 'output', 'error', 'exitCode', 'effectiveModel']);
     if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(body.status)) fail(400, 'INVALID_STATUS', 'status必须为SUCCEEDED、FAILED或CANCELLED');
     const output = tail(body.output) ?? '';
+    const effectiveModel = optionalModelId(body.effectiveModel);
     const error = body.error === undefined || body.error === null ? null : textField(body.error, 'error', { max: 4000, preserve: true }).slice(0, 1000);
     if (body.exitCode !== undefined && body.exitCode !== null && !Number.isInteger(body.exitCode)) fail(400, 'INVALID_INPUT', 'exitCode格式不正确');
     const row = liveRun(device, id);
     const draft = body.status === 'SUCCEEDED' && row.mode === 'review' ? extractReviewDraft(output, { allowPlainText: false }) : null;
     const at = iso();
-    db.prepare('UPDATE local_ai_runs SET status=?,output=?,draft_json=?,error=?,exit_code=?,finished_at=?,updated_at=?,lease_until=NULL WHERE id=?')
-      .run(body.status, output, draft ? JSON.stringify(draft) : null, error, body.exitCode ?? null, at, at, id);
+    db.prepare('UPDATE local_ai_runs SET status=?,output=?,draft_json=?,error=?,exit_code=?,finished_at=?,updated_at=?,effective_model=?,lease_until=NULL WHERE id=?')
+      .run(body.status, output, draft ? JSON.stringify(draft) : null, error, body.exitCode ?? null, at, at, effectiveModel, id);
     audit(user.id, 'BRIDGE_RUN_FINISH', id, row.project_id);
     return { run: runRow(db.prepare('SELECT * FROM local_ai_runs WHERE id=?').get(id)) };
   }
@@ -288,13 +301,15 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       const wait = Number(url.searchParams.get('wait') || 0);
       if (!Number.isFinite(wait)) fail(400, 'INVALID_INPUT', 'wait格式不正确');
       requireDevice(user);
-      send(200, await next(req, reauthorize, wait));
+      const advertised = new Set(url.searchParams.getAll('modelEngine'));
+      const modelEngines = BRIDGE_ENGINES.map(engine => engine.id).filter(engine => advertised.has(engine));
+      send(200, await next(req, reauthorize, wait, modelEngines));
       return true;
     }
     const deviceAction = path.match(/^\/api\/bridge\/runs\/([^/]+)\/(claim|progress|result)$/);
     if (deviceAction && method === 'POST') {
       const [, id, action] = deviceAction;
-      send(200, action === 'claim' ? claim(user, id) : action === 'progress' ? progress(user, id, body) : result(user, id, body));
+      send(200, action === 'claim' ? claim(user, id, body) : action === 'progress' ? progress(user, id, body) : result(user, id, body));
       return true;
     }
     const taskRuns = path.match(/^\/api\/tasks\/([^/]+)\/ai-runs$/);
@@ -312,7 +327,7 @@ export function createBridgeDispatch({ db, transaction, audit, projectRole, getT
       requireBrowser(req, user);
       send(200, {
         supported: true, deployment: 'server', runners: ['bridge'], bridgeModes: allowedModes,
-        engines: BRIDGE_ENGINES.map(item => ({ ...item, available: true })), devices: devicesFor(user),
+        engines: BRIDGE_ENGINES.map(item => ({ ...item, available: true, supportsModel: true })), devices: devicesFor(user),
         apps: { cursor: false, terminal: false, finder: false, workbenchUrl: '' },
       });
       return true;

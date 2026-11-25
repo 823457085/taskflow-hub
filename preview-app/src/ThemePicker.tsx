@@ -6,16 +6,13 @@ import { resolveTaskFlowTheme, TASKFLOW_THEMES, type TaskFlowThemeId } from './t
 export const ThemePicker: React.FC<{
   value: TaskFlowThemeId;
   onChange: (next: TaskFlowThemeId) => void;
-}> = ({ value, onChange }) => {
+  placement?: "bottomRight" | "rightBottom" | "topLeft";
+}> = ({ value, onChange, placement = "bottomRight" }) => {
   const [open, setOpen] = useState(false);
   const active = resolveTaskFlowTheme(value);
 
   const panel = (
     <div className="tf-theme-popover" role="listbox" aria-label="选择工作台主题风格">
-      <div className="tf-theme-popover-head">
-        <span>设计系统与空间架构</span>
-        <small>awesome-design-md</small>
-      </div>
       <div className="tf-theme-grid">
         {TASKFLOW_THEMES.map(item => {
           const selected = item.id === value;
@@ -36,13 +33,7 @@ export const ThemePicker: React.FC<{
                 <i style={{ background: item.swatch[1] }} />
                 <i style={{ background: item.swatch[2] }} />
               </span>
-              <span className="tf-theme-copy">
-                <span className="tf-theme-title-row">
-                  <strong>{item.label}</strong>
-                  <em className="tf-theme-badge">{item.badge}</em>
-                </span>
-                <small>{item.subtitle}</small>
-              </span>
+              <span className="tf-theme-copy">{item.label}</span>
               {selected && <Check size={14} className="tf-theme-check" />}
             </button>
           );
@@ -55,7 +46,7 @@ export const ThemePicker: React.FC<{
     <Popover
       content={panel}
       trigger="click"
-      placement="bottomRight"
+      placement={placement}
       arrow={false}
       open={open}
       onOpenChange={setOpen}

@@ -18,10 +18,12 @@ import {
   gateStatusLabel,
   gitBranchLabel,
   heartbeatStatusLabel,
+  imChannelLabel,
   mcpToolLabel,
   mrStateLabel,
   pairingStatusLabel,
   personaLabel,
+  pluginStatusLabel,
   progressSourceLabel,
   REJECTION_REASON_PRESETS,
   REPORT_SUMMARY_PRESETS,
@@ -40,8 +42,12 @@ import {
   taskTypeLabel,
   toolLabel,
   WAIVER_REASON_PRESETS,
+  webhookProviderLabel,
 } from '../preview-app/src/views/displayLabels.ts';
 import { buildQuickCommandItems } from '../preview-app/src/views/quickCommandSearch.ts';
+import { buildTaskTree } from '../preview-app/src/views/taskTree.ts';
+import { plainReviewText, reviewDetailSections, sortReviewFindings } from '../preview-app/src/views/reviewFindingPresentation.ts';
+import { groupTaskMaterials } from '../preview-app/src/views/assetGroups.ts';
 import {
   clearSearchOnEscape,
   deleteSavedTaskView,
@@ -68,7 +74,7 @@ import {
   parseUnifiedDiffStats,
   splitUnifiedDiffLines,
 } from '../preview-app/src/views/assetDiff.ts';
-import { buildAssetTemplate } from '../preview-app/src/views/taskSmartLinks.ts';
+import { buildAssetTemplate, canImportTaskMaterial } from '../preview-app/src/views/taskSmartLinks.ts';
 import { hasDoneAncestor, isTaskFrozen } from '../preview-app/src/views/taskAvailability.ts';
 import {
   buildTaskContextPack,
@@ -117,6 +123,7 @@ import {
   buildProjectSprintDigest,
 } from '../preview-app/src/views/standupDigest.ts';
 import {
+  currentAiReviews,
   evaluateReviewSla,
   formatCompactDuration,
   isReviewActionableByUser,
@@ -127,6 +134,7 @@ import {
   evaluateColumnWip,
 } from '../preview-app/src/views/kanbanSwimlanes.ts';
 import { formatLocalDoctorMarkdown } from '../preview-app/src/views/localDoctorReport.ts';
+import { buildCodeMaterialPreview, summarizeNodeTests } from '../preview-app/src/views/codeMaterialContent.ts';
 import {
   buildConventionalBranchName,
   buildConventionalCommitMessage,
@@ -174,7 +182,10 @@ test('displayLabels maps technical enums to plain Chinese and falls back cleanly
   assert.equal(taskTypeLabel('RELEASE'), '版本发布');
 
   assert.equal(stageLabel('PRD'), '需求评审');
+  assert.equal(stageLabel('TASK_BREAKDOWN'), '任务拆分审核');
   assert.equal(stageLabel('TECH_SPEC'), '技术方案审核');
+  assert.equal(personaLabel('ai-delivery-lead'), 'AI 交付负责人');
+  assert.equal(skillLabel('requirement-coverage-map'), '需求点覆盖映射');
   assert.equal(stageLabel('CODE_REVIEW'), '代码审核');
   assert.equal(stageLabel('TEST_CASE'), '测试用例评审');
   assert.equal(stageLabel('RELEASE'), '上线审核');
@@ -202,9 +213,9 @@ test('displayLabels maps technical enums to plain Chinese and falls back cleanly
   assert.equal(reportSourceLabel('LOCAL_TOOL'), '本地 AI 工具');
   assert.equal(reportSourceLabel('MANUAL'), '人工填写');
 
-  assert.equal(severityLabel('CRITICAL'), '阻断问题');
-  assert.equal(severityLabel('WARN'), '风险提醒');
-  assert.equal(severityLabel('INFO'), '改进建议');
+  assert.equal(severityLabel('CRITICAL'), 'P0 阻断问题');
+  assert.equal(severityLabel('WARN'), 'P1 需跟进');
+  assert.equal(severityLabel('INFO'), 'P2 改进建议');
 
   assert.equal(gateStatusLabel('PASS'), '已通过');
   assert.equal(gateStatusLabel('MISSING_INPUT'), '缺少材料');
@@ -231,6 +242,24 @@ test('displayLabels maps technical enums to plain Chinese and falls back cleanly
   assert.equal(TASK_TYPE_OPTIONS.length, 4);
   assert.equal(ASSET_KIND_OPTIONS.length, 5);
   assert.equal(SEVERITY_OPTIONS.length, 3);
+});
+
+test('review findings sort by reported severity and separate explicit context, impact and suggestions', () => {
+  const findings = [{ id: 'note', severity: 'INFO' }, { id: 'risk', severity: 'WARN' }, { id: 'blocker', severity: 'CRITICAL' }];
+  assert.deepEqual(sortReviewFindings(findings).map(item => item.id), ['blocker', 'risk', 'note']);
+  assert.equal(findings[0].id, 'note');
+  assert.deepEqual(reviewDetailSections('问题：空余额时无法打开首页。\n影响: 用户查不了余额。\n建议：显示空态。\n用零余额账户验证。'), [
+    { label: '哪里有问题', text: '空余额时无法打开首页。' },
+    { label: '会影响什么', text: '用户查不了余额。' },
+    { label: '建议怎么改', text: '显示空态。\n用零余额账户验证。' },
+  ]);
+  assert.deepEqual(reviewDetailSections('文档和原型的名称不一致。建议统一字段后再验收。'), [
+    { label: '问题说明', text: '文档和原型的名称不一致。' },
+    { label: '建议怎么改', text: '统一字段后再验收。' },
+  ]);
+  assert.deepEqual(reviewDetailSections('具体影响需要核实。'), [{ label: '问题说明', text: '具体影响需要核实。' }]);
+  assert.equal(plainReviewText('未发现符合 CRITICAL 定义的问题或当前 PRD 的明确 BLOCK 规则失败。规则编号 RULE-CRITICAL-1。'),
+    '未发现 P0 阻断问题或需求评审中未通过的必查项。规则编号 RULE-CRITICAL-1。');
 });
 
 test('uiPreferences persists booleans and string lists and clears search on Escape without closing drawers', () => {
@@ -387,7 +416,7 @@ test('progressSourceLabel, assetMetaCodeLabel, report/waiver presets and formatS
   );
   assert.ok(md.includes('## 代码审核报告'));
   assert.ok(md.includes('npm test 通过'));
-  assert.ok(md.includes('**[阻断问题]** 并发锁缺失 `src/pay.ts:42`（已豁免：网关已兜底）'));
+  assert.ok(md.includes('**[P0 阻断问题]** 并发锁缺失 `src/pay.ts:42`（已豁免：网关已兜底）'));
 });
 
 test('buildQuickCommandItems ranks tasks, filters projects, actions and sections accurately', () => {
@@ -485,6 +514,64 @@ test('assetDiff parses unified diff stats, classifies diff lines and computes fo
   const sameDiff = computeRevisionLineDiff(r2, r2);
   assert.equal(sameDiff.identical, true);
   assert.equal(sameDiff.rows.length, 0);
+});
+
+test('code material keeps its note, verified test counts and patch available independently', () => {
+  const log = ['✖ scenario', 'ℹ tests 19', 'ℹ pass 18', 'ℹ fail 1', 'ℹ cancelled 0', 'ℹ skipped 0', 'ℹ todo 0'].join('\n');
+  const patch = [
+    'diff --git a/src/example.ts b/src/example.ts',
+    '--- a/src/example.ts',
+    '+++ b/src/example.ts',
+    '@@ -1 +1 @@',
+    '-old',
+    '+new',
+  ].join('\n');
+  const content = [
+    '# 代码提交（branch: feature/example, commit: abcdef01）',
+    '- 仓库：example（本地目录：/work/example）',
+    '- 保留当前测试记录',
+    '## 定向测试',
+    '```text',
+    log,
+    '```',
+    '## Patch Diff',
+    patch,
+  ].join('\n');
+  const result = buildCodeMaterialPreview(content);
+
+  assert.deepEqual(result.metadata, [
+    { label: '分支', value: 'feature/example' },
+    { label: '提交', value: 'abcdef01' },
+    { label: '仓库', value: 'example' },
+  ]);
+  assert.deepEqual(result.sections, [
+    { type: 'markdown', blocks: [
+      { type: 'heading', level: 1, text: '代码提交' },
+      { type: 'ul', items: ['保留当前测试记录'] },
+      { type: 'heading', level: 2, text: '定向测试' },
+    ] },
+    { type: 'test', code: log, counts: { tests: 19, pass: 18, fail: 1, cancelled: 0, skipped: 0, todo: 0 } },
+    { type: 'diff', code: patch, files: 1, additions: 1, deletions: 1 },
+  ]);
+  assert.equal(summarizeNodeTests(log.replace('ℹ fail 1', 'ℹ fail 0')), null);
+  assert.equal(summarizeNodeTests('tests 19\npass 19\nfail 0'), null);
+  assert.deepEqual(buildCodeMaterialPreview('```diff\n' + patch + '\n```').sections, [
+    { type: 'diff', code: patch, files: 1, additions: 1, deletions: 1 },
+  ]);
+});
+
+test('task material imports respect selected accounts and legacy connector permissions', () => {
+  const shared = { provider: 'confluence', name: 'Confluence', status: 'CONNECTED', hasCredential: true };
+  const personalJira = { provider: 'jira', name: 'Jira', status: 'CONNECTED', hasCredential: true, accountId: 'jira-personal' };
+  const newConnection = { ...shared, status: 'UNCONFIGURED', hasCredential: false, localProfileAvailable: true };
+
+  assert.equal(canImportTaskMaterial(shared, false, false), false);
+  assert.equal(canImportTaskMaterial(personalJira, false, false), true);
+  assert.equal(canImportTaskMaterial({ ...personalJira, status: 'ACCOUNT_UNAVAILABLE' }, false, false), false);
+  assert.equal(canImportTaskMaterial({ ...personalJira, hasCredential: false }, false, false), false);
+  assert.equal(canImportTaskMaterial(shared, true, false), true);
+  assert.equal(canImportTaskMaterial(newConnection, true, false), false);
+  assert.equal(canImportTaskMaterial(newConnection, true, true), true);
 });
 
 test('Spec-Kit structured templates and Kanban hasDoneAncestor behave accurately', () => {
@@ -990,6 +1077,15 @@ test('subtaskDecomposer allocates collision-free Jira keys, skips non-goal secti
   assert.equal(std.length, 4);
   assert.equal(std[0].jiraKey, 'DEMO-902');
   assert.equal(std[3].type, 'RELEASE');
+
+  const localParent = { ...parentTask, jiraKey: 'LOCAL-T' + 'A'.repeat(32) };
+  const localExtracted = extractSubtaskCandidatesFromSpecs({ parentTask: localParent, assets, existingTasks: [existingChild] });
+  const localStandard = buildStandardDeliverySubtasks(localParent, [existingChild]);
+  for (const [local, jira] of [[localExtracted, extracted], [localStandard, std]]) {
+    assert.deepEqual(local.map(item => item.title), jira.map(item => item.title));
+    assert.ok(local.every(item => item.jiraKey === ''), '本地子任务编号应由服务端生成');
+  }
+  assert.deepEqual(allocateNextJiraKeys(localParent.jiraKey, [], 1), []);
 });
 
 test('assetDiff Side-by-Side pairs deletions with additions, tracks dual line numbers, and handles revision diffs', () => {
@@ -1063,6 +1159,19 @@ test('markdownLite parses GFM tables, checklists, code fences, and strictly bloc
   assert.equal(inline.some(t => t.type === 'link' && t.href.startsWith('javascript:')), false);
   assert.ok(inline.some(t => t.type === 'code' && t.text === 'order_id'));
   assert.ok(inline.some(t => t.type === 'strong' && t.text === '必填'));
+
+  const figmaUrl = 'https://www.figma.com/design/file/%E8%AE%BE%E8%AE%A1?node-id=402-28144&t=abc-1#preview';
+  const docUrl = 'https://example.com/wiki/Balance_(finance)';
+  const prose = `设计稿：${figmaUrl}，文档 (${docUrl}). 示例 \`https://example.com/literal\``;
+  const proseTokens = parseInlineTokens(prose);
+  assert.deepEqual(proseTokens.filter(token => token.type === 'link').map(token => token.href), [figmaUrl, docUrl]);
+  assert.ok(proseTokens.some(token => token.type === 'code' && token.text === 'https://example.com/literal'));
+  assert.deepEqual(parseInlineTokens('<https://example.com/a>'), [
+    { type: 'link', text: 'https://example.com/a', href: 'https://example.com/a' },
+  ]);
+  assert.deepEqual(parseInlineTokens('https://user:pass@example.com/a'), [
+    { type: 'text', text: 'https://user:pass@example.com/a' },
+  ]);
 
   const md = [
     '# 灰度发布核查单',
@@ -1235,6 +1344,17 @@ test('standupDigest builds anti-hallucination personal & sprint Markdown reports
     canStandupDigest: true,
   });
   assert.ok(cmdItems.some(item => item.actionId === 'standup-digest'));
+});
+
+test('current AI reviews keep only the latest valid AI review for each task stage', () => {
+  const job = { id: 'ai-old', taskId: 't-1', stage: 'PRD', executionMode: 'LOCAL_REPORT', createdAt: '2026-11-22T06:00:00.000Z', stale: false };
+  const newest = { ...job, id: 'ai-latest', createdAt: '2026-11-24T06:00:00.000Z' };
+  const stale = { ...newest, id: 'stale', createdAt: '2026-11-25T06:00:00.000Z', stale: true };
+  const manual = { ...newest, id: 'manual', executionMode: 'HUMAN_REVIEW' };
+  const scheme = { ...job, id: 'scheme', stage: 'TECH_SPEC' };
+  const anotherTask = { ...job, id: 'another-task', taskId: 't-2' };
+  const obsolete = { ...newest, id: 'obsolete', stage: 'TASK_BREAKDOWN', reviewRequired: false };
+  assert.deepEqual(currentAiReviews([job, newest, stale, manual, scheme, anotherTask, obsolete]), [newest, scheme, anotherTask]);
 });
 
 test('reviewQueueSla stratifies review aging heat, checks user actionability, and sorts burning/overdue queues first', () => {
@@ -1544,4 +1664,93 @@ test('deliveryMetrics formats hours and grades DORA lead time, review turnaround
   assert.equal(gradeFirstTimePassRate(75).tier, 'HIGH');
   assert.equal(gradeFirstTimePassRate(60).tier, 'MEDIUM');
   assert.equal(gradeFirstTimePassRate(40).tier, 'LOW');
+});
+
+test('buildTaskTree groups children under present parents and keeps filtered orphans or cycles safe', () => {
+  const mk = (id, parentId = null) => ({
+    id, jiraKey: id, title: id, projectId: 'p1', parentId, type: 'TASK',
+    assigneeId: null, ownerId: 'u1', status: 'OPEN', version: 1, progress: 0, lastSummary: '', updatedAt: '',
+  });
+  const tree = buildTaskTree([mk('P1'), mk('C1', 'P1'), mk('C2', 'P1'), mk('ORPHAN', 'MISSING'), mk('CYC-A', 'CYC-B'), mk('CYC-B', 'CYC-A')]);
+  assert.deepEqual(tree.map(row => row.id), ['P1', 'ORPHAN', 'CYC-A', 'CYC-B']);
+  assert.deepEqual(tree[0].subtasks?.map(row => row.id), ['C1', 'C2']);
+  assert.equal(tree[1].subtasks, undefined);
+  assert.equal(tree[2].subtasks, undefined);
+  assert.equal(tree[3].subtasks, undefined);
+});
+
+test('material groups follow known parents within the project and retain orphaned materials', () => {
+  const task = (id, parentId = null, projectId = 'p1', externalRef = null) => ({
+    id, projectId, parentId, jiraKey: 'JIRA-' + id, title: '任务 ' + id, externalRef,
+  });
+  const material = (id, taskId, projectId = 'p1') => ({
+    id, taskId, projectId, taskKey: 'JIRA-' + taskId, taskTitle: '材料任务 ' + taskId,
+  });
+  const tasks = [
+    task('parent'), task('child', 'parent'), task('nested', 'child'),
+    task('jira-child', null, 'p1', { provider: 'jira', issueType: { subtask: true }, parentKey: 'JIRA-parent' }),
+    task('foreign', 'parent', 'p2'), task('loop-a', 'loop-b'), task('loop-b', 'loop-a'),
+  ];
+  const assets = [
+    material('code', 'child'), material('orphan-doc', 'missing'), material('test-cases', 'nested'),
+    material('foreign-doc', 'foreign', 'p2'), material('requirements', 'parent'),
+    material('jira-doc', 'jira-child'), material('loop-doc-a', 'loop-a'), material('loop-doc-b', 'loop-b'),
+  ];
+  const groups = groupTaskMaterials(assets, tasks);
+  assert.deepEqual(groups.map(group => group.taskId), ['parent', 'missing', 'foreign', 'loop-a', 'loop-b']);
+  assert.equal(groups[0].taskTitle, '任务 parent');
+  assert.equal(groups[1].taskTitle, '材料任务 missing');
+  assert.deepEqual(groups.map(group => group.assets.map(asset => asset.id)), [
+    ['code', 'test-cases', 'requirements', 'jira-doc'],
+    ['orphan-doc'], ['foreign-doc'], ['loop-doc-a'], ['loop-doc-b'],
+  ]);
+});
+
+test('material groups combine explicitly linked requirements and development tasks without transferring ownership', () => {
+  const task = (key, description = '', server = 'jira.example.test', parentId = null) => ({
+    id: key, jiraKey: key, title: key, projectId: 'project', parentId,
+    externalRef: { provider: 'jira', description, url: `https://${server}/browse/${key}` },
+  });
+  const source = key => `*需求来源*\n产品需求 [${key}|https://jira.example.test/browse/${key}]\n*交付物*\nDEMO-20`;
+  const tasks = [
+    task('DEMO-1'), task('DEMO-2', source('DEMO-1')), task('DEMO-3', '', 'jira.example.test', 'DEMO-2'),
+    task('DEMO-4', source('DEMO-1'), 'other.example.test'), task('DEMO-5', source('DEMO-99')),
+    task('DEMO-6', '*需求来源*\nDEMO-1、DEMO-2'),
+  ];
+  const assets = tasks.map(item => ({ taskId: item.id, projectId: item.projectId, taskKey: item.jiraKey, taskTitle: item.title }));
+  const groups = groupTaskMaterials(assets, tasks);
+  assert.deepEqual(groups.map(group => group.taskId), ['DEMO-1', 'DEMO-4', 'DEMO-5', 'DEMO-6']);
+  assert.deepEqual(groups[0].assets.map(asset => asset.taskId), ['DEMO-1', 'DEMO-2', 'DEMO-3']);
+  assert.equal(groups[0].rootTaskIds.get('DEMO-3'), 'DEMO-2');
+});
+
+test('automation, IM channel, webhook, audit log, and declarative policy labels work consistently', () => {
+  assert.equal(reviewStatusLabel('AWAITING_CLOUD_AI'), '待云端 AI 执行');
+  assert.equal(executionModeLabel('CLOUD_AI'), '云端 AI（未启用）');
+  assert.equal(executionModeLabel('CLOUD_AI', false), '云端 AI（未启用）');
+  assert.equal(executionModeLabel('CLOUD_AI', true), '云端 AI 自动评审');
+  assert.equal(reportSourceLabel('CLOUD_AI'), '云端 AI');
+
+  assert.equal(imChannelLabel('feishu'), '飞书机器人');
+  assert.equal(imChannelLabel('dingtalk'), '钉钉机器人');
+  assert.equal(imChannelLabel('wecom'), '企业微信机器人');
+  assert.equal(imChannelLabel('generic'), '通用 Webhook');
+
+  assert.equal(webhookProviderLabel('gitlab'), 'GitLab Webhook');
+  assert.equal(webhookProviderLabel('confluence'), 'Confluence Webhook');
+  assert.equal(webhookProviderLabel('generic'), '通用文档 / 流水线 Webhook');
+
+  assert.equal(pluginStatusLabel('EXECUTABLE_DECLARATIVE'), '可执行规则引擎');
+  assert.equal(pluginStatusLabel('REGISTERED_NOT_EXECUTABLE'), '快照与 AI 注入生效');
+
+  assert.equal(describeAuditAction('API_SPEC_IMPORT').label, '导入 OpenAPI / Apifox 接口契约');
+  assert.equal(describeAuditAction('CLOUD_AI_REPORT').label, '云端 AI 提交评审报告');
+  assert.equal(describeAuditAction('MR_REVIEW_WRITEBACK').label, '回写评审意见到 MR');
+  assert.equal(describeAuditAction('WEBHOOK_ASSET_SYNC').label, 'Webhook 自动同步材料');
+  assert.equal(describeAuditAction('PLUGIN_REMOVE').label, '移出项目策略插件');
+
+  assert.ok(POLICY_PLUGIN_PRESETS.length >= 3);
+  for (const preset of POLICY_PLUGIN_PRESETS) {
+    assert.ok(typeof preset.evaluator === 'string' && preset.evaluator.length > 0);
+  }
 });

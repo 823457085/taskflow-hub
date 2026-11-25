@@ -1,0 +1,58 @@
+.tf-skills-reading > * { min-width: 0; }
+.tf-skills-reading .ant-table-cell { overflow-wrap: anywhere; }
+.tf-skill-row { min-width: 0; }
+.tf-skill-select {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tf-text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  text-align: start;
+  overflow-wrap: anywhere;
+}
+.tf-skill-select:hover, .tf-skill-select[aria-pressed="true"] { color: var(--tf-accent); }
+.tf-skills-reading .tf-skill-selected > td { background: var(--tf-accent-soft); }
+.tf-skill-description { font-size: 12px; }
+.tf-skill-detail .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+.tf-skill-detail .ant-card-head-title { min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.tf-skill-detail .ant-card-extra { max-width: 100%; }
+.tf-skill-detail .tf-md-preview { min-width: 0; overflow-wrap: anywhere; }
+.tf-skill-section { display: grid; gap: 10px; min-width: 0; padding-top: 12px; border-top: 1px solid var(--tf-divider); }
+.tf-skill-section .ant-select { max-width: 100%; }
+@media (max-width: 900px) {
+  .tf-skills-reading > .ant-table-wrapper { max-height: 300px; overflow: auto; }
+}
+
+.tf-skills-workspace { min-width: 0; }
+.tf-skills-workspace .ant-space-item > .ant-tag { margin-inline-end: 0; }
+.tf-skills-toolbar {
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-card-radius, 12px);
+}
+.tf-skills-toolbar > * { min-width: 0; max-width: 100%; }
+.tf-skills-search { width: 246px; max-width: 100%; }
+.tf-skills-scope { width: 146px; max-width: 100%; }
+.tf-skills-reading > .ant-table-wrapper {
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-card-radius, 12px);
+  overflow: auto;
+}
+.tf-skill-detail .ant-card-body {
+  max-height: max(260px, calc(100dvh - 255px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+.tf-skill-detail .tf-md-preview { max-height: none; }
+@media (max-width: 760px) {
+  .tf-skills-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .tf-skills-search { width: 178px; }
+  .tf-skills-scope { width: 120px; }
+}

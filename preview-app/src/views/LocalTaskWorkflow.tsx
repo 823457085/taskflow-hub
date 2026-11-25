@@ -1,20 +1,28 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, App, Button, Card, Checkbox, Collapse, Descriptions, Drawer, Empty, Flex, Input, Segmented, Select, Space, Tag, Typography } from 'antd';
-import { Check, Copy, ExternalLink, FileCheck2, FolderGit2, FolderOpen, Play, RefreshCw, Sparkles, Square, Terminal } from 'lucide-react';
+import { Alert, App, Button, Checkbox, Collapse, Descriptions, Drawer, Empty, Flex, Input, Segmented, Select, Space, Spin, Tag, Typography } from 'antd';
+import { Check, Copy, ExternalLink, FileCheck2, FilePlus2, FolderGit2, FolderOpen, Play, RefreshCw, Settings2, Sparkles, Square, Terminal } from 'lucide-react';
 import {
-  api, ApiError, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, TeamAgent,
-  ProjectWorkspace, REVIEW_ROLES, ReviewJob, Role, Stage, STAGES, timeText, WorkTask,
+  api, ApiError, ASSET_ROLES, AssetKind, LocalAiEngineId, LocalAiRun, LocalAiRunner, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, TeamAgent, TeamSkillItem,
+  ProjectWorkspace, REVIEW_ROLES, REVIEW_STAGE_OPTIONS, ReviewJob, Role, SkillScopeId, Stage, timeText, WorkTask,
 } from './workspaceApi';
 import { buildCompanionSyncCommand, buildLocalTaskPrompt, LOCAL_TASK_TARGETS, localReviewCandidates, LocalTaskMode, LocalTaskTarget } from './localTaskWorkflowPrompt';
 import { extractTaskSmartHints } from './taskSmartLinks';
-import { aiRunModeLabel, aiRunStatusLabel, runLocationLabel, severityLabel, stageLabel, taskStatusLabel, toolLabel } from './displayLabels';
-import { isSubmitShortcut, readStoredBool, readStoredChoice, writeStoredBool, writeStoredString } from './uiPreferences';
+import { aiRunModeLabel, aiRunStatusLabel, runLocationLabel, severityLabel, stageLabel, taskStatusLabel } from './displayLabels';
+import { isSubmitShortcut, readStoredBool, writeStoredBool } from './uiPreferences';
 import { StatusBadge } from '../components/Primitives';
 import { bridgeInstallCommand } from './bridgeInstall';
+import { ChecklistTable, draftExtras, VerdictTag } from './ChainReportBits';
+import { MarkdownPreview } from './MarkdownPreview';
+import { plainReviewText, ReviewFindingContent, sortReviewFindings } from './ReviewFindingContent';
+import { ReviewExportActions } from './ReviewExportActions';
+import { parseAiRunOutput } from './aiRunOutputParser';
+import { navigateWorkspace } from './workspaceNavigation';
+import { requiresTaskReview } from './taskAvailability';
+import { AiRunIdentity, aiRunModelLabel, availableAiEngine, LocalAiExecutionFields, readAiEngine, readAiEngineOverride, useAiModelSelection } from './LocalAiExecutionFields';
 
-const AI_ENGINE_PREF_KEY = 'taskflow.ai.engine';
 const AI_AUTO_SUBMIT_KEY = 'taskflow.ai.autoSubmitReport';
-const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
+
+type WorkflowScene = 'review' | 'tech_spec' | 'develop' | 'jira' | 'test_case' | 'analyze';
 
 const isValidTarget = (value: string | undefined): value is LocalTaskTarget => LOCAL_TASK_TARGETS.some(item => item.value === value);
 
@@ -24,6 +32,34 @@ const targetToEngine = (target: LocalTaskTarget): LocalAiEngineId => {
   if (target === 'claude') return 'claude';
   return 'codex';
 };
+
+function targetScopesForScene(scene: WorkflowScene, stage?: Stage | ''): SkillScopeId[] {
+  if (scene === 'review') {
+    if (stage === 'PRD') return ['PRD_REVIEW'];
+    if (stage === 'TASK_BREAKDOWN') return ['JIRA_GEN'];
+    if (stage === 'TECH_SPEC') return ['TECH_SPEC_REVIEW'];
+    if (stage === 'CODE_REVIEW') return ['CODE_REVIEW'];
+    if (stage === 'TEST_CASE') return ['TEST_CASE'];
+    if (stage === 'RELEASE') return ['RELEASE'];
+    return ['CODE_REVIEW'];
+  }
+  if (scene === 'tech_spec') return ['TECH_SPEC_GEN'];
+  if (scene === 'develop') return ['CODE_GEN'];
+  if (scene === 'jira') return ['JIRA_GEN'];
+  if (scene === 'test_case') return ['TEST_CASE'];
+  return ['PRD_REVIEW', 'TECH_SPEC_REVIEW', 'CODE_REVIEW'];
+}
+
+function sceneLabel(scene: WorkflowScene): string {
+  switch (scene) {
+    case 'review': return 'AI 评审';
+    case 'tech_spec': return '写技术方案';
+    case 'develop': return '写代码';
+    case 'jira': return '拆 Jira 任务';
+    case 'test_case': return '写测试用例';
+    default: return '任务分析';
+  }
+}
 
 export const LocalTaskWorkflow: React.FC<{
   open: boolean; onClose: () => void; userId: string; task: WorkTask; jobs: ReviewJob[]; role: Role;
@@ -37,17 +73,21 @@ export const LocalTaskWorkflow: React.FC<{
   constitutionFiles, initialMode, initialStage, initialJobId, initialRunner, onOpenAssets, onCreateLocalReview, onChanged, onOpenReview,
 }) => {
   const { message } = App.useApp();
-  const allowedStages = (Object.keys(REVIEW_ROLES) as Stage[]).filter(stage => REVIEW_ROLES[stage].includes(role));
-  const candidates = localReviewCandidates(task, jobs, { frozen, allowedStages });
+  const canDraftSubtasks = requiresTaskReview(task, 'TASK_BREAKDOWN');
+  const allowedStages = (Object.keys(REVIEW_ROLES) as Stage[]).filter(stage => requiresTaskReview(task, stage) && REVIEW_ROLES[stage].includes(role));
+  const candidates = localReviewCandidates(task, jobs.filter(job => job.reviewRequired !== false), { frozen, allowedStages });
   const candidateScope = JSON.stringify(candidates.map(job => [job.id, job.inputHash, job.stage]));
 
-  const [mode, setMode] = useState<LocalTaskMode>('read');
+  const [scene, setScene] = useState<WorkflowScene>('review');
+  const [outputView, setOutputView] = useState<'readable' | 'raw'>('readable');
+  const [repoEditorOpen, setRepoEditorOpen] = useState(false);
   const [target, setTarget] = useState<LocalTaskTarget>('workbench');
   const [runner, setRunner] = useState<LocalAiRunner>('local');
-  const [engine, setEngine] = useState<LocalAiEngineId>(() => readStoredChoice(AI_ENGINE_PREF_KEY, ENGINE_IDS, 'codex'));
+  const [engine, setEngine] = useState(readAiEngine);
   const [jobId, setJobId] = useState('');
   const [reviewStage, setReviewStage] = useState<Stage | ''>('');
   const [autoClaim, setAutoClaim] = useState(true);
+  const [useWorktree, setUseWorktree] = useState(false);
   const [autoSubmitReport, setAutoSubmitReport] = useState(() => readStoredBool(AI_AUTO_SUBMIT_KEY, false));
   const [customInstruction, setCustomInstruction] = useState('');
   const [copied, setCopied] = useState(false);
@@ -59,11 +99,14 @@ export const LocalTaskWorkflow: React.FC<{
   const [openingApp, setOpeningApp] = useState<string | null>(null);
   const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
   const [repositories, setRepositories] = useState<LocalGitRepo[]>([]);
+  const [projectSkills, setProjectSkills] = useState<TeamSkillItem[]>([]);
+  const [pickedSkillIds, setPickedSkillIds] = useState<string[]>([]);
   const [runs, setRuns] = useState<LocalAiRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [startingRun, setStartingRun] = useState(false);
   const [stoppingRun, setStoppingRun] = useState(false);
   const [submittingDraft, setSubmittingDraft] = useState(false);
+  const [savingGeneratedAsset, setSavingGeneratedAsset] = useState(false);
   const [rescanningRepos, setRescanningRepos] = useState(false);
   const [deviceId, setDeviceId] = useState('');
   const [teamAgents, setTeamAgents] = useState<TeamAgent[]>([]);
@@ -73,6 +116,7 @@ export const LocalTaskWorkflow: React.FC<{
   const mounted = useRef(true);
   const workspaceSeq = useRef(0);
   const targetTouched = useRef(false);
+  const runnerTouched = useRef(false);
   const prevRunningIds = useRef<Set<string>>(new Set());
   const consoleRef = useRef<HTMLPreElement>(null);
 
@@ -81,40 +125,56 @@ export const LocalTaskWorkflow: React.FC<{
   const bridgeDevices = serverMode ? (capabilities?.devices || []).filter(device => device.projectIds.includes(task.projectId)) : [];
   const memberAgents = serverMode ? teamAgents.filter(agent => !agent.mine && agent.dispatchable) : [];
   const dispatchTargets = [
-    ...bridgeDevices.map(device => ({ id: device.id, deviceName: device.deviceName, online: device.online, lastSeenAt: device.lastSeenAt, owner: null as TeamAgent['owner'] | null })),
-    ...memberAgents.map(agent => ({ id: agent.id, deviceName: agent.deviceName, online: agent.online, lastSeenAt: agent.lastSeenAt, owner: agent.owner })),
+    ...bridgeDevices.map(device => ({ id: device.id, deviceName: device.deviceName, online: device.online, lastSeenAt: device.lastSeenAt, modelEngines: device.modelEngines, owner: null as TeamAgent['owner'] | null })),
+    ...memberAgents.map(agent => ({ id: agent.id, deviceName: agent.deviceName, online: agent.online, lastSeenAt: agent.lastSeenAt, modelEngines: agent.modelEngines, owner: agent.owner })),
   ];
   const selectedDevice = dispatchTargets.find(device => device.id === deviceId) || null;
   const frozenTask = frozen || task.status === 'DONE';
   const canLaunchDevelop = !frozenTask && (canDevelop || !task.assigneeId) && (!bridgeModes || bridgeModes.includes('develop'));
   const canLaunchReview = !frozenTask && !!allowedStages.length && (!bridgeModes || bridgeModes.includes('review'));
-  const safeMode: LocalTaskMode = frozenTask || (mode === 'develop' && !canLaunchDevelop) || (mode === 'review' && !canLaunchReview) ? 'read' : mode;
+
+  const safeScene: WorkflowScene =
+    frozenTask && (scene === 'develop' || scene === 'review') ? 'analyze'
+    : scene === 'develop' && !canLaunchDevelop ? 'analyze'
+    : scene === 'review' && !canLaunchReview ? 'analyze'
+    : scene === 'jira' && !canDraftSubtasks ? 'analyze'
+    : scene;
+  const safeMode: LocalTaskMode = safeScene === 'develop' ? 'develop' : safeScene === 'review' ? 'review' : 'read';
+
+  const activeStageForSkills: Stage | '' = safeScene === 'review'
+    ? (candidates.find(c => c.id === jobId)?.stage || reviewStage)
+    : '';
+  const sceneTargetScopes = targetScopesForScene(safeScene, activeStageForSkills);
+  const autoMatchedSkills = projectSkills.filter(
+    s => s.enabled && (!s.scopes.length || s.scopes.some(sc => sceneTargetScopes.includes(sc))),
+  );
 
   let prompt = '';
   try {
     prompt = buildLocalTaskPrompt({ task, jobs, mode: safeMode, target, selectedJobId: jobId, canDevelop: canDevelop || !task.assigneeId, frozen, allowedStages, repoPath: workspace?.repoPath });
   } catch { /* Unavailable or changed candidates leave manual copying disabled until selected again. */ }
-  const companionCommand = safeMode === 'develop' ? buildCompanionSyncCommand({ jiraKey: task.jiraKey, target, repoPath: workspace?.repoPath }) : '';
-  const scope = JSON.stringify([open, userId, task.id, task.projectId, task.version, task.status, role, canDevelop, frozen, canCreateLocalReview, safeMode, target, jobId, candidateScope, workspace?.repoPath || '', prompt]);
+  const companionCommand = safeMode === 'develop' ? buildCompanionSyncCommand({ task, target, repoPath: workspace?.repoPath }) : '';
+  const scope = JSON.stringify([open, userId, task.id, task.projectId, task.version, task.status, role, canDevelop, frozen, canCreateLocalReview, safeScene, target, jobId, candidateScope, workspace?.repoPath || '', prompt]);
   const currentScope = useRef(scope);
   currentScope.current = scope;
 
   const smartHints = extractTaskSmartHints(task, repositories);
   const runningRun = runs.find(item => item.status === 'RUNNING') || null;
-  const activeRun = runs.find(item => item.id === selectedRunId) || runningRun || runs[0] || null;
+  const activeRun = runs.find(item => item.id === selectedRunId) || runningRun;
+  const parsedOutput = activeRun ? parseAiRunOutput(activeRun.output || '', {
+    status: activeRun.status,
+    mode: activeRun.mode,
+    actionType: activeRun.actionType,
+    runner: activeRun.runner,
+    bridgePhase: activeRun.bridgePhase,
+    draftAnswer: activeRun.draft?.answer,
+    hasReviewDraft: activeRun.mode === 'review' && !!activeRun.draft,
+  }) : null;
   const workbench = !serverMode && runner === 'workbench';
   const bridgeCommand = bridgeInstallCommand(location.origin);
   const selectedEngine = workbench && engine !== 'cursor' ? 'codex' : engine;
-  const engineOptions = workbench ? [{ value: 'codex', label: 'Codex CLI' }, { value: 'cursor', label: 'Cursor Agent' }] : (capabilities?.engines || [
-    { id: 'codex' as const, label: 'Codex', tool: 'codex-cli', available: true },
-    { id: 'antigravity' as const, label: 'Gemini / Antigravity', tool: 'custom', available: true },
-    { id: 'cursor' as const, label: 'Cursor Agent', tool: 'cursor', available: true },
-    { id: 'claude' as const, label: 'Claude Code', tool: 'claude-code', available: true },
-  ]).map(item => ({
-    value: item.id,
-    label: item.available ? `${item.label} · 已就绪` : `${item.label} · 未安装`,
-    disabled: !item.available,
-  }));
+  const executionRunner = serverMode ? 'bridge' : workbench ? 'workbench' : 'local';
+  const model = useAiModelSelection(capabilities, selectedEngine, executionRunner, selectedDevice?.modelEngines, selectedDevice?.id);
 
   useEffect(() => {
     mounted.current = true;
@@ -159,7 +219,7 @@ export const LocalTaskWorkflow: React.FC<{
       const res = await api<{ repositories: LocalGitRepo[] }>('local-git/repositories?refresh=1');
       if (mounted.current) {
         setRepositories(res.repositories || []);
-        void message.success(`已重新扫描本机目录，发现 ${res.repositories?.length || 0} 个 Git 仓库。`);
+        void message.success(`已扫描到 ${res.repositories?.length || 0} 个本机 Git 仓库。`);
       }
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '扫描本机仓库失败。');
@@ -170,15 +230,23 @@ export const LocalTaskWorkflow: React.FC<{
 
   useEffect(() => {
     targetTouched.current = false;
-    const storedEngine = readStoredChoice<LocalAiEngineId | ''>(AI_ENGINE_PREF_KEY, [...ENGINE_IDS, ''], '');
-    const desiredMode = initialMode && !(frozenTask && initialMode !== 'read') ? initialMode : 'read';
-    setMode(desiredMode);
+    runnerTouched.current = false;
+    const storedEngine = readAiEngineOverride();
+    const desiredScene: WorkflowScene =
+      initialMode === 'review' && !frozenTask ? 'review'
+      : initialMode === 'develop' && !frozenTask ? 'develop'
+      : !frozenTask && canLaunchReview ? 'review'
+      : 'analyze';
+    setScene(desiredScene);
     setRunner(initialRunner || 'local');
     setDeviceId('');
     setRuns([]);
+    setPickedSkillIds([]);
+    setRepoEditorOpen(false);
     setTarget('workbench');
     setEngine(storedEngine || 'codex');
-    setJobId(initialJobId || (open && candidates.length === 1 ? candidates[0].id : ''));
+    const stageCandidate = initialStage ? candidates.find(item => item.stage === initialStage)?.id : undefined;
+    setJobId(initialJobId || stageCandidate || (initialStage ? '__auto__' : open && candidates.length === 1 ? candidates[0].id : ''));
     setReviewStage(initialStage || allowedStages[0] || '');
     setAutoClaim(true);
     setAutoSubmitReport(readStoredBool(AI_AUTO_SUBMIT_KEY, false));
@@ -200,7 +268,8 @@ export const LocalTaskWorkflow: React.FC<{
       api<{ repositories: LocalGitRepo[] }>('local-git/repositories'),
       api<{ runs: LocalAiRun[] }>(`tasks/${encodeURIComponent(ownerTask)}/ai-runs`),
       api<{ agents: TeamAgent[] }>(`agents?projectId=${encodeURIComponent(ownerProject)}`),
-    ]).then(([wsRes, capRes, repoRes, runRes, agentRes]) => {
+      api<{ skills: TeamSkillItem[] }>(`skills?projectId=${encodeURIComponent(ownerProject)}&enabled=1`),
+    ]).then(([wsRes, capRes, repoRes, runRes, agentRes, skillRes]) => {
       if (!mounted.current || reqId !== workspaceSeq.current || ownerProject !== task.projectId || ownerUser !== userId) return;
       if (wsRes.status === 'fulfilled') {
         setWorkspace(wsRes.value.workspace);
@@ -216,11 +285,10 @@ export const LocalTaskWorkflow: React.FC<{
           setRunner('bridge');
           const scoped = (capRes.value.devices || []).filter(device => device.projectIds.includes(ownerProject));
           setDeviceId((scoped.find(device => device.online) || scoped[0])?.id || '');
+        } else if (!initialRunner && !runnerTouched.current && capRes.value.apps.workbenchUrl && capRes.value.apps.workbenchProjectIds?.includes(ownerProject)) {
+          setRunner('workbench');
         }
-        setEngine(current => {
-          if (capRes.value.engines.some(item => item.id === current && item.available)) return current;
-          return capRes.value.engines.find(item => item.available)?.id || current;
-        });
+        setEngine(current => availableAiEngine(capRes.value, current));
       }
       const agents = agentRes.status === 'fulfilled' ? agentRes.value.agents || [] : [];
       setTeamAgents(agents);
@@ -229,10 +297,13 @@ export const LocalTaskWorkflow: React.FC<{
         setDeviceId((fallback.find(agent => agent.online) || fallback[0])?.id || '');
       }
       if (repoRes.status === 'fulfilled') setRepositories(repoRes.value.repositories || []);
+      if (skillRes.status === 'fulfilled') setProjectSkills(skillRes.value.skills || []);
       if (runRes.status === 'fulfilled') {
         const list = runRes.value.runs || [];
         prevRunningIds.current = new Set(list.filter(r => r.status === 'RUNNING').map(r => r.id));
         setRuns(list);
+        const ongoing = list.find(run => run.status === 'RUNNING');
+        if (ongoing) setSelectedRunId(ongoing.id);
       }
     });
   }, [open, userId, task.id, task.projectId, role, initialMode, initialStage, initialJobId, initialRunner]);
@@ -285,6 +356,7 @@ export const LocalTaskWorkflow: React.FC<{
       if (!mounted.current || reqId !== workspaceSeq.current) return;
       setWorkspace(data.workspace);
       setRepoInput(data.workspace?.repoPath || trimmed);
+      setRepoEditorOpen(false);
       void message.success(`已绑定本地仓库：${data.workspace?.repoPath || trimmed}`);
       void onChanged?.().catch(() => {});
     } catch (error) {
@@ -301,10 +373,10 @@ export const LocalTaskWorkflow: React.FC<{
       await api(`projects/${encodeURIComponent(task.projectId)}/workspace`, undefined, 'DELETE');
       if (!mounted.current || reqId !== workspaceSeq.current) return;
       setWorkspace(null); setRepoInput('');
-      void message.success('已清除当前项目的本地仓库绑定。');
+      void message.success('已解除本地仓库绑定。');
       void onChanged?.().catch(() => {});
     } catch (error) {
-      if (mounted.current && reqId === workspaceSeq.current) void message.error(error instanceof ApiError ? error.message : '清除目录绑定失败。');
+      if (mounted.current && reqId === workspaceSeq.current) void message.error(error instanceof ApiError ? error.message : '解除绑定失败。');
     } finally {
       if (mounted.current && reqId === workspaceSeq.current) setSavingWorkspace(false);
     }
@@ -312,12 +384,12 @@ export const LocalTaskWorkflow: React.FC<{
 
   const openLocalApp = async (app: 'cursor' | 'terminal' | 'finder') => {
     const targetPath = (workspace?.repoPath || repoInput).trim();
-    if (!targetPath) { void message.warning('请先选择或绑定本地代码仓库目录。'); return; }
+    if (!targetPath) { void message.warning('请先绑定本地代码仓库目录。'); return; }
     setOpeningApp(app);
     try {
       await api('local-git/open', { projectId: task.projectId, app, repoPath: targetPath });
       if (mounted.current) {
-        void message.success(app === 'finder' ? '已在 Finder 中打开该仓库文件夹。' : app === 'cursor' ? '已在 Cursor 中打开该仓库。' : '已在终端打开该仓库目录。');
+        void message.success(app === 'finder' ? '已在 Finder 打开仓库。' : app === 'cursor' ? '已在 Cursor 打开仓库。' : '已在终端打开仓库。');
       }
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '打开本地应用失败。');
@@ -327,13 +399,14 @@ export const LocalTaskWorkflow: React.FC<{
   };
 
   const launchAiRun = async () => {
-    if (startingRun || runningRun) return;
+    if (startingRun || runningRun || model.invalid) return;
     if (serverMode && !selectedDevice) {
       void message.warning('请先在本机配对并运行 Bridge，然后选择接收任务的设备。');
       return;
     }
     if (!serverMode && safeMode === 'develop' && !workspace?.repoPath && !repoInput.trim()) {
-      void message.warning('开发协作需要先选择并绑定本机业务 Git 仓库目录。');
+      void message.warning('AI 写代码需要先绑定本机业务 Git 仓库目录。');
+      setRepoEditorOpen(true);
       return;
     }
     const workbenchTab = workbench ? window.open('about:blank', '_blank') : null;
@@ -345,15 +418,26 @@ export const LocalTaskWorkflow: React.FC<{
         const saved = await api<{ workspace: ProjectWorkspace | null }>(`projects/${encodeURIComponent(task.projectId)}/workspace`, { repoPath: repoInput.trim(), defaultTarget: target }, 'PUT');
         if (mounted.current) setWorkspace(saved.workspace);
       }
+      const actionType =
+        safeScene === 'tech_spec' ? 'TECH_SPEC_GEN'
+        : safeScene === 'jira' ? 'SUBTASK_DRAFT'
+        : safeScene === 'test_case' ? 'TEST_CASE_GEN'
+        : 'DEFAULT';
       const payload: Record<string, unknown> = {
         mode: safeMode,
         engine: selectedEngine,
+        ...(model.model ? { model: model.model } : {}),
+        ...(actionType !== 'DEFAULT' ? { actionType } : {}),
+        ...(pickedSkillIds.length ? { skillIds: pickedSkillIds } : {}),
         ...(workbench ? { runner } : {}),
         ...(serverMode && selectedDevice ? { runner: 'bridge', deviceId: selectedDevice.id } : {}),
         ...(customInstruction.trim() ? { customInstruction: customInstruction.trim() } : {}),
       };
       if (safeMode === 'develop' && !task.assigneeId && autoClaim && !selectedDevice?.owner) {
         payload.autoClaim = true;
+      }
+      if (safeMode === 'develop' && !workbench && !serverMode && useWorktree) {
+        payload.useWorktree = true;
       }
       if (safeMode === 'review') {
         const chosenCandidate = candidates.find(item => item.id === jobId);
@@ -362,7 +446,7 @@ export const LocalTaskWorkflow: React.FC<{
         } else if (reviewStage && allowedStages.includes(reviewStage)) {
           payload.stage = reviewStage;
         } else {
-          void message.warning('请选择要评审的阶段或待报告申请。');
+          void message.warning('请选择要评审的阶段。');
           setStartingRun(false);
           return;
         }
@@ -378,10 +462,10 @@ export const LocalTaskWorkflow: React.FC<{
         workbenchTab.location.replace(res.run.workbenchUrl);
         openedWorkbench = true;
       }
-      void message.success(serverMode ? `已派发到「${selectedDevice?.owner ? `${selectedDevice.owner.username} · ` : ''}${selectedDevice?.deviceName}」，等待本机 Bridge 领取执行。` : workbench ? '已载入任务工作台会话，下方显示状态与结果。' : '已启动本机 AI 执行，下方实时展示输出进度。');
+      void message.success(serverMode ? '已派发到本机执行。' : workbench ? '已打开工作台会话。' : `已启动「${sceneLabel(safeScene)}」，下方实时展示结果。`);
       void onChanged?.().catch(() => {});
     } catch (error) {
-      if (mounted.current) void message.error(error instanceof ApiError ? error.message : '启动本机 AI 执行失败。');
+      if (mounted.current) void message.error(error instanceof ApiError ? error.message : '启动 AI 执行失败。');
     } finally {
       if (!openedWorkbench) workbenchTab?.close();
       if (mounted.current) setStartingRun(false);
@@ -394,7 +478,7 @@ export const LocalTaskWorkflow: React.FC<{
       const res = await api<{ run: LocalAiRun }>(`ai-runs/${encodeURIComponent(runId)}/stop`, {});
       if (!mounted.current) return;
       setRuns(current => current.map(item => item.id === res.run.id ? res.run : item));
-      void message.info(res.run.status !== 'RUNNING' ? '已停止本机 AI 执行。' : res.run.runner === 'bridge' ? '已请求停止，等待本机 Bridge 响应。' : '已请求停止工作台执行。');
+      void message.info('已停止执行。');
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '停止执行失败。');
     } finally {
@@ -412,15 +496,32 @@ export const LocalTaskWorkflow: React.FC<{
         summary: run.draft.summary,
         ...(run.draft.evidence ? { evidence: run.draft.evidence } : {}),
         findings: run.draft.findings || [],
+        ...draftExtras(run.draft),
       });
       if (!mounted.current) return;
-      void message.success('已一键提交本地 AI 评审报告，等待其他授权成员独立审批。');
+      void message.success('已提交评审报告。');
       await onChanged?.();
       if (onOpenReview) leave(() => onOpenReview(run.jobId!));
     } catch (error) {
       if (mounted.current) void message.error(error instanceof ApiError ? error.message : '提交评审报告失败。');
     } finally {
       if (mounted.current) setSubmittingDraft(false);
+    }
+  };
+
+  const saveOutputAsAsset = async (kind: AssetKind, content: string) => {
+    if (!content.trim() || frozenTask) return;
+    setSavingGeneratedAsset(true);
+    try {
+      const title = kind === 'TECH_SPEC' ? `${task.jiraKey} 技术方案（AI 生成）` : `${task.jiraKey} 测试用例（AI 生成）`;
+      await api(`tasks/${encodeURIComponent(task.id)}/assets`, { kind, title, content: content.slice(0, 65000) });
+      if (!mounted.current) return;
+      void message.success(`已保存为本任务的「${kind === 'TECH_SPEC' ? '技术方案' : '测试用例'}」材料。`);
+      await onChanged?.();
+    } catch (error) {
+      if (mounted.current) void message.error(error instanceof ApiError ? error.message : '保存材料失败。');
+    } finally {
+      if (mounted.current) setSavingGeneratedAsset(false);
     }
   };
 
@@ -446,7 +547,7 @@ export const LocalTaskWorkflow: React.FC<{
       }
       if (openWorkbenchAfter) openWorkbench();
     } catch {
-      if (current()) void message.warning('复制未完成，请展开下方高级面板复制。');
+      if (current()) void message.warning('复制未完成。');
     } finally {
       if (ownsRequest()) { pending.current = false; setCopying(false); }
     }
@@ -456,362 +557,539 @@ export const LocalTaskWorkflow: React.FC<{
     if (!companionCommand) return;
     try {
       await navigator.clipboard.writeText(companionCommand);
-      if (mounted.current) { setCopiedSync(true); void message.success('伴随同步命令已复制，可在本地终端运行。'); }
-    } catch { if (mounted.current) void message.warning('复制未完成，请手动复制伴随命令。'); }
+      if (mounted.current) { setCopiedSync(true); void message.success('命令已复制。'); }
+    } catch { if (mounted.current) void message.warning('复制未完成。'); }
   };
 
   const draftJob = activeRun?.jobId ? jobs.find(j => j.id === activeRun.jobId) : undefined;
   const draftAlreadyReported = !!activeRun?.draft?.autoSubmitted || !!draftJob?.report;
+  const canSaveTechSpec = !frozenTask && ASSET_ROLES.TECH_SPEC.includes(role);
+  const canSaveTestCase = !frozenTask && ASSET_ROLES.TEST_CASE.includes(role);
+  const activeRunLabel = (run: LocalAiRun) => {
+    if (run.actionType === 'TECH_SPEC_GEN') return '写技术方案';
+    if (run.actionType === 'SUBTASK_DRAFT') return '拆 Jira 任务';
+    if (run.actionType === 'TEST_CASE_GEN') return '写测试用例';
+    if (run.actionType === 'CHAIN_ANALYZE') return '一致性检查';
+    return aiRunModeLabel(run.mode);
+  };
 
   return <Drawer
-    title={workbench ? '任务工作台' : serverMode ? '派发到我的本机 AI' : '本地 AI 自动化工作台'}
+    title={
+      <Space size={8} wrap>
+        <Sparkles size={16} />
+        <span>AI 助手</span>
+        <Tag color="blue" style={{ marginInlineEnd: 0 }}>{task.jiraKey}</Tag>
+      </Space>
+    }
     open={open}
     onClose={close}
-    size={720}
+    size={820}
     destroyOnHidden
-    footer={<Flex justify="space-between" align="center" gap={8} wrap>
-      <Space size={8} wrap>
-        {!workbench && <Button icon={<ExternalLink size={15} />} disabled={!prompt && safeMode !== 'review'} onClick={() => void copy(true)}>复制指令并打开工作台</Button>}
-        {!serverMode && (workspace?.repoPath || repoInput.trim()) && <Button icon={<FolderOpen size={15} />} loading={openingApp === 'finder'} onClick={() => void openLocalApp('finder')}>Finder 打开</Button>}
-        {!serverMode && (workspace?.repoPath || repoInput.trim()) && <Button icon={<Terminal size={15} />} loading={openingApp === 'cursor'} onClick={() => void openLocalApp('cursor')}>在 Cursor 打开</Button>}
-      </Space>
-      <Space size={8}>
-        <Button onClick={close}>关闭</Button>
-        {runningRun ? (
-          <Button danger type="primary" icon={<Square size={14} />} loading={stoppingRun} onClick={() => void stopAiRun(runningRun.id)}>停止当前执行</Button>
-        ) : (
-          <Button type="primary" icon={<Play size={15} />} loading={startingRun} disabled={serverMode && !selectedDevice} onClick={() => void launchAiRun()}>{workbench ? '打开工作台会话' : serverMode ? '派发到本机执行' : '直接启动本机 AI 执行'}</Button>
-        )}
-      </Space>
-    </Flex>}
-  >
-    <Flex vertical gap={16}>
-      <div>
-        <Space size={8} wrap>
-          <Tag color="blue">{task.jiraKey}</Tag>
-          <StatusBadge variant={task.status === 'DONE' ? 'green' : 'neutral'}>{taskStatusLabel(task.status)}</StatusBadge>
-          {workspace?.repoPath && <Tag color="geekblue">{workspace.repoPath.split('/').pop()}</Tag>}
-          {!!constitutionFiles?.length && <Tag color="cyan">工程规范：{constitutionFiles.join(' · ')}</Tag>}
+    footer={
+      <Flex justify="space-between" align="center" gap={8} wrap>
+        <Space size={6} wrap>
+          {!workbench && (
+            <Button type="text" size="small" icon={<Copy size={13} />} disabled={!prompt} loading={copying} onClick={() => void copy(false)}>
+              {copied ? '已复制提示词' : '复制提示词'}
+            </Button>
+          )}
+          <Button type="text" size="small" icon={<Settings2 size={13} />} onClick={() => leave(() => navigateWorkspace('skills'))}>
+            配置 Skills
+          </Button>
         </Space>
-        <Typography.Title level={4} style={{ margin: '6px 0 4px' }}>{task.title}</Typography.Title>
-        <Typography.Text type="secondary">{serverMode
-          ? '服务器只负责派发与记录：任务由你本机运行的 Bridge 领取，在你的电脑上调用 Codex / Cursor 执行，代码与凭据不会上传到服务器。'
-          : '无需手动复制粘贴任务 ID 或材料：直接调用本机已安装的 Codex / Gemini / Cursor / Claude 执行任务分析、代码协作或生成结构化评审草稿。'}</Typography.Text>
+        <Space size={8}>
+          <Button onClick={close}>关闭</Button>
+          {runningRun ? (
+            <Button danger type="primary" icon={<Square size={14} />} loading={stoppingRun} onClick={() => void stopAiRun(runningRun.id)}>
+              停止执行
+            </Button>
+          ) : (
+            <Button type="primary" icon={<Play size={14} />} loading={startingRun} disabled={model.invalid || (serverMode && !selectedDevice)} onClick={() => void launchAiRun()}>
+              {workbench ? '在工作台启动' : serverMode ? '派发执行' : `开始${sceneLabel(safeScene)}`}
+            </Button>
+          )}
+        </Space>
+      </Flex>
+    }
+  >
+    <Flex vertical gap={14}>
+      {/* Compact Task & Repo Strip */}
+      <div style={{ padding: '12px 14px', borderRadius: 10, border: '1px solid var(--tf-border)', background: 'var(--tf-raised)', display: 'grid', gap: 8 }}>
+        <Flex justify="space-between" align="center" gap={8} wrap>
+          <Typography.Text strong style={{ fontSize: 15 }}>{task.title}</Typography.Text>
+          {!serverMode && (
+            <Space size={4} wrap>
+              {workspace?.repoPath ? (
+                <>
+                  <Tag icon={<FolderGit2 size={11} />} color="geekblue" style={{ marginInlineEnd: 0 }}>
+                    {workspace.repoPath.split('/').pop()}
+                  </Tag>
+                  <Button size="small" type="text" icon={<ExternalLink size={12} />} loading={openingApp === 'cursor'} onClick={() => void openLocalApp('cursor')}>Cursor</Button>
+                  <Button size="small" type="text" icon={<Terminal size={12} />} loading={openingApp === 'terminal'} onClick={() => void openLocalApp('terminal')}>终端</Button>
+                  <Button size="small" type="text" icon={<FolderOpen size={12} />} loading={openingApp === 'finder'} onClick={() => void openLocalApp('finder')}>Finder</Button>
+                  <Button size="small" type="link" style={{ paddingInline: 4 }} onClick={() => setRepoEditorOpen(v => !v)}>
+                    {repoEditorOpen ? '收起' : '切换'}
+                  </Button>
+                </>
+              ) : (
+                <Button size="small" icon={<FolderGit2 size={12} />} onClick={() => setRepoEditorOpen(v => !v)}>
+                  绑定本地代码仓
+                </Button>
+              )}
+            </Space>
+          )}
+        </Flex>
+
+        {!serverMode && !workspace?.repoPath && smartHints.matchedRepos.length > 0 && !repoEditorOpen && (
+          <Flex justify="space-between" align="center" gap={8} wrap style={{ paddingTop: 6, borderTop: '1px dashed var(--tf-divider)' }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              检测到匹配的本机仓库：<code>{smartHints.matchedRepos[0].name}</code>
+            </Typography.Text>
+            <Button size="small" type="primary" ghost loading={savingWorkspace} onClick={() => void bindWorkspacePath(smartHints.matchedRepos[0].path)}>
+              一键绑定
+            </Button>
+          </Flex>
+        )}
+
+        {!serverMode && repoEditorOpen && (
+          <Flex vertical gap={8} style={{ paddingTop: 8, borderTop: '1px solid var(--tf-divider)' }}>
+            {repositories.length > 0 && (
+              <Flex gap={6}>
+                <Select
+                  size="small"
+                  style={{ flex: 1 }}
+                  showSearch={{ optionFilterProp: 'label' }}
+                  placeholder="从本机扫描到的 Git 仓库选择"
+                  value={repositories.some(r => r.path === repoInput) ? repoInput : undefined}
+                  options={repositories.map(repo => ({ value: repo.path, label: `${repo.name}${repo.group ? ` (${repo.group})` : ''} · ${repo.path}` }))}
+                  onChange={value => { setRepoInput(value); void bindWorkspacePath(value); }}
+                />
+                <Button size="small" icon={<RefreshCw size={12} />} loading={rescanningRepos} onClick={() => void rescanRepositories()}>重扫</Button>
+              </Flex>
+            )}
+            <Flex gap={6}>
+              <Input size="small" placeholder="/Users/you/workspace/repo" value={repoInput} disabled={savingWorkspace} onChange={e => setRepoInput(e.target.value)} />
+              <Button size="small" type="primary" loading={savingWorkspace} onClick={() => void bindWorkspacePath(repoInput)}>保存</Button>
+              {workspace && <Button size="small" danger disabled={savingWorkspace} onClick={() => void clearWorkspace()}>解除</Button>}
+            </Flex>
+          </Flex>
+        )}
       </div>
 
       {serverMode && !dispatchTargets.length && (
         <Alert
           type="warning"
           showIcon
-          title="还没有可接收该项目任务的本机 Bridge"
-          description={<Flex vertical gap={6} style={{ marginTop: 4 }}>
-            <span>在你的电脑终端运行下面的一键安装命令，按提示配对（授权时勾选项目 {task.projectId}），再按「本机接入」页的说明填写仓库映射并启动后台运行。也可以请项目负责人让已接入的成员开启「允许团队派发」。</span>
-            <Flex gap={8} align="center">
-              <Input readOnly value={bridgeCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
-              <Button size="small" icon={<Copy size={14} />} onClick={() => { void navigator.clipboard.writeText(bridgeCommand).then(() => message.success('命令已复制。')).catch(() => message.warning('复制未完成，请手动复制。')); }}>复制</Button>
+          title="尚未连接本机 Bridge"
+          description={
+            <Flex gap={8} align="center" style={{ marginTop: 4 }}>
+              <Input size="small" readOnly value={bridgeCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
+              <Button size="small" icon={<Copy size={13} />} onClick={() => { void navigator.clipboard.writeText(bridgeCommand).then(() => message.success('命令已复制。')); }}>复制</Button>
             </Flex>
-          </Flex>}
+          }
         />
       )}
 
-      {!serverMode && !workspace?.repoPath && smartHints.matchedRepos.length > 0 && (
-        <Alert
-          type="info"
-          showIcon
-          title={`智能识别到任务关联本机仓库：${smartHints.matchedRepos[0].name}`}
-          description={<Flex justify="space-between" align="center" gap={8} wrap style={{ marginTop: 4 }}>
-            <Typography.Text code style={{ fontSize: 12 }}>{smartHints.matchedRepos[0].path}</Typography.Text>
-            <Button size="small" type="primary" loading={savingWorkspace} onClick={() => void bindWorkspacePath(smartHints.matchedRepos[0].path)}>一键绑定此仓库</Button>
-          </Flex>}
-        />
-      )}
-
-      {!serverMode && <Card size="small" title={<Space size={6}><FolderGit2 size={15} /><span>项目本地 Git 仓库与快捷打开</span></Space>} extra={<Button size="small" type="text" icon={<RefreshCw size={13} />} loading={rescanningRepos} onClick={() => void rescanRepositories()}>重新扫描</Button>}>
-        <Flex vertical gap={10}>
-          {repositories.length > 0 && (
-            <Select
-              aria-label="选择已扫描的本机仓库"
-              showSearch={{ optionFilterProp: 'label' }}
-              placeholder="从本机扫描到的 Git 仓库中直接选择（免手动输入路径）"
-              value={repositories.some(r => r.path === repoInput) ? repoInput : undefined}
-              options={repositories.map(repo => ({
-                value: repo.path,
-                label: `${repo.name}${repo.group ? ` (${repo.group})` : ''} · ${repo.path}`,
-              }))}
-              onChange={value => {
-                setRepoInput(value);
-                void bindWorkspacePath(value);
-              }}
+      <section className="tf-ai-workflow-config" aria-label="执行配置">
+        <Flex justify="space-between" align="center" gap={8}>
+          <Typography.Text strong>执行配置</Typography.Text>
+          {!serverMode && (
+            <Segmented<LocalAiRunner>
+              size="small"
+              aria-label="执行位置"
+              value={runner}
+              options={[{ value: 'local', label: '本机' }, { value: 'workbench', label: '5288 工作台' }]}
+              disabled={startingRun || !!runningRun}
+              onChange={value => { runnerTouched.current = true; setRunner(value); }}
             />
           )}
-          <Flex gap={8} wrap={false}>
-            <Input aria-label="项目本地代码目录" placeholder="/Users/you/workspace/business-repo" value={repoInput} disabled={savingWorkspace} onChange={event => setRepoInput(event.target.value)} />
-            <Button loading={savingWorkspace} onClick={() => void bindWorkspacePath(repoInput)}>保存绑定</Button>
-            {workspace && <Button danger disabled={savingWorkspace} onClick={() => void clearWorkspace()}>解除</Button>}
-          </Flex>
-          {(workspace?.repoPath || repoInput.trim()) && (
-            <Space size={8} wrap>
-              <Button size="small" icon={<FolderOpen size={14} />} onClick={() => void openLocalApp('finder')} loading={openingApp === 'finder'}>Finder 打开</Button>
-              <Button size="small" onClick={() => void openLocalApp('cursor')} loading={openingApp === 'cursor'}>在 Cursor 打开仓库</Button>
-              <Button size="small" icon={<Terminal size={14} />} onClick={() => void openLocalApp('terminal')} loading={openingApp === 'terminal'}>在终端打开目录</Button>
-            </Space>
-          )}
         </Flex>
-      </Card>}
+        <Segmented
+          block
+          aria-label="选择 AI 任务"
+          value={safeScene}
+          options={[
+            { value: 'review', label: 'AI 评审', disabled: !canLaunchReview },
+            { value: 'tech_spec', label: '写技术方案' },
+            { value: 'develop', label: '写代码', disabled: !canLaunchDevelop },
+            ...(canDraftSubtasks ? [{ value: 'jira', label: '拆 Jira 任务' }] : []),
+            { value: 'test_case', label: '写测试用例' },
+            { value: 'analyze', label: '任务分析' },
+          ]}
+          onChange={v => { setScene(v as WorkflowScene); setPickedSkillIds([]); }}
+        />
 
-      <Card size="small" title={<Space size={6}><Sparkles size={15} /><span>执行方式</span></Space>}>
-        <Flex vertical gap={12}>
-          <Segmented
-            block
-            aria-label="本地处理方式"
-            value={safeMode}
-            options={[
-              { value: 'read', label: '1. 任务与材料缺口分析' },
-              { value: 'develop', label: '2. 本地代码开发协作', disabled: !canLaunchDevelop },
-              { value: 'review', label: '3. 自动生成评审草稿', disabled: !canLaunchReview },
-            ]}
-            onChange={value => setMode(value as LocalTaskMode)}
-          />
-
-          <Flex gap={12} wrap>
-            <div style={{ flex: '1 1 240px' }}>
-              <Typography.Text style={{ display: 'block', marginBottom: 4 }}>执行位置</Typography.Text>
-              {serverMode ? (
-                <Select aria-label="接收任务的本机设备" style={{ width: '100%' }} value={selectedDevice?.id} placeholder="未配对本机 Bridge" options={dispatchTargets.map(device => ({
-                  value: device.id,
-                  disabled: !!device.owner && safeMode === 'develop' && task.assigneeId !== device.owner.id,
-                  label: `${device.owner ? `${device.owner.username} 的本机 Bridge` : '我的本机 Bridge'} · ${device.deviceName} · ${device.online ? '在线' : device.lastSeenAt ? `离线（${timeText(device.lastSeenAt)}）` : '未启动 worker'}${device.owner && safeMode === 'develop' && task.assigneeId !== device.owner.id ? ' · 开发任务需先指派给他' : ''}`,
-                }))} onChange={setDeviceId} />
+        {(serverMode || safeScene === 'review') && <Flex gap={10} wrap align="center">
+          {safeScene === 'review' && (
+            <div style={{ flex: '1 1 220px' }}>
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>评审阶段</Typography.Text>
+              {candidates.length > 0 ? (
+                <Select
+                  style={{ width: '100%' }}
+                  value={candidates.some(job => job.id === jobId) ? jobId : '__auto__'}
+                  options={[
+                    ...candidates.map(job => ({ value: job.id, label: `待提交 · ${stageLabel(job.stage)} (${timeText(job.createdAt)})` })),
+                    { value: '__auto__', label: '新建评审阶段…' },
+                  ]}
+                  onChange={val => setJobId(val)}
+                />
               ) : (
-                <Select aria-label="执行位置" style={{ width: '100%' }} value={runner} options={[
-                  { value: 'workbench', label: '5288 工作台' },
-                  { value: 'local', label: '本机 CLI' },
-                ]} onChange={setRunner} />
+                <Select
+                  style={{ width: '100%' }}
+                  value={reviewStage || undefined}
+                  placeholder="选择评审阶段"
+                  options={REVIEW_STAGE_OPTIONS.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
+                  onChange={val => setReviewStage(val)}
+                />
               )}
             </div>
-            <div style={{ flex: '1 1 240px' }}>
-              <Typography.Text style={{ display: 'block', marginBottom: 4 }}>执行引擎</Typography.Text>
-              <Select aria-label="执行引擎" style={{ width: '100%' }} value={selectedEngine} options={engineOptions} onChange={val => { setEngine(val); writeStoredString(AI_ENGINE_PREF_KEY, val); }} />
-            </div>
-            {safeMode === 'review' && (
-              <div style={{ flex: '1 1 280px' }}>
-                <Typography.Text style={{ display: 'block', marginBottom: 4 }}>目标评审阶段 / 已有申请</Typography.Text>
-                {candidates.length > 0 ? (
-                  <Select
-                    aria-label="待报告的本地评审"
-                    style={{ width: '100%' }}
-                    value={candidates.some(job => job.id === jobId) ? jobId : '__auto__'}
-                    options={[
-                      ...candidates.map(job => ({ value: job.id, label: `已有申请 · ${stageLabel(job.stage)} (${timeText(job.createdAt)})` })),
-                      { value: '__auto__', label: '自动新建本地评审申请并执行…' },
-                    ]}
-                    onChange={val => setJobId(val)}
-                  />
-                ) : (
-                  <Select
-                    aria-label="自动发起的评审阶段"
-                    style={{ width: '100%' }}
-                    value={reviewStage || undefined}
-                    placeholder="选择评审阶段（自动冻结当前材料并创建申请）"
-                    options={STAGES.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
-                    onChange={val => setReviewStage(val)}
-                  />
-                )}
-              </div>
-            )}
-          </Flex>
+          )}
 
-          {safeMode === 'review' && jobId === '__auto__' && candidates.length > 0 && (
-            <div>
-              <Typography.Text style={{ display: 'block', marginBottom: 4 }}>选择新建评审阶段</Typography.Text>
+          {safeScene === 'review' && jobId === '__auto__' && candidates.length > 0 && (
+            <div style={{ flex: '1 1 180px' }}>
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>新建阶段</Typography.Text>
               <Select
                 style={{ width: '100%' }}
                 value={reviewStage || undefined}
-                options={STAGES.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
+                options={REVIEW_STAGE_OPTIONS.filter(s => allowedStages.includes(s.value)).map(s => ({ value: s.value, label: s.label }))}
                 onChange={val => setReviewStage(val)}
               />
             </div>
           )}
 
-          {safeMode === 'develop' && !task.assigneeId && !frozenTask && (
-            <Checkbox checked={autoClaim} onChange={e => setAutoClaim(e.target.checked)}>
-              启动前自动认领此任务并将本地状态切换为「进行中」
-            </Checkbox>
+          {serverMode && (
+            <div style={{ flex: '1 1 200px' }}>
+              <Typography.Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>执行设备</Typography.Text>
+              <Select
+                style={{ width: '100%' }}
+                value={selectedDevice?.id}
+                placeholder="未配对 Bridge"
+                options={dispatchTargets.map(device => ({
+                  value: device.id,
+                  label: `${device.deviceName} · ${device.online ? '在线' : '离线'}`,
+                }))}
+                onChange={setDeviceId}
+              />
+            </div>
           )}
+        </Flex>}
 
-          {serverMode && selectedDevice && !selectedDevice.online && (
-            <Typography.Text type="warning" style={{ fontSize: 12 }}>该设备最近未在线，派发会排队最多 30 分钟，期间需在本机运行 rd.mjs worker 才会被领取。</Typography.Text>
-          )}
+        <LocalAiExecutionFields
+          capabilities={capabilities} engine={selectedEngine} onEngineChange={setEngine} model={model}
+          runner={executionRunner} disabled={startingRun || !!runningRun}
+        />
 
-          {safeMode === 'review' && !workbench && !serverMode && (
-            <Checkbox checked={autoSubmitReport} onChange={e => { setAutoSubmitReport(e.target.checked); writeStoredBool(AI_AUTO_SUBMIT_KEY, e.target.checked); }}>
-              生成结构化草稿后自动提交为本阶段本地 AI 评审报告（多人项目审批仍由独立成员执行）
-            </Checkbox>
-          )}
-
-          <Input
-            placeholder="补充执行要求（可选，按 Cmd/Ctrl + Enter 直接启动，例如：重点检查金额精度、接口幂等性与异常分支）"
-            maxLength={500}
-            value={customInstruction}
-            onChange={e => setCustomInstruction(e.target.value)}
-            onKeyDown={event => {
-              if (isSubmitShortcut(event) && !runningRun && !startingRun) {
-                event.preventDefault();
-                void launchAiRun();
-              }
-            }}
-          />
-
-          <Flex justify="space-between" align="center" gap={8} wrap>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              {safeMode === 'read' && '只读分析任务需求、现有资产与门禁缺口，不修改代码或平台状态。'}
-              {safeMode === 'develop' && (serverMode ? '在本机 Bridge 配置映射的仓库中开发与自测，执行前需在本机弹窗确认（绝不自动 push）。' : '在绑定仓库执行本地开发与自测，新 Git 提交自动记录开发进度（绝不自动 push）。')}
-              {safeMode === 'review' && '基于冻结快照输出结构化评审结论与发现项，支持一键回填提交。'}
-            </Typography.Text>
-            {!workbench && (runningRun ? (
-              <Button danger icon={<Square size={14} />} loading={stoppingRun} onClick={() => void stopAiRun(runningRun.id)}>停止执行</Button>
+        {projectSkills.length > 0 && <Flex justify="space-between" align="center" gap={8} wrap>
+          <Space size={6} wrap style={{ flex: 1, minWidth: 0 }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>Skills</Typography.Text>
+            {pickedSkillIds.length > 0 ? (
+              pickedSkillIds.map(id => {
+                const s = projectSkills.find(item => item.id === id);
+                return s ? <Tag key={id} color="blue" closable onClose={() => setPickedSkillIds(prev => prev.filter(x => x !== id))} style={{ marginInlineEnd: 0 }}>{s.title || s.name}</Tag> : null;
+              })
+            ) : autoMatchedSkills.length > 0 ? (
+              autoMatchedSkills.slice(0, 5).map(s => (
+                <Tag key={s.id} color="blue" style={{ marginInlineEnd: 0 }}>{s.title || s.name}</Tag>
+              ))
             ) : (
-              <Button type="primary" icon={<Play size={15} />} loading={startingRun} disabled={serverMode && !selectedDevice} onClick={() => void launchAiRun()}>
-                {safeMode === 'read' ? '启动任务分析' : safeMode === 'develop' ? '启动本地开发协作' : '启动 AI 评审'}
-              </Button>
-            ))}
-          </Flex>
-        </Flex>
-      </Card>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>默认规则</Typography.Text>
+            )}
+          </Space>
+          <Space size={6}>
+            <Select
+              size="small"
+              mode="multiple"
+              allowClear
+              maxTagCount={0}
+              maxTagPlaceholder={() => `已指定 ${pickedSkillIds.length}`}
+              style={{ width: 118 }}
+              placeholder="指定 Skill"
+              value={pickedSkillIds}
+              options={projectSkills.map(s => ({ value: s.id, label: s.title || s.name }))}
+              onChange={setPickedSkillIds}
+            />
+            <Button type="link" size="small" style={{ padding: 0, height: 'auto', fontSize: 12 }} onClick={() => leave(() => navigateWorkspace('skills'))}>
+              导入 / 配置 →
+            </Button>
+          </Space>
+        </Flex>}
 
+        <Input
+          aria-label="补充要求"
+          placeholder="补充要求（可选，按 Cmd/Ctrl + Enter 立即执行）"
+          maxLength={500}
+          value={customInstruction}
+          onChange={e => setCustomInstruction(e.target.value)}
+          onKeyDown={event => {
+            if (isSubmitShortcut(event) && !runningRun && !startingRun) {
+              event.preventDefault();
+              void launchAiRun();
+            }
+          }}
+        />
+
+        {(['review', 'develop'].includes(safeScene) && !workbench && !serverMode || safeScene === 'develop' && !task.assigneeId && !frozenTask) && <Flex gap={14} wrap align="center">
+          {safeScene === 'review' && !workbench && !serverMode && (
+            <Checkbox checked={autoSubmitReport} onChange={e => { setAutoSubmitReport(e.target.checked); writeStoredBool(AI_AUTO_SUBMIT_KEY, e.target.checked); }}>
+              <span style={{ fontSize: 12.5 }}>完成后自动提交为评审报告</span>
+            </Checkbox>
+          )}
+          {safeScene === 'develop' && !workbench && !serverMode && (
+            <Checkbox checked={useWorktree} onChange={e => setUseWorktree(e.target.checked)}>
+              <span style={{ fontSize: 12.5 }}>使用隔离 git worktree 沙盒分支</span>
+            </Checkbox>
+          )}
+          {safeScene === 'develop' && !task.assigneeId && !frozenTask && (
+            <Checkbox checked={autoClaim} onChange={e => setAutoClaim(e.target.checked)}>
+              <span style={{ fontSize: 12.5 }}>自动认领任务</span>
+            </Checkbox>
+          )}
+        </Flex>}
+      </section>
+
+      {runs[0] && (
+        <div className="tf-ai-run-history">
+          <strong>执行记录</strong>
+          <AiRunIdentity run={activeRun || runs[0]} />
+          <Select<string>
+            aria-label="执行记录"
+            size="small"
+            allowClear
+            popupMatchSelectWidth={false}
+            value={activeRun?.id}
+            placeholder="查看历史执行"
+            options={runs.map(item => ({
+              value: item.id,
+              label: `${activeRunLabel(item)} · ${aiRunStatusLabel(item.status)} · ${timeText(item.startedAt)} · ${aiRunModelLabel(item)}`,
+            }))}
+            onChange={id => { setSelectedRunId(id || ''); setOutputView('readable'); }}
+          />
+        </div>
+      )}
       {runs.length > 0 && activeRun && (
-        <Card
-          size="small"
-          title={<Space size={8} wrap>
-            <span>执行记录与实时输出</span>
-            <StatusBadge variant={activeRun.status === 'SUCCEEDED' ? 'green' : activeRun.status === 'RUNNING' ? 'blue' : activeRun.status === 'FAILED' ? 'block' : 'neutral'}>
-              {aiRunStatusLabel(activeRun.status)}
-            </StatusBadge>
-            <Tag>{runLocationLabel(activeRun)}{toolLabel(activeRun.engine)} · {aiRunModeLabel(activeRun.mode)}</Tag>
-          </Space>}
-          extra={(runs.length > 1 || !!activeRun.output || activeRun.workbenchUrl) ? (
+        <div style={{ padding: '14px 16px', borderRadius: 10, border: '1px solid var(--tf-border)', background: 'var(--tf-surface)', display: 'grid', gap: 12 }}>
+          <Flex justify="space-between" align="center" gap={8} wrap>
             <Space size={6} wrap>
-              {activeRun.workbenchUrl && <Button size="small" href={activeRun.workbenchUrl} target="_blank" rel="noopener noreferrer" icon={<ExternalLink size={13} />}>继续工作台会话</Button>}
-              {activeRun.output && (
+              <Typography.Text strong style={{ fontSize: 13.5 }}>执行结果</Typography.Text>
+              <StatusBadge variant={activeRun.status === 'SUCCEEDED' ? 'green' : activeRun.status === 'RUNNING' ? 'blue' : activeRun.status === 'FAILED' ? 'block' : 'neutral'}>
+                {aiRunStatusLabel(activeRun.status)}
+              </StatusBadge>
+              <Tag style={{ marginInlineEnd: 0 }}>{activeRunLabel(activeRun)}</Tag>
+              <AiRunIdentity run={activeRun} />
+              {activeRun.appliedSkills?.length ? (
+                <Tag color="blue" style={{ marginInlineEnd: 0 }}>Skills: {activeRun.appliedSkills.join(', ')}</Tag>
+              ) : null}
+              {activeRun.worktreeBranch && <Tag color="cyan" style={{ marginInlineEnd: 0 }}>{activeRun.worktreeBranch}</Tag>}
+            </Space>
+            <Space size={6} wrap>
+              <Segmented
+                size="small"
+                value={outputView}
+                options={[{ value: 'readable', label: '结果' }, { value: 'raw', label: '日志' }]}
+                onChange={value => setOutputView(value === 'raw' ? 'raw' : 'readable')}
+              />
+              {(activeRun.output || parsedOutput?.finalMarkdown) && (
                 <Button
                   size="small"
-                  icon={<Copy size={13} />}
+                  icon={<Copy size={12} />}
                   onClick={() => {
-                    void navigator.clipboard.writeText(activeRun.output).then(() => message.success('执行输出已复制。')).catch(() => message.warning('浏览器未能复制，请手动选择复制。'));
+                    const copyText = outputView === 'raw' ? activeRun.output : (parsedOutput?.finalMarkdown || activeRun.draft?.summary || activeRun.output);
+                    void navigator.clipboard.writeText(copyText).then(() => message.success('已复制。'));
                   }}
                 >
-                  复制输出
+                  复制
                 </Button>
               )}
-              {runs.length > 1 && (
-                <Select
-                  size="small"
-                  style={{ width: 210 }}
-                  value={activeRun.id}
-                  options={runs.map(item => ({
-                    value: item.id,
-                    label: `${aiRunModeLabel(item.mode)} · ${toolLabel(item.engine)} · ${aiRunStatusLabel(item.status)}`,
-                  }))}
-                  onChange={setSelectedRunId}
-                />
-              )}
             </Space>
-          ) : undefined}
-        >
-          <Flex vertical gap={10}>
-            {activeRun.error && (
-              <Alert
-                type="warning"
-                showIcon
-                title={activeRun.error}
-                action={!serverMode && (activeRun.error.includes('桌面隐私') || activeRun.error.includes('Cursor')) ? (
-                  <Space size={4}>
-                    <Button size="small" onClick={() => void openLocalApp('cursor')}>打开 Cursor</Button>
-                    <Button size="small" onClick={() => void copy(true)}>去工作台处理</Button>
-                  </Space>
-                ) : undefined}
-              />
-            )}
+          </Flex>
 
-            {activeRun.mode === 'review' && activeRun.draft && (
-              <Card size="small" style={{ background: 'var(--tf-raised)', borderColor: 'var(--tf-border)' }} title={<Space size={6}><FileCheck2 size={15} /><span>结构化评审草稿预览</span></Space>}>
-                <Flex vertical gap={8}>
-                  <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>{activeRun.draft.summary}</Typography.Paragraph>
-                  {activeRun.draft.evidence && <Typography.Text type="secondary" style={{ fontSize: 12 }}>核验依据：{activeRun.draft.evidence}</Typography.Text>}
-                  {activeRun.draft.findings.length > 0 ? (
-                    <Space orientation="vertical" size={4} style={{ width: '100%' }}>
-                      {activeRun.draft.findings.map((finding, idx) => (
-                        <div key={idx} style={{ padding: '6px 10px', background: 'var(--tf-surface)', border: '1px solid var(--tf-border)', borderRadius: 'var(--tf-control-radius, 6px)' }}>
-                          <Space size={6} wrap>
-                            <StatusBadge variant={finding.severity === 'CRITICAL' ? 'block' : finding.severity === 'WARN' ? 'warn' : 'neutral'}>{severityLabel(finding.severity)}</StatusBadge>
-                            <Typography.Text strong>{finding.title}</Typography.Text>
-                            {finding.location && <Typography.Text code style={{ fontSize: 12 }}>{finding.location}</Typography.Text>}
-                          </Space>
-                          <div style={{ fontSize: 12, color: 'var(--tf-secondary)', marginTop: 4, whiteSpace: 'pre-wrap' }}>{finding.detail}</div>
-                        </div>
-                      ))}
-                    </Space>
-                  ) : (
-                    <Tag color="success" style={{ alignSelf: 'flex-start' }}>未发现阻断或风险项</Tag>
-                  )}
-                  <Flex justify="flex-end" gap={8} wrap>
+          {activeRun.error && (
+            <Alert type="warning" showIcon title={activeRun.error} />
+          )}
+
+          {activeRun.mode === 'review' && activeRun.draft && outputView === 'readable' && (
+            <Flex vertical gap={12}>
+              <div style={{ padding: '12px 14px', borderRadius: 8, background: 'var(--tf-raised)', border: '1px solid var(--tf-border)', display: 'grid', gap: 8 }}>
+                <Flex justify="space-between" align="center" gap={8} wrap>
+                  <Space size={6} wrap>
+                    <FileCheck2 size={15} />
+                    <Typography.Text strong>评审结论</Typography.Text>
+                    <VerdictTag verdict={activeRun.draft.verdict} score={activeRun.draft.score} />
+                  </Space>
+                  <Space size={6} wrap>
+                    <ReviewExportActions
+                      data={{
+                        task: { jiraKey: task.jiraKey, title: task.title, url: task.externalRef?.url || null },
+                        stage: draftJob?.stage || (reviewStage || 'CODE_REVIEW'),
+                        isDraft: !draftAlreadyReported,
+                        stale: draftJob?.stale,
+                        report: {
+                          summary: activeRun.draft.summary,
+                          evidence: activeRun.draft.evidence,
+                          verdict: activeRun.draft.verdict,
+                          score: activeRun.draft.score,
+                          checklist: activeRun.draft.checklist,
+                          meta: activeRun.draft.meta,
+                          tool: activeRun.tool,
+                          createdAt: activeRun.finishedAt || activeRun.updatedAt,
+                        },
+                        findings: activeRun.draft.findings || [],
+                      }}
+                    />
                     {draftAlreadyReported ? (
                       <>
-                        <Tag color="success">报告已提交至评审记录 · 待独立审批</Tag>
-                        {activeRun.jobId && onOpenReview && <Button size="small" type="link" onClick={() => leave(() => onOpenReview(activeRun.jobId!))}>打开评审详情</Button>}
+                        <Tag color="success" style={{ marginInlineEnd: 0 }}>已提交报告</Tag>
+                        {activeRun.jobId && onOpenReview && (
+                          <Button size="small" type="link" style={{ padding: 0, height: 'auto' }} onClick={() => leave(() => onOpenReview(activeRun.jobId!))}>
+                            去查看 / 审批 →
+                          </Button>
+                        )}
                       </>
                     ) : activeRun.jobId && (
                       <Button type="primary" size="small" loading={submittingDraft} disabled={frozenTask || !!draftJob?.stale} onClick={() => void submitRunDraft(activeRun)}>
-                        一键提交此草稿为评审报告
+                        提交为评审报告
                       </Button>
                     )}
-                  </Flex>
+                  </Space>
                 </Flex>
-              </Card>
-            )}
+                <Typography.Paragraph style={{ marginBottom: 0, fontSize: 13, lineHeight: 1.65, whiteSpace: 'pre-wrap' }}>
+                  {plainReviewText(activeRun.draft.summary)}
+                </Typography.Paragraph>
+              </div>
 
-            <pre ref={consoleRef} className="tf-code-panel" style={{ maxHeight: 260 }}>
-              {activeRun.output || (activeRun.status !== 'RUNNING' ? '（无控制台输出）'
-                : activeRun.runner === 'bridge' && activeRun.bridgePhase === 'QUEUED' ? '已排队，等待本机 Bridge 领取（请确认本机正在运行 rd.mjs worker）…'
-                : '正在启动本机 AI 并读取任务快照，请稍候…')}
+              {activeRun.draft.findings.length > 0 ? (
+                <Flex vertical gap={8}>
+                  <Typography.Text strong style={{ fontSize: 13 }}>发现的问题（{activeRun.draft.findings.length}）</Typography.Text>
+                  {sortReviewFindings(activeRun.draft.findings).map((finding, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: '10px 12px',
+                        borderRadius: 8,
+                        border: '1px solid var(--tf-border)',
+                        borderLeft: `3px solid ${finding.severity === 'CRITICAL' ? 'var(--tf-error, #dc2626)' : finding.severity === 'WARN' ? 'var(--tf-warning, #d97706)' : 'var(--tf-border)'}`,
+                        background: 'var(--tf-surface)',
+                      }}
+                    >
+                      <Space size={6} wrap>
+                        <StatusBadge variant={finding.severity === 'CRITICAL' ? 'block' : finding.severity === 'WARN' ? 'warn' : 'neutral'}>{severityLabel(finding.severity)}</StatusBadge>
+                        <Typography.Text strong>{plainReviewText(finding.title)}</Typography.Text>
+                      </Space>
+                      <div style={{ marginTop: 8 }}><ReviewFindingContent detail={finding.detail} location={finding.location} /></div>
+                    </div>
+                  ))}
+                </Flex>
+              ) : (
+                <Tag color="success" style={{ alignSelf: 'flex-start' }}>未发现阻断或风险项</Tag>
+              )}
+
+              {!!activeRun.draft.checklist?.length && (
+                <Flex vertical gap={6}>
+                  <Typography.Text strong style={{ fontSize: 13 }}>逐项核查清单（{activeRun.draft.checklist.length}）</Typography.Text>
+                  <ChecklistTable items={activeRun.draft.checklist} />
+                </Flex>
+              )}
+
+              {activeRun.draft.evidence && (
+                <section aria-label="核验依据与提交范围">
+                  <Typography.Text strong>核验依据与提交范围</Typography.Text>
+                  <Typography.Paragraph type="secondary" className="tf-break" style={{ margin: '6px 0 0', fontSize: 12, whiteSpace: 'pre-wrap' }}>{activeRun.draft.evidence}</Typography.Paragraph>
+                </section>
+              )}
+            </Flex>
+          )}
+
+          {outputView === 'raw' ? (
+            <pre ref={consoleRef} className="tf-code-panel" style={{ maxHeight: 320 }}>
+              {activeRun.output || (activeRun.status !== 'RUNNING' ? '（无控制台输出）' : '正在执行，请稍候…')}
             </pre>
-          </Flex>
-        </Card>
+          ) : parsedOutput && !(activeRun.mode === 'review' && activeRun.draft) && (
+            <Flex vertical gap={10}>
+              {activeRun.status === 'RUNNING' && (
+                <div style={{ padding: '10px 12px', background: 'var(--tf-raised)', border: '1px solid var(--tf-border)', borderRadius: 8 }}>
+                  <Space size={8} align="center">
+                    <Spin size="small" />
+                    <Typography.Text strong style={{ fontSize: 13 }}>{parsedOutput.currentActivity}</Typography.Text>
+                  </Space>
+                </div>
+              )}
+
+              {parsedOutput.steps.length > 0 && activeRun.status === 'RUNNING' && (
+                <div aria-label="执行进度" role="region" tabIndex={0} style={{ padding: '8px 12px', background: 'var(--tf-raised)', borderRadius: 8, display: 'grid', gap: 5, maxHeight: 200, overflow: 'auto' }}>
+                  {parsedOutput.steps.map(step => (
+                    <Flex key={step.id} align="center" justify="space-between" gap={8} style={{ fontSize: 12 }}>
+                      <Space size={6} style={{ minWidth: 0 }}>
+                        <span aria-hidden="true" style={{ display: 'block', width: 6, height: 6, borderRadius: '50%', background: step.status === 'failed' ? '#cf1322' : step.status === 'running' ? '#1677ff' : '#389e0d' }} />
+                        <span className="tf-break">{step.title}</span>
+                      </Space>
+                      {step.duration && <Typography.Text type="secondary" style={{ fontSize: 11, flexShrink: 0 }}>{step.duration}</Typography.Text>}
+                    </Flex>
+                  ))}
+                </div>
+              )}
+
+              {parsedOutput.finalMarkdown && (
+                <>
+                  {activeRun.status === 'SUCCEEDED' && activeRun.actionType === 'TECH_SPEC_GEN' && canSaveTechSpec && (
+                    <Flex justify="flex-end">
+                      <Button type="primary" size="small" icon={<FilePlus2 size={13} />} loading={savingGeneratedAsset} onClick={() => void saveOutputAsAsset('TECH_SPEC', parsedOutput.finalMarkdown!)}>
+                        一键存为本任务「技术方案」材料
+                      </Button>
+                    </Flex>
+                  )}
+                  {activeRun.status === 'SUCCEEDED' && activeRun.actionType === 'TEST_CASE_GEN' && canSaveTestCase && (
+                    <Flex justify="flex-end">
+                      <Button type="primary" size="small" icon={<FilePlus2 size={13} />} loading={savingGeneratedAsset} onClick={() => void saveOutputAsAsset('TEST_CASE', parsedOutput.finalMarkdown!)}>
+                        一键存为本任务「测试用例」材料
+                      </Button>
+                    </Flex>
+                  )}
+                  <div style={{ padding: '14px 16px', background: 'var(--tf-raised)', border: '1px solid var(--tf-border)', borderRadius: 8, maxHeight: 420, overflowY: 'auto' }}>
+                    <MarkdownPreview content={parsedOutput.finalMarkdown} />
+                  </div>
+                </>
+              )}
+            </Flex>
+          )}
+        </div>
       )}
 
       <Collapse
+        ghost
         size="small"
         items={[{
           key: 'manual-prompt',
-          label: '高级：在交互式工作台 (5288) / IDE 会话中手动使用指令或伴随命令',
-          children: <Flex vertical gap={12}>
-            <Descriptions size="small" column={2} items={[
-              { key: 'jira', label: '任务号', children: task.jiraKey },
-              { key: 'status', label: '本地状态', children: taskStatusLabel(task.status) },
-            ]} />
-            <Flex gap={8} align="center" wrap>
-              <Select aria-label="目标工具" style={{ flex: '1 1 240px' }} value={target} options={LOCAL_TASK_TARGETS} onChange={value => { targetTouched.current = true; setTarget(value); setEngine(targetToEngine(value)); }} />
-              <Button icon={copied ? <Check size={15} /> : <Copy size={15} />} disabled={!prompt} loading={copying} onClick={() => void copy(false)}>{copied ? '已复制' : '复制处理指令'}</Button>
-              <Button onClick={() => openWorkbench()} icon={<ExternalLink size={15} />}>打开工作台</Button>
-            </Flex>
-            {prompt ? (
-              <Input.TextArea aria-label="将复制的指令" readOnly value={prompt} autoSize={{ minRows: 5, maxRows: 12 }} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
-            ) : safeMode === 'review' ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="若需复制交互式评审指令，请先拥有一条待提交报告的本地评审申请（或直接使用上方「启动 AI 评审」自动创建）。">
-                <Space wrap>
-                  <Button size="small" onClick={() => leave(onOpenAssets)}>查看任务材料</Button>
-                  {!frozenTask && canCreateLocalReview && allowedStages.length > 0 && <Button size="small" onClick={() => leave(onCreateLocalReview)}>手动登记本地评审</Button>}
-                </Space>
-              </Empty>
-            ) : null}
-            {companionCommand && <Flex vertical gap={6}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>伴随心跳与 Git 提交自动同步（终端常驻可选）：</Typography.Text>
-              <Flex gap={8} align="center">
-                <Input readOnly value={companionCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
-                <Button size="small" icon={copiedSync ? <Check size={14} /> : <Copy size={14} />} onClick={() => void copyCompanion()}>{copiedSync ? '已复制' : '复制'}</Button>
+          label: <Typography.Text type="secondary" style={{ fontSize: 12 }}>高级：手动复制提示词 / 终端伴随同步命令</Typography.Text>,
+          children: (
+            <Flex vertical gap={10}>
+              <Descriptions size="small" column={2} items={[
+                { key: 'jira', label: '任务号', children: task.jiraKey },
+                { key: 'status', label: '状态', children: taskStatusLabel(task.status) },
+                ...(constitutionFiles?.length ? [{ key: 'const', label: '仓库规范', span: 2, children: constitutionFiles.join(' · ') }] : []),
+              ]} />
+              <Flex gap={8} align="center" wrap>
+                <Select size="small" aria-label="目标工具" style={{ flex: '1 1 200px' }} value={target} options={LOCAL_TASK_TARGETS} onChange={value => { targetTouched.current = true; setTarget(value); setEngine(targetToEngine(value)); }} />
+                <Button size="small" icon={copied ? <Check size={13} /> : <Copy size={13} />} disabled={!prompt} loading={copying} onClick={() => void copy(false)}>{copied ? '已复制' : '复制指令'}</Button>
+                <Button size="small" onClick={() => openWorkbench()} icon={<ExternalLink size={13} />}>打开工作台</Button>
               </Flex>
-            </Flex>}
-          </Flex>,
+              {prompt ? (
+                <Input.TextArea readOnly value={prompt} autoSize={{ minRows: 4, maxRows: 10 }} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
+              ) : safeMode === 'review' ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无待提交的评审申请。">
+                  <Space wrap>
+                    <Button size="small" onClick={() => leave(onOpenAssets)}>查看材料</Button>
+                    {!frozenTask && canCreateLocalReview && allowedStages.length > 0 && <Button size="small" onClick={() => leave(onCreateLocalReview)}>手动发起评审</Button>}
+                  </Space>
+                </Empty>
+              ) : null}
+              {companionCommand && (
+                <Flex gap={8} align="center">
+                  <Input size="small" readOnly value={companionCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
+                  <Button size="small" icon={copiedSync ? <Check size={13} /> : <Copy size={13} />} onClick={() => void copyCompanion()}>{copiedSync ? '已复制' : '复制同步命令'}</Button>
+                </Flex>
+              )}
+            </Flex>
+          ),
         }]}
       />
     </Flex>

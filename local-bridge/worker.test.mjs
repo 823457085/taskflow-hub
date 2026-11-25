@@ -128,18 +128,39 @@ test('real CLI executor runs codex read-only with the repository as an extra rea
   const bin = mkdtempSync(join(tmpdir(), 'taskflow-fake-codex-'));
   try {
     const codex = join(bin, 'codex');
-    writeFileSync(codex, '#!/bin/sh\nout=""; prev=""\nfor a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done\ninput=$(cat)\necho "progress line"\ncase "$input" in *"TaskFlow"*) seen=yes;; *) seen=no;; esac\nprintf "final args=[%s] prompt=%s" "$*" "$seen" > "$out"\nexit 0\n', { mode: 0o755 });
+    writeFileSync(codex, [
+      '#!/bin/sh',
+      'out=""; prev=""',
+      'for a in "$@"; do if [ "$prev" = "-o" ]; then out="$a"; fi; prev="$a"; done',
+      'input=$(cat)',
+      'echo "progress line"',
+      'printf "OpenAI Codex v0.118.0\\n--------\\nworkdir: /workspace\\nmodel: fixture-model-2026\\n" >&2',
+      'case "$input" in *"TaskFlow"*) seen=yes;; *) seen=no;; esac',
+      'printf "final args=[%s] prompt=%s" "$*" "$seen" > "$out"',
+      '',
+    ].join('\n'), { mode: 0o755 });
     writeConfig({ projects: { default: repo }, engines: { codex } });
     const queued = (await hub.dispatch({ mode: 'review', stage: 'PRD' })).body;
     assert.equal(queued.error?.code, 'MISSING_INPUT');
-    const read = (await hub.dispatch({ mode: 'read', engine: 'codex' })).body.run;
+    const selection = { mode: 'read', engine: 'codex', model: 'fixture-model' };
+    const unsupported = await hub.dispatch(selection);
+    assert.equal(unsupported.body.error.code, 'AI_MODEL_SELECTION_UNAVAILABLE');
+    await runWorker({ config: configPath, once: true, waitSeconds: 0 }, { ...quiet, executors: { cli: cliExecutor() } });
+    const caps = (await hub.call('/api/local-automation/capabilities', { headers: hub.browser.get })).body;
+    assert.ok(caps.devices[0].modelEngines.includes('codex'));
+    const read = (await hub.dispatch(selection)).body.run;
+    assert.equal(read.model, 'fixture-model');
+    const legacyClaim = await hub.call(`/api/bridge/runs/${read.id}/claim`, { method: 'POST', body: {}, token: hub.deviceToken });
+    assert.equal(legacyClaim.body.error.code, 'AI_MODEL_SELECTION_UNAVAILABLE');
     await runWorker({ config: configPath, once: true, waitSeconds: 1 }, { ...quiet, executors: { cli: cliExecutor() } });
     const final = await hub.run(read.id);
     assert.equal(final.status, 'SUCCEEDED');
-    assert.match(final.output, /^final args=\[exec --skip-git-repo-check --ephemeral --color never -s read-only --add-dir /);
-    assert.ok(final.output.includes(`--add-dir ${repo} -o `));
+    assert.match(final.output, /^final args=\[exec --skip-git-repo-check --color never -s read-only --add-dir /);
+    assert.ok(final.output.includes(`--add-dir ${repo} --model fixture-model -o `));
     assert.match(final.output, /prompt=yes$/);
     assert.equal(final.exitCode, 0);
+    assert.equal(final.model, 'fixture-model');
+    assert.equal(final.effectiveModel, 'fixture-model-2026');
   } finally { await hub.close(); rmSync(bin, { recursive: true, force: true }); }
 });
 

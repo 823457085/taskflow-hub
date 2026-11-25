@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { detectConstitutionFiles } from './local-automation.mjs';
+import { AI_ENGINES, detectConstitutionFiles, extractReviewDraft, extractSubtaskDraft, readConstitutionExcerpts, spawnEngineProcess } from './local-automation.mjs';
 import { createPlatform } from './server.mjs';
 
 const password = 'local-automation-test-passphrase';
@@ -121,6 +121,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
   const openedApps = [];
   let slowCancelSignal = null;
   const capturedReviewPrompts = [];
+  const readModel = 'test-model[reasoning=high]';
 
   // Mock loopback Jira server for testing Jira-as-PRD asset import
   const jiraServer = http.createServer((req, res) => {
@@ -156,7 +157,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     runsDir: join(tempRoot, 'runs'),
     repoScanRoots: [{ path: tempRoot, maxDepth: 2 }],
     appOpener: async info => { openedApps.push(info); },
-    runnerOverride: async ({ mode, repoPath, prompt, appendOutput, signal, customInstruction }) => {
+    runnerOverride: async ({ mode, model, repoPath, prompt, appendOutput, signal, customInstruction }) => {
       if (customInstruction === 'WAIT_FOR_STOP') {
         slowCancelSignal = signal;
         await new Promise(resolve => {
@@ -166,7 +167,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
       }
       if (mode === 'read') {
         appendOutput('正在读取任务与材料快照...\n');
-        return { exitCode: 0, output: '任务分析完成：核心改动在 example-web 通知模块。' };
+        return { exitCode: 0, output: '任务分析完成：核心改动在 example-web 通知模块。', effectiveModel: model === readModel ? 'test-model-2026' : null };
       }
       if (mode === 'develop') {
         appendOutput('正在修改业务仓库文件...\n');
@@ -326,11 +327,20 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     });
 
     // 3. 1-Click AI Read Analysis
-    const readStart = await browserCall(devCookie, `/api/tasks/${createdTask.id}/ai-runs`, {
-      method: 'POST', body: { mode: 'read', engine: 'codex' }, expectStatus: 201,
+    const path = `/api/tasks/${createdTask.id}/ai-runs`;
+    const invalidModel = await browserCall(devCookie, path, {
+      method: 'POST', body: { mode: 'read', engine: 'codex', model: '--config bad' }, expectStatus: 400,
     });
+    assert.equal(invalidModel.error.code, 'INVALID_AI_MODEL');
+    const readStart = await browserCall(devCookie, path, {
+      method: 'POST', body: { mode: 'read', engine: 'codex', model: readModel }, expectStatus: 201,
+    });
+    assert.equal(readStart.run.model, readModel);
+    assert.equal(readStart.run.effectiveModel, null);
     const readDone = await waitForRun(devCookie, createdTask.id, readStart.run.id);
     assert.equal(readDone.status, 'SUCCEEDED');
+    assert.equal(readDone.model, readModel);
+    assert.equal(readDone.effectiveModel, 'test-model-2026');
     assert.match(readDone.output, /任务分析完成/);
 
     // 4. 1-Click AI Develop with autoClaim: claims task, edits repo, commits, and syncs progress automatically!
@@ -386,6 +396,8 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     assert.equal(reviewDone.draft.findings.length, 1);
     assert.equal(capturedReviewPrompts.length, 1);
     assert.match(capturedReviewPrompts[0], /接口幂等与向下兼容契约核验 \[idempotency-contract-guard@1\.0\.0\]/);
+    assert.match(capturedReviewPrompts[0], /「问题：」「影响：」「建议：」/);
+    assert.match(capturedReviewPrompts[0], /P0 对应 CRITICAL.*P1 对应 WARN.*P2 对应 INFO/);
 
     const submittedJob = (await browserCall(adminCookie, `/api/jobs/${reviewStart.job.id}`)).job;
     assert.equal(submittedJob.status, 'REPORT_SUBMITTED');
@@ -445,14 +457,300 @@ test('detectConstitutionFiles discovers repo spec/constitution files and rejects
   const tempRoot = mkdtempSync(join(tmpdir(), 'tf-constitution-'));
   try {
     mkdirSync(join(tempRoot, '.github'), { recursive: true });
-    writeFileSync(join(tempRoot, 'AGENTS.md'), '# Agents\n');
+    mkdirSync(join(tempRoot, '.specify/memory'), { recursive: true });
+    writeFileSync(join(tempRoot, 'AGENTS.md'), '# Agents\n- Keep diff minimal.\n');
+    writeFileSync(join(tempRoot, '.specify/memory/constitution.md'), '# SpecKit Constitution\n- Always test edge cases.\n');
     writeFileSync(join(tempRoot, '.github', 'copilot-instructions.md'), '# Copilot\n');
     const externalTarget = join(tempRoot, 'outside.txt');
     writeFileSync(externalTarget, 'secret');
     symlinkSync(externalTarget, join(tempRoot, 'CLAUDE.md'));
 
     const found = detectConstitutionFiles(tempRoot);
-    assert.deepEqual(found, ['AGENTS.md', '.github/copilot-instructions.md']);
+    assert.deepEqual(found, ['AGENTS.md', '.specify/memory/constitution.md', '.github/copilot-instructions.md']);
+    const excerpts = readConstitutionExcerpts(tempRoot, found);
+    assert.equal(excerpts.length, 3);
+    assert.match(excerpts[1].excerpt, /Always test edge cases/);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('extractReviewDraft and extractSubtaskDraft parse rich fields and enforce PASS guardrail', () => {
+  const reviewRaw = '分析完成\n```taskflow-review-draft\n' + JSON.stringify({
+    verdict: 'PASS',
+    score: 90,
+    summary: '发现 1 条高危安全隐患',
+    meta: {
+      riskLevel: 'high',
+      effortScore: 4,
+      walkthrough: [{ file: 'src/auth.ts', summary: '签名校验逻辑修改', risk: 'high' }],
+      compliance: { compliant: ['AC-1'], missing: ['AC-2'], manualCheck: ['实机测试'] },
+      clarifyQuestions: [{ id: 'Q-001', question: 'Token 过期如何续签？', owner: 'PM' }],
+      coverageMetrics: { coveragePrd: 80, traceAc: 75 },
+    },
+    findings: [{
+      severity: 'CRITICAL', category: 'SECURITY', confidence: 10, ruleId: 'SEC-01',
+      title: '缺少重放校验', detail: '未校验 jti', location: 'src/auth.ts:18',
+      suggestedPatch: { before: 'verify(tok)', after: 'verify(tok) && checkJti(tok.jti)' },
+    }],
+  }) + '\n```';
+  const parsed = extractReviewDraft(reviewRaw);
+  assert.equal(parsed.verdict, 'FAIL', 'CRITICAL finding must downgrade PASS verdict to FAIL');
+  assert.equal(parsed.meta.riskLevel, 'high');
+  assert.equal(parsed.meta.effortScore, 4);
+  assert.equal(parsed.findings[0].category, 'SECURITY');
+  assert.equal(parsed.findings[0].confidence, 10);
+  assert.equal(parsed.findings[0].suggestedPatch.after, 'verify(tok) && checkJti(tok.jti)');
+
+  const subtaskRaw = '拆解如下\n```taskflow-subtask-draft\n' + JSON.stringify({
+    rationale: '按前端、后端、联调拆解，单任务控制在 3 天内',
+    subtasks: [{ title: '后端离线凭证接口', type: 'TASK', roleHint: '后端开发', estimateDays: 2, covers: ['AC-1'], after: ['技术方案评审'] }],
+  }) + '\n```';
+  const subtasksDraft = extractSubtaskDraft(subtaskRaw);
+  assert.equal(subtasksDraft.subtasks.length, 1);
+  assert.equal(subtasksDraft.subtasks[0].estimateDays, 2);
+});
+
+test('local automation v2 supports CHAIN_ANALYZE, REVIEW_ASK, SUBTASK_DRAFT and isolated git worktree develop runs', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-auto-v2-'));
+  const { repoDir, git } = initTempGitRepo(tempRoot, 'door-app');
+  const seenPrompts = [];
+  const app = createPlatform({
+    dbPath: ':memory:',
+    runsDir: join(tempRoot, 'runs'),
+    repoScanRoots: [{ path: tempRoot, maxDepth: 2 }],
+    runnerOverride: async ({ mode, actionType, prompt, repoPath }) => {
+      seenPrompts.push({ mode, actionType, prompt, repoPath });
+      if (actionType === 'SUBTASK_DRAFT') {
+        return {
+          exitCode: 0,
+          output: '```taskflow-subtask-draft\n{"rationale":"拆分为 2 项","subtasks":[{"title":"实现离线开门校验","type":"TASK","roleHint":"后端开发","estimateDays":2,"covers":["AC-1"]}]}\n```',
+        };
+      }
+      if (actionType === 'CHAIN_ANALYZE') {
+        return { exitCode: 0, output: '跨环节一致性检查：PRD AC-1 已由技术方案覆盖，未发现超时冲突。' };
+      }
+      if (actionType === 'REVIEW_ASK') {
+        return { exitCode: 0, output: '核查确认：`door.ts:12` 在弱网时未校验 nonce 时效，建议补充过期检查。' };
+      }
+      if (mode === 'develop' && repoPath) {
+        writeFileSync(join(repoPath, 'worktree-change.ts'), 'export const wt = true;\n');
+        execFileSync('git', ['-C', repoPath, 'add', 'worktree-change.ts'], { stdio: 'pipe' });
+        execFileSync('git', ['-C', repoPath, 'commit', '-m', 'feat: offline door worktree edit'], { stdio: 'pipe' });
+        return { exitCode: 0, output: 'worktree commit done' };
+      }
+      return { exitCode: 0, output: 'ok' };
+    },
+  });
+  await new Promise(resolve => app.server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${app.server.address().port}`;
+  try {
+    await fetch(base + '/api/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password }) });
+    const login = await fetch(base + '/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'admin', password }) });
+    const cookie = login.headers.get('set-cookie').split(';')[0];
+    const call = async (path, method = 'GET', body, status = 200) => {
+      const res = await fetch(base + path, {
+        method,
+        headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const json = await res.json();
+      assert.equal(res.status, status, `${path}: ${JSON.stringify(json)}`);
+      return json;
+    };
+
+    const task = (await call('/api/tasks', 'POST', { jiraKey: 'OPAY-888', title: '离线开门全链路 v2 测试' }, 201)).task;
+    await call(`/api/projects/${task.projectId}/workspace`, 'PUT', { repoPath: repoDir, defaultTarget: 'workbench' });
+    await call(`/api/tasks/${task.id}/assets`, 'POST', { kind: 'PRD', title: 'PRD v1', content: '# 验收标准\nAC-1 断网校验凭证' }, 201);
+    const job = (await call('/api/reviews', 'POST', { taskId: task.id, stage: 'PRD', executionMode: 'LOCAL_REPORT' }, 201)).job;
+    const reported = (await call(`/api/jobs/${job.id}/report`, 'POST', {
+      source: 'LOCAL_TOOL', tool: 'codex-cli', summary: '待补充异常', verdict: 'CONDITIONAL', score: 80,
+      findings: [{ severity: 'WARN', category: 'SPEC_ALIGN', title: '未写明 nonce 过期时间', detail: '请明确 TTL', location: '§3.1' }],
+    }, 201)).job;
+
+    const waitRun = async runId => {
+      for (let i = 0; i < 40; i++) {
+        const res = await call(`/api/ai-runs/${runId}`);
+        if (res.run.status !== 'RUNNING') return res.run;
+        await new Promise(r => setTimeout(r, 25));
+      }
+      throw new Error('Timed out waiting run');
+    };
+
+    const askRes = await call(`/api/tasks/${task.id}/ai-runs`, 'POST', {
+      mode: 'read', actionType: 'REVIEW_ASK', jobId: job.id, askFindingId: reported.findings[0].id,
+      customInstruction: '这条问题如何落地修复？', engine: 'codex',
+    }, 201);
+    const askDone = await waitRun(askRes.run.id);
+    assert.equal(askDone.actionType, 'REVIEW_ASK');
+    assert.equal(askDone.askFindingId, reported.findings[0].id);
+    assert.match(askDone.output, /nonce 时效/);
+
+    const draftRes = await call(`/api/tasks/${task.id}/ai-runs`, 'POST', {
+      mode: 'read', actionType: 'SUBTASK_DRAFT', engine: 'codex',
+    }, 201);
+    const draftDone = await waitRun(draftRes.run.id);
+    assert.equal(draftDone.draft.subtasks[0].title, '实现离线开门校验');
+
+    const analyzeRes = await call(`/api/tasks/${task.id}/ai-runs`, 'POST', {
+      mode: 'read', actionType: 'CHAIN_ANALYZE', engine: 'codex',
+    }, 201);
+    const analyzeDone = await waitRun(analyzeRes.run.id);
+    assert.equal(analyzeDone.actionType, 'CHAIN_ANALYZE');
+    assert.match(analyzeDone.output, /跨环节一致性检查/);
+
+    const wtRes = await call(`/api/tasks/${task.id}/ai-runs`, 'POST', {
+      mode: 'develop', engine: 'codex', useWorktree: true,
+    }, 201);
+    assert.ok(wtRes.run.worktreeBranch?.startsWith('ai/OPAY-888-'));
+    assert.ok(wtRes.run.worktreePath);
+    const wtDone = await waitRun(wtRes.run.id);
+    assert.equal(wtDone.status, 'SUCCEEDED');
+    assert.equal(git(['status', '--porcelain']).toString().trim(), '', 'main checkout remains completely clean');
+
+    if (wtRes.run.worktreePath) {
+      execFileSync('git', ['-C', repoDir, 'worktree', 'remove', '--force', wtRes.run.worktreePath], { stdio: 'pipe' });
+    }
+  } finally {
+    await app.close();
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('claude engine passes prompt via stdin so --add-dir cannot swallow prompt argument', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-claude-stdin-'));
+  const fakeClaude = join(tempRoot, 'fake-claude.sh');
+  writeFileSync(fakeClaude, `#!/bin/sh
+if [ "$1" != "--print" ] || [ "$2" != "--add-dir" ] || [ $# -ne 3 ]; then
+  echo "Unexpected positional args: $*" >&2
+  exit 2
+fi
+cat
+`, { mode: 0o755 });
+  try {
+    const { child } = spawnEngineProcess({
+      engineInfo: AI_ENGINES.find(e => e.id === 'claude'),
+      executable: fakeClaude,
+      mode: 'read',
+      prompt: 'Verify claude stdin prompt payload',
+      cwd: tempRoot,
+      runDir: tempRoot,
+      repoAccessiblePath: join(tempRoot, 'repo'),
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    assert.equal(code, 0, stderr);
+    assert.equal(stdout, 'Verify claude stdin prompt payload');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('antigravity engine places --mode/--add-dir before attached --print=<prompt> in review and develop modes', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-agy-args-'));
+  const repoDir = join(tempRoot, 'repo');
+  const runDir = join(tempRoot, 'run');
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  const fakeAgy = join(tempRoot, 'fake-agy.mjs');
+  writeFileSync(fakeAgy, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify(process.argv.slice(2)));
+`, { mode: 0o755 });
+  const runCase = opts => new Promise((resolve, reject) => {
+    const { child } = spawnEngineProcess({
+      engineInfo: AI_ENGINES.find(e => e.id === 'antigravity'),
+      executable: fakeAgy,
+      ...opts,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stdout, stderr }));
+  });
+  try {
+    const reviewPrompt = '-- Leading dashes\nLine 2 with = equals';
+    const reviewRes = await runCase({
+      mode: 'review',
+      model: 'gemini-test',
+      prompt: reviewPrompt,
+      cwd: runDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    assert.equal(reviewRes.code, 0, reviewRes.stderr);
+    assert.deepEqual(JSON.parse(reviewRes.stdout), [
+      '--mode', 'plan',
+      '--model=gemini-test',
+      '--add-dir', repoDir,
+      `--print=${reviewPrompt}`,
+    ]);
+
+    const developPrompt = 'Implement offline door support';
+    const developRes = await runCase({
+      mode: 'develop',
+      prompt: developPrompt,
+      cwd: repoDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    assert.equal(developRes.code, 0, developRes.stderr);
+    assert.deepEqual(JSON.parse(developRes.stdout), [
+      '--mode', 'accept-edits',
+      '--add-dir', runDir,
+      `--print=${developPrompt}`,
+    ]);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('codex engine persists sessions without --ephemeral and attaches runDir when cwd is bound repository', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-codex-args-'));
+  const repoDir = join(tempRoot, 'repo');
+  const runDir = join(tempRoot, 'run');
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  const fakeCodex = join(tempRoot, 'fake-codex.mjs');
+  writeFileSync(fakeCodex, `#!/usr/bin/env node
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), prompt: Buffer.concat(chunks).toString('utf8') }));
+});
+`, { mode: 0o755 });
+  try {
+    const { child, lastMessageFile } = spawnEngineProcess({
+      engineInfo: AI_ENGINES.find(e => e.id === 'codex'),
+      executable: fakeCodex,
+      mode: 'review',
+      model: 'gpt-6.2-sol',
+      prompt: 'Review MR #647',
+      cwd: repoDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    assert.equal(code, 0, stderr);
+    const parsed = JSON.parse(stdout);
+    assert.ok(!parsed.args.includes('--ephemeral'));
+    assert.deepEqual(parsed.args, [
+      'exec', '--skip-git-repo-check', '--color', 'never',
+      '-s', 'read-only',
+      '--add-dir', runDir,
+      '--model', 'gpt-6.2-sol',
+      '-o', lastMessageFile,
+      '-',
+    ]);
+    assert.equal(parsed.prompt, 'Review MR #647');
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

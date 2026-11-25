@@ -23,7 +23,7 @@ const SHORTCUT_GROUPS: { title: string; items: { keys: string[]; desc: string }[
     items: [
       { keys: ['['], desc: '切换到当前筛选列表中的上一项任务' },
       { keys: [']'], desc: '切换到当前筛选列表中的下一项任务' },
-      { keys: ['I'], desc: '一键认领当前待认领任务（Assign to me）' },
+      { keys: ['I'], desc: '在完整任务详情页认领当前任务' },
       { keys: ['⌘ / Ctrl', 'Enter'], desc: '快速提交进度记录、材料正文、评审报告或门禁审批' },
     ],
   },

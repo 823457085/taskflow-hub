@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Descriptions, Modal, Skeleton, Space, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Modal, Skeleton, Space, Tag, Typography } from 'antd';
+import { MessageSquarePlus } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
-import { ApiError, api, timeText } from './workspaceApi';
+import { ApiError, api, MrWritebackRecord, timeText } from './workspaceApi';
 
 interface MergeRequest {
   assetId: string;
@@ -25,17 +26,19 @@ interface MergeRequest {
 
 const providerName = (mr: MergeRequest) => mr.provider === 'yunxiao' ? 'Codeup' : 'GitLab';
 
-export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, active, readOnly, onImport, onUnauthorized }: {
-  taskId: string; taskVersion: number; approvedJobId?: string; active: boolean; readOnly: boolean;
+export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, latestCodeReviewJobId, active, readOnly, onImport, onUnauthorized }: {
+  taskId: string; taskVersion: number; approvedJobId?: string; latestCodeReviewJobId?: string; active: boolean; readOnly: boolean;
   onImport?: () => void; onUnauthorized: () => void;
 }) {
   const { message } = App.useApp();
   const [items, setItems] = useState<MergeRequest[] | null>(null);
+  const [writebacks, setWritebacks] = useState<MrWritebackRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [refresh, setRefresh] = useState(0);
   const [failed, setFailed] = useState(false);
   const [confirming, setConfirming] = useState<MergeRequest | null>(null);
   const [merging, setMerging] = useState(false);
+  const [writingAssetId, setWritingAssetId] = useState('');
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
   const path = `tasks/${taskId}/merge-requests`;
@@ -44,8 +47,11 @@ export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, active, 
     if (!active) return;
     let current = true;
     setLoading(true);
-    void api<{ items: MergeRequest[] }>(path).then(({ items: next }) => {
-      if (current) { setItems(next); setFailed(false); }
+    void Promise.all([
+      api<{ items: MergeRequest[] }>(path),
+      api<{ writebacks: MrWritebackRecord[] }>(`${path}/writebacks`).catch(() => ({ writebacks: [] as MrWritebackRecord[] })),
+    ]).then(([{ items: next }, wbRes]) => {
+      if (current) { setItems(next); setWritebacks(wbRes.writebacks || []); setFailed(false); }
     }).catch((error: unknown) => {
       if (!current) return;
       setFailed(true);
@@ -54,6 +60,24 @@ export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, active, 
     }).finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
   }, [path, active, taskVersion, approvedJobId, refresh, message]);
+
+  async function writebackReview(mr: MergeRequest) {
+    if (!latestCodeReviewJobId || writingAssetId) return;
+    setWritingAssetId(mr.assetId);
+    try {
+      const res = await api<{ writeback: MrWritebackRecord & { fallbackReason?: string | null } }>(
+        `${path}/${mr.assetId}/writeback`,
+        { jobId: latestCodeReviewJobId },
+      );
+      void message.success(`已回写代码评审意见到 ${providerName(mr)} #${mr.number}（行内 ${res.writeback.inlineCount} 条 + 总结评论）。`);
+      setRefresh(value => value + 1);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) unauthorized.current();
+      else void message.error(error instanceof Error ? error.message : '回写评审意见失败');
+    } finally {
+      setWritingAssetId('');
+    }
+  }
 
   async function merge() {
     if (!confirming?.reviewId || merging) return;
@@ -78,12 +102,20 @@ export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, active, 
     {loading && !items && <Skeleton active title={false} paragraph={{ rows: 2 }} />}
     {!loading && !failed && items?.length === 0 && <Typography.Text type="secondary">从 Codeup 或 GitLab 导入实际 MR 后，可在这里同步状态并发起合并。</Typography.Text>}
     {failed && <Typography.Text type="secondary">状态待同步</Typography.Text>}
-    {!!items?.length && <div className="tf-detail-stack tf-detail-stack-small">{items.map(mr => <div key={mr.assetId}>
+    {!!items?.length && <div className="tf-detail-stack tf-detail-stack-small">{items.map(mr => {
+      const latestWb = writebacks.find(w => w.assetId === mr.assetId);
+      return <div key={mr.assetId}>
       <Space wrap>
         <Typography.Text strong>{providerName(mr)} #{mr.number}</Typography.Text>
         {mr.url ? <Typography.Link href={mr.url} target="_blank" rel="noreferrer">{mr.title}</Typography.Link> : <Typography.Text>{mr.title}</Typography.Text>}
         {mr.merged && <StatusBadge variant="green">已合并</StatusBadge>}
         {mr.state && <Typography.Text code>{mr.state}</Typography.Text>}
+        {latestWb && <Tag color="blue">已回写（行内 {latestWb.inlineCount} / {latestWb.mode === 'AUTO' ? '自动' : '手动'}）</Tag>}
+        {latestCodeReviewJobId && !mr.merged && !readOnly && !mr.error && (
+          <Button size="small" icon={<MessageSquarePlus size={13} />} loading={writingAssetId === mr.assetId} disabled={loading || merging} onClick={() => void writebackReview(mr)}>
+            回写评审意见
+          </Button>
+        )}
         {mr.reviewId && !readOnly && <Button type="primary" size="small" disabled={loading || failed || merging} onClick={() => setConfirming(mr)}>合并到目标分支</Button>}
       </Space>
       <Descriptions size="small" column={1} items={[
@@ -94,7 +126,8 @@ export function TaskMergeRequests({ taskId, taskVersion, approvedJobId, active, 
         ...(mr.mergedAt ? [{ key: 'time', label: '合并时间', children: timeText(mr.mergedAt) }] : []),
       ]} />
       {(mr.reason || mr.error) && <Typography.Text type="secondary">{mr.error || mr.reason}</Typography.Text>}
-    </div>)}</div>}
+    </div>;
+    })}</div>}
     <Modal title="确认合并" open={active && !!confirming} okText="确认合并" cancelText="取消" confirmLoading={merging}
       cancelButtonProps={{ disabled: merging }} closable={!merging} maskClosable={false}
       onCancel={() => { if (!merging) setConfirming(null); }} onOk={() => void merge()}>

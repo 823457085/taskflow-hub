@@ -1,43 +1,6 @@
-.tf-flow-guide, .tf-flow-guide .ant-card-body { min-width: 0; }
-.tf-flow-guide .ant-card-head-wrapper { gap: 12px; flex-wrap: wrap; }
-.tf-flow-guide .ant-card-head-title { white-space: normal; min-width: 0; }
-.tf-flow-guide .ant-card-extra { margin-inline-start: auto; }
-.tf-flow-intro.ant-typography { margin: 0 0 12px; font-size: 12.5px; }
-.tf-flow-map { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 14px; list-style: none; margin: 0; padding: 0; }
-.tf-flow-map > li { position: relative; display: flex; min-width: 0; }
-.tf-flow-map > li:not(:last-child)::after { content: '→'; position: absolute; inset-inline-end: -12px; top: 50%; transform: translateY(-50%); font-size: 13px; color: var(--tf-muted); pointer-events: none; }
-.tf-flow-node.ant-btn { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 6px; min-height: 74px; height: auto; width: 100%; padding: 10px 8px; white-space: normal; font-size: 12.5px; font-weight: 500; line-height: 1.45; }
-.tf-flow-number { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 22px; min-width: 22px; height: 22px; font-family: var(--font-mono); font-size: 11px; color: var(--tf-muted); background: var(--tf-raised); border: 1px solid var(--tf-border); border-radius: 999px; }
-.tf-flow-node-title { overflow-wrap: anywhere; }
-.tf-flow-node.is-selected.ant-btn { border-color: var(--tf-accent); color: var(--tf-accent); background: var(--tf-accent-soft); }
-.tf-flow-node.is-selected .tf-flow-number { background: var(--tf-primary); border-color: var(--tf-primary); color: var(--tf-on-primary); }
-.tf-flow-detail { display: grid; gap: 12px; margin-top: 14px; padding: 12px 14px; background: var(--tf-raised); border: 1px solid var(--tf-border); border-radius: var(--tf-card-radius, 10px); min-width: 0; }
-.tf-flow-detail-heading { display: grid; gap: 3px; }
-.tf-flow-detail-heading h3.ant-typography { margin: 0; font-size: 14px; line-height: 1.4; }
-.tf-flow-detail-heading > .ant-typography-secondary { font-size: 12px; }
-.tf-flow-instructions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin: 0; }
-.tf-flow-instructions > div { min-width: 0; }
-.tf-flow-instructions dt { margin-bottom: 4px; font-size: 11.5px; font-weight: 500; color: var(--tf-muted); }
-.tf-flow-instructions dd { margin: 0; font-size: 12.5px; line-height: 1.55; }
-.tf-flow-actions { align-items: center; }
-.tf-flow-actions > .ant-typography { font-size: 12px; }
-.tf-flow-footnotes { display: grid; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--tf-divider); }
-.tf-flow-footnotes .ant-typography { margin: 0; font-size: 12px; }
-.tf-flow-footnotes .ant-btn { padding-inline: 0; flex: none; }
-.tf-flow-rules { display: grid; gap: 8px; }
-@media (max-width: 1279px) {
-  .tf-flow-map { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-  .tf-flow-map > li::after { display: none; }
-}
-@media (max-width: 767px) {
-  .tf-flow-guide .ant-card-head { padding: 16px; }
-  .tf-flow-guide .ant-card-body { padding: 16px; }
-  .tf-flow-map { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-  .tf-flow-map > li:last-child { grid-column: 1 / -1; }
-  .tf-flow-node.ant-btn { min-height: 76px; gap: 4px; padding: 8px; }
-  .tf-flow-map > li:last-child .tf-flow-node { flex-direction: row; gap: 8px; min-height: 48px; }
-  .tf-flow-detail { margin-top: 16px; padding: 16px; gap: 16px; }
-  .tf-flow-instructions { grid-template-columns: minmax(0, 1fr); gap: 16px; }
-  .tf-flow-instructions dt { margin-bottom: 4px; }
-  .tf-flow-actions > .ant-typography { width: 100%; }
-}
+.tf-overview-stages { display: grid; gap: 0; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.tf-overview-stages > li { display: grid; grid-template-columns: minmax(116px, auto) minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 4px 2px; border-bottom: 1px solid var(--tf-divider); }
+.tf-overview-stages > li:last-child { border-bottom: 0; }
+.tf-overview-stage-counts { display: flex; justify-content: safe flex-end; gap: 4px; overflow-x: auto; scrollbar-width: thin; }
+.tf-overview-stage-counts .ant-tag { margin-inline-end: 0; }
+.tf-overview-stage-link.ant-btn { justify-self: start; font-weight: 600; }

@@ -23,6 +23,11 @@
 .tf-jira-intake-preview-footer { margin-top: 16px; }
 .tf-jira-intake-preview-footer > .ant-typography-secondary { font-size: 12px; }
 .tf-jira-intake-source { display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; }
+.tf-jira-intake--requirements .tf-jira-intake-content { gap: 14px; }
+.tf-jira-intake--requirements .tf-jira-intake-results .ant-list-item { padding-block: 8px; }
+.tf-jira-intake--requirements .tf-jira-intake-option { flex: 1; gap: 4px; }
+.tf-jira-intake--requirements .tf-jira-intake-option-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-jira-intake--requirements .tf-jira-intake-results .ant-pagination { justify-self: end; }
 @media (max-width: 639px) {
   .tf-jira-intake .ant-drawer-footer > .ant-flex { align-items: center; }
   .tf-jira-intake .ant-drawer-footer .ant-space { flex-wrap: wrap; justify-content: flex-end; }

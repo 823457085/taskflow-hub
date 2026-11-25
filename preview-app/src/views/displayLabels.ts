@@ -1,4 +1,4 @@
-import type { AssetKind, ExecutionMode, Finding, Role, Stage, TaskStatus, WorkTask } from './workspaceApi.ts';
+import type { AssetKind, ExecutionMode, Finding, FindingCategory, RiskLevel, Role, Stage, TaskStatus, WorkTask } from './workspaceApi.ts';
 
 const TASK_STATUS_MAP: Record<TaskStatus, string> = {
   OPEN: '待开始',
@@ -16,6 +16,7 @@ const TASK_TYPE_MAP: Record<WorkTask['type'], string> = {
 
 const STAGE_MAP: Record<Stage, string> = {
   PRD: '需求评审',
+  TASK_BREAKDOWN: '任务拆分审核',
   TECH_SPEC: '技术方案审核',
   CODE_REVIEW: '代码审核',
   TEST_CASE: '测试用例评审',
@@ -33,6 +34,7 @@ const ASSET_KIND_MAP: Record<AssetKind, string> = {
 const REVIEW_STATUS_MAP: Record<string, string> = {
   PENDING: '待提交报告',
   AWAITING_CONFIGURATION: '待配置执行器',
+  AWAITING_CLOUD_AI: '待云端 AI 执行',
   AWAITING_REVIEW: '待人工评审',
   AWAITING_REPORT: '待提交报告',
   REPORT_SUBMITTED: '待审批',
@@ -62,9 +64,9 @@ const REPORT_SOURCE_MAP: Record<string, string> = {
 };
 
 const SEVERITY_MAP: Record<Finding['severity'], string> = {
-  CRITICAL: '阻断问题',
-  WARN: '风险提醒',
-  INFO: '改进建议',
+  CRITICAL: 'P0 阻断问题',
+  WARN: 'P1 需跟进',
+  INFO: 'P2 改进建议',
 };
 
 const GATE_STATUS_MAP: Record<string, string> = {
@@ -158,6 +160,7 @@ const MR_STATE_MAP: Record<string, string> = {
 
 const PERSONA_MAP: Record<string, string> = {
   'ai-pm': 'AI 产品经理',
+  'ai-delivery-lead': 'AI 交付负责人',
   'ai-architect': 'AI 架构师',
   'ai-reviewer': 'AI 代码审查员',
   'ai-qa': 'AI 测试工程师',
@@ -168,6 +171,8 @@ const PERSONA_MAP: Record<string, string> = {
 const SKILL_MAP: Record<string, string> = {
   'prd-completeness-audit': '需求完整性核查',
   'state-machine-validator': '状态机流转校验',
+  'requirement-coverage-map': '需求点覆盖映射',
+  'subtask-granularity-check': '子任务粒度与依赖核查',
   'prd-techspec-align': '需求与技术方案对齐',
   'golden-contract-extractor': '核心接口契约提取',
   'cross-repo-contract-diff': '跨仓契约与改动比对',
@@ -217,6 +222,10 @@ export const REJECTION_REASON_PRESETS: readonly string[] = [
 ];
 
 export const REPORT_SUMMARY_PRESETS: Record<Stage, readonly string[]> = {
+  TASK_BREAKDOWN: [
+    '研发任务承接需求范围，子任务覆盖全部需求点，粒度与依赖合理。',
+    '子任务拆分基本完整，建议补充联调 / 自测子任务并明确计划。',
+  ],
   PRD: [
     '已核对业务目标、状态机流转与验收标准，边界清晰，无阻断问题。',
     '需求主流程完整，建议补充极端异常提示文案说明。',
@@ -245,6 +254,27 @@ export const WAIVER_REASON_PRESETS: readonly string[] = [
   '仅影响内部低频管理路径，已确认应急回滚步骤，同意本轮豁免',
 ];
 
+const FINDING_CATEGORY_MAP: Record<FindingCategory, string> = {
+  CORRECTNESS: '逻辑正确性',
+  SECURITY: '安全合规',
+  SPEC_ALIGN: '需求对齐',
+  CONTRACT: '接口契约',
+  TESTS: '测试覆盖',
+  MAINTAINABILITY: '可维护性',
+};
+
+const RISK_LEVEL_MAP: Record<RiskLevel, string> = {
+  low: '低风险',
+  medium: '中风险',
+  high: '高风险',
+};
+
+export const findingCategoryLabel = (category?: string | null): string =>
+  category ? FINDING_CATEGORY_MAP[category as FindingCategory] || category : '';
+
+export const riskLevelLabel = (risk?: string | null): string =>
+  risk ? RISK_LEVEL_MAP[risk as RiskLevel] || risk : '';
+
 export const taskStatusLabel = (status?: string | null): string =>
   status ? TASK_STATUS_MAP[status as TaskStatus] || status : '—';
 
@@ -263,8 +293,27 @@ export const reviewStatusLabel = (status?: string | null): string =>
 export const decisionLabel = (decision?: string | null): string =>
   decision ? DECISION_MAP[decision] || decision : '—';
 
-export const executionModeLabel = (mode?: string | null): string =>
-  mode ? EXECUTION_MODE_MAP[mode as ExecutionMode] || mode : '—';
+export const executionModeLabel = (mode?: string | null, cloudConfigured = false): string => {
+  if (!mode) return '—';
+  if (mode === 'CLOUD_AI' && cloudConfigured) return '云端 AI 自动评审';
+  return EXECUTION_MODE_MAP[mode as ExecutionMode] || mode;
+};
+
+export const imChannelLabel = (channel?: string | null): string => ({
+  feishu: '飞书机器人',
+  dingtalk: '钉钉机器人',
+  wecom: '企业微信机器人',
+  generic: '通用 Webhook',
+}[channel || ''] || channel || '—');
+
+export const webhookProviderLabel = (provider?: string | null): string => ({
+  gitlab: 'GitLab Webhook',
+  confluence: 'Confluence Webhook',
+  generic: '通用文档 / 流水线 Webhook',
+}[provider || ''] || provider || '—');
+
+export const pluginStatusLabel = (status?: string | null): string =>
+  status === 'EXECUTABLE_DECLARATIVE' ? '可执行规则引擎' : '快照与 AI 注入生效';
 
 export const reportSourceLabel = (source?: string | null): string =>
   source ? REPORT_SOURCE_MAP[source] || source : '—';
@@ -333,7 +382,7 @@ export const mcpToolLabel = (tool?: string | null): string =>
   tool ? MCP_TOOL_MAP[tool] || tool : '—';
 
 export const REPORT_TOOL_OPTIONS: { value: string; label: string }[] = (
-  ['codex-cli', 'codex', 'custom', 'cursor', 'claude-code'] as const
+  ['codex-cli', 'codex', 'antigravity', 'cursor', 'claude-code', 'custom'] as const
 ).map(value => ({ value, label: TOOL_MAP[value] }));
 
 export const gitBranchLabel = (branch?: string | null): string => {

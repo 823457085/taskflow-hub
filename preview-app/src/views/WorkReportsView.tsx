@@ -1,8 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Collapse, Empty, Flex, Input, Select, Space, Spin, Tag, Typography } from 'antd';
+import { App, Button, Card, Empty, Flex, Input, Pagination, Select, Space, Spin, Tag, Typography } from 'antd';
 import { ChevronLeft, ChevronRight, Copy, RefreshCw } from 'lucide-react';
 import { api, ApiError, Project, ProjectMember, User } from './workspaceApi';
+import { readProjectRecords } from './readProjectRecords';
 import { openTaskRoute } from './workspaceNavigation';
+import { progressSourceLabel } from './displayLabels';
+import { LinkifiedText } from './MarkdownPreview';
+import './WorkspaceRecords.css';
 
 type Section = 'completed' | 'doing' | 'review' | 'blocked' | 'todo';
 export interface ReportItem {
@@ -17,8 +21,9 @@ export interface MemberReport {
 export interface WorkReport { projectId: string; date: string; scope: 'member' | 'team'; generatedAt: string; canViewOthers: boolean; members: MemberReport[] }
 
 const TEAM = '__team__';
+const PAGE_SIZE = 8;
 const SECTIONS: Section[] = ['completed', 'doing', 'review', 'blocked', 'todo'];
-const SECTION_LABELS: Record<Section, string> = { completed: '今天已完成', doing: '正在进行', review: '需要确认', blocked: '卡住了，需要处理', todo: '接下来要做' };
+const SECTION_LABELS: Record<Section, string> = { completed: '当日完成', doing: '正在进行', review: '需要确认', blocked: '受阻', todo: '待开始' };
 const SECTION_COLORS: Record<Section, string> = { completed: 'success', doing: 'processing', review: 'purple', blocked: 'error', todo: 'default' };
 const SOURCE_LABELS: Record<ReportItem['source'], string> = { task: '任务', todo: '待办', run: 'AI 执行' };
 const localDate = (time = new Date()) => `${time.getFullYear()}-${String(time.getMonth() + 1).padStart(2, '0')}-${String(time.getDate()).padStart(2, '0')}`;
@@ -39,7 +44,7 @@ export function reportText(report: WorkReport, projectKey: string) {
     }
     if (progress.length) {
       empty = false;
-      lines.push('今日进展');
+      lines.push('当日进展');
       for (const entry of progress) lines.push(`- ${entry.jiraKey} ${entry.summary.split(/\r?\n/)[0]}（${entry.progress}%）`);
     }
     if (empty) lines.push('暂无记录');
@@ -59,42 +64,66 @@ const MemberSections: React.FC<{ report: MemberReport }> = ({ report }) => {
   const filled = SECTIONS.filter(name => report.counts[name]);
   if (!filled.length && !report.progress.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这一天没有任务、待办或 AI 执行记录。" />;
   return (
-    <Flex vertical gap={16}>
+    <div className="tf-report-sections">
       {filled.map(name => (
-        <div key={name}>
-          <Space size={8} style={{ marginBottom: 6 }}><Tag color={SECTION_COLORS[name]}>{SECTION_LABELS[name]}</Tag><Typography.Text type="secondary">{report.counts[name]} 项</Typography.Text></Space>
-          <Flex vertical gap={4}>
+        <section className="tf-report-section" key={name}>
+          <Space size={[8, 4]} wrap><Tag color={SECTION_COLORS[name]}>{SECTION_LABELS[name]}</Tag><Typography.Text type="secondary">{report.counts[name]} 项</Typography.Text></Space>
+          <Flex vertical gap={8}>
             {report.sections[name].map(item => (
-              <Flex key={`${item.source}:${item.id}`} gap={8} align="baseline" wrap>
-                <Tag bordered={false}>{item.personal ? '个人待办' : SOURCE_LABELS[item.source]}</Tag>
-                {item.taskId ? <Typography.Link onClick={() => openTaskRoute(item.taskId!, { from: 'reports' })}>{itemLine(item)}</Typography.Link> : <Typography.Text>{itemLine(item)}</Typography.Text>}
-                {item.priority === 'high' ? <Tag color="red">高</Tag> : null}
-                {item.detail ? <Typography.Text type="secondary" ellipsis style={{ maxWidth: 520 }}>{item.detail}</Typography.Text> : null}
+              <Flex key={`${item.source}:${item.id}`} vertical gap={2}>
+                <Flex gap="4px 8px" align="baseline" wrap>
+                  <Typography.Text type="secondary">{item.personal ? '个人待办' : SOURCE_LABELS[item.source]}</Typography.Text>
+                  {item.taskId ? <Button size="small" type="link" className="tf-reading-title" onClick={() => openTaskRoute(item.taskId!, { from: 'reports' })}>{itemLine(item)}</Button> : <Typography.Text>{itemLine(item)}</Typography.Text>}
+                  {item.priority === 'high' ? <Tag color="red">高</Tag> : null}
+                </Flex>
+                {item.detail ? <Typography.Text type="secondary" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><LinkifiedText text={item.detail} /></Typography.Text> : null}
               </Flex>
             ))}
             {report.counts[name] > report.sections[name].length ? <Typography.Text type="secondary">另有 {report.counts[name] - report.sections[name].length} 项未列出</Typography.Text> : null}
           </Flex>
-        </div>
+        </section>
       ))}
       {report.progress.length ? (
-        <div>
-          <Space size={8} style={{ marginBottom: 6 }}><Tag color="cyan">今日进展</Tag><Typography.Text type="secondary">本机 AI 通过 MCP 回报</Typography.Text></Space>
-          <Flex vertical gap={4}>
+        <section className="tf-report-section tf-report-progress">
+          <Typography.Title level={5}>当日进展</Typography.Title>
+          <Flex vertical gap={8}>
             {report.progress.map(entry => (
-              <Flex key={entry.id} gap={8} align="baseline" wrap>
-                <Typography.Link onClick={() => openTaskRoute(entry.taskId, { tab: 'activity', from: 'reports' })}>{entry.jiraKey}</Typography.Link>
-                <Typography.Text>{entry.summary.split(/\r?\n/)[0]}</Typography.Text>
-                <Typography.Text type="secondary">{entry.progress}% · {entry.tool} · {new Date(entry.createdAt).toLocaleTimeString()}</Typography.Text>
+              <Flex key={entry.id} vertical gap={2}>
+                <Space size={[8, 4]} wrap>
+                  <Button size="small" type="link" className="tf-reading-title" onClick={() => openTaskRoute(entry.taskId, { tab: 'activity', from: 'reports' })}>{entry.jiraKey}</Button>
+                  <Typography.Text type="secondary">{entry.progress}% · {progressSourceLabel(entry.tool)} · {new Date(entry.createdAt).toLocaleTimeString()}</Typography.Text>
+                </Space>
+                <Typography.Text style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}><LinkifiedText text={entry.summary} /></Typography.Text>
               </Flex>
             ))}
           </Flex>
-        </div>
+        </section>
       ) : null}
-    </Flex>
+    </div>
   );
 };
 
-const countTags = (report: MemberReport) => SECTIONS.filter(name => report.counts[name]).map(name => <Tag key={name} color={SECTION_COLORS[name]}>{SECTION_LABELS[name]} {report.counts[name]}</Tag>);
+const hasRecords = (report: MemberReport) => SECTIONS.some(name => report.counts[name]) || report.progress.length > 0;
+
+function uniquePersonalTodos(reports: WorkReport[]): WorkReport[] {
+  const personalIds = new Set<string>();
+  return reports.map(report => ({
+    ...report,
+    members: report.members.map(member => {
+      const counts = { ...member.counts };
+      const sections = { ...member.sections };
+      for (const name of SECTIONS) {
+        sections[name] = sections[name].filter(item => {
+          if (!item.personal) return true;
+          if (personalIds.has(item.id)) { counts[name] -= 1; return false; }
+          personalIds.add(item.id);
+          return true;
+        });
+      }
+      return { ...member, counts, sections };
+    }),
+  }));
+}
 
 export const WorkReportsView: React.FC<{
   user: User; projects: Project[]; projectId: string; members: ProjectMember[]; canViewOthers: boolean; onUnauthorized: () => void;
@@ -102,72 +131,89 @@ export const WorkReportsView: React.FC<{
   const { message } = App.useApp();
   const [date, setDate] = useState(localDate);
   const [target, setTarget] = useState(user.id);
-  const [report, setReport] = useState<WorkReport | null>(null);
+  const [reports, setReports] = useState<WorkReport[]>([]);
   const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(1);
   const sequence = useRef(0);
-  const projectKey = projects.find(project => project.id === projectId)?.key || projectId;
+  const canViewTeam = projectId ? canViewOthers : projects.some(project => project.permissions?.assignTasks);
+  const selectedTarget = (target === TEAM && canViewTeam) || (projectId && canViewOthers && members.some(member => member.id === target)) ? target : user.id;
+  const projectKey = (id: string) => projects.find(project => project.id === id)?.key || id;
 
   const refresh = async () => {
-    if (!projectId) { setReport(null); return; }
     const request = ++sequence.current;
     setLoading(true);
-    const query = new URLSearchParams({ projectId, date, tzOffset: String(-new Date().getTimezoneOffset()) });
-    if (target === TEAM) query.set('scope', 'team'); else if (target !== user.id) query.set('memberId', target);
     try {
-      const data = await api<{ report: WorkReport }>(`work-reports?${query}`);
-      if (request === sequence.current) setReport(data.report);
+      const results = await readProjectRecords(projectId ? [projectId] : projects.map(project => project.id), async id => {
+        const query = new URLSearchParams({ projectId: id, date, tzOffset: String(-new Date().getTimezoneOffset()) });
+        const canReadProjectTeam = projectId ? canViewOthers : projects.find(project => project.id === id)?.permissions?.assignTasks;
+        if (selectedTarget === TEAM && canReadProjectTeam) query.set('scope', 'team');
+        else if (selectedTarget !== TEAM && selectedTarget !== user.id) query.set('memberId', selectedTarget);
+        return (await api<{ report: WorkReport }>(`work-reports?${query}`)).report;
+      });
+      if (request === sequence.current) setReports(projectId ? results : uniquePersonalTodos(results));
     } catch (error) {
       if (request !== sequence.current) return;
       if (error instanceof ApiError && error.status === 401) { onUnauthorized(); return; }
-      setReport(null);
+      setReports([]);
       void message.error(error instanceof Error ? error.message : '报告生成失败。');
     } finally { if (request === sequence.current) setLoading(false); }
   };
-  useEffect(() => { setReport(null); void refresh(); }, [projectId, date, target, user.id]);
-  useEffect(() => { if (!canViewOthers) setTarget(user.id); }, [canViewOthers, user.id]);
+  useEffect(() => { setReports([]); setPage(1); void refresh(); return () => { sequence.current += 1; }; }, [projectId, projects, date, selectedTarget, user.id]);
+  useEffect(() => { if (!canViewTeam) setTarget(user.id); }, [canViewTeam, user.id]);
 
+  const shownReports = projectId ? reports : reports.filter(report => report.members.some(hasRecords));
+  const cards = shownReports.flatMap(report => {
+    const visible = report.scope === 'team' || !projectId ? report.members.filter(hasRecords) : report.members;
+    return visible.map(item => ({ projectId: report.projectId, item }));
+  });
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(cards.length / PAGE_SIZE)));
+  const visibleCards = projectId ? cards : cards.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const membersWithoutRecords = projectId && reports[0]?.scope === 'team' ? reports[0].members.filter(item => !hasRecords(item)) : [];
   const copy = async () => {
-    if (!report) return;
-    try { await copyText(reportText(report, projectKey)); void message.success('日报已复制，可以直接粘贴到群里。'); }
+    if (!shownReports.length) return;
+    try { await copyText(shownReports.map(report => reportText(report, projectKey(report.projectId))).join('\n\n')); void message.success('日报已复制，可以直接粘贴到群里。'); }
     catch (error) { void message.error(error instanceof Error ? error.message : '复制失败。'); }
   };
   const today = localDate();
   const targetOptions = [
     { value: user.id, label: `${user.username}（我）` },
-    ...members.filter(member => member.id !== user.id).map(member => ({ value: member.id, label: member.username })),
+    ...(projectId ? members.filter(member => member.id !== user.id).map(member => ({ value: member.id, label: member.username })) : []),
     { value: TEAM, label: '全员汇总' },
   ];
 
   return (
-    <Flex vertical gap={16}>
-      <Card size="small">
-        <Flex gap={12} align="center" wrap justify="space-between">
-          <Space wrap>
+    <div className="tf-record-workspace">
+      <div className="tf-record-toolbar">
+        <div className="tf-record-filters tf-report-filters">
+          <Space.Compact>
             <Button aria-label="前一天" icon={<ChevronLeft size={14} />} onClick={() => setDate(shiftDate(date, -1))} />
-            <Input type="date" aria-label="报告日期" value={date} max={today} onChange={event => event.target.value && setDate(event.target.value)} style={{ width: 160 }} />
+            <Input type="date" aria-label="报告日期" title="完成与进展按所选日期统计，其余栏目显示当前状态" value={date} max={today} onChange={event => event.target.value && setDate(event.target.value)} style={{ width: 160 }} />
             <Button aria-label="后一天" icon={<ChevronRight size={14} />} disabled={date >= today} onClick={() => setDate(shiftDate(date, 1))} />
+          </Space.Compact>
+          <div className="tf-record-filters">
             {date !== today ? <Button onClick={() => setDate(today)}>回到今天</Button> : null}
-            {canViewOthers ? <Select aria-label="报告对象" value={target} onChange={setTarget} options={targetOptions} style={{ minWidth: 160 }} /> : null}
-          </Space>
-          <Space>
-            <Button icon={<RefreshCw size={14} />} loading={loading} onClick={() => void refresh()}>刷新</Button>
-            <Button type="primary" icon={<Copy size={14} />} disabled={!report} onClick={() => void copy()}>复制为文本</Button>
-          </Space>
-        </Flex>
-        <Typography.Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
-          根据任务、待办、本机 AI 执行记录和 MCP 回报的进展自动生成。“今天已完成”和“今日进展”按所选日期统计；进行中、待确认和待处理是当前状态。个人待办只出现在本人的报告里。
-          {canViewOthers ? '' : '项目负责人、PM 和管理员可以查看其他成员和全员汇总。'}
-        </Typography.Paragraph>
-      </Card>
-      {!projectId ? <Empty description="请先选择项目。" /> : !report ? <Card><Flex justify="center" style={{ padding: 32 }}>{loading ? <Spin /> : <Empty description="暂无报告。" />}</Flex></Card>
-        : report.scope === 'team' ? (
-          <Collapse defaultActiveKey={report.members.filter(item => SECTIONS.some(name => item.counts[name]) || item.progress.length).map(item => item.member.id)}
-            items={report.members.map(item => ({ key: item.member.id, label: <Space wrap><Typography.Text strong>{item.member.username}</Typography.Text>{countTags(item)}{!SECTIONS.some(name => item.counts[name]) && !item.progress.length ? <Typography.Text type="secondary">暂无记录</Typography.Text> : null}</Space>, children: <MemberSections report={item} /> }))} />
-        ) : report.members.map(item => (
-          <Card key={item.member.id} title={<Space wrap><span>{item.member.username} · {report.date}</span>{countTags(item)}</Space>}>
-            <MemberSections report={item} />
-          </Card>
-        ))}
-    </Flex>
+            {canViewTeam ? <Select aria-label="报告对象" value={selectedTarget} onChange={setTarget} options={targetOptions} style={{ minWidth: 160 }} /> : null}
+          </div>
+        </div>
+        <div className="tf-record-actions">
+          <Button icon={<RefreshCw size={14} />} loading={loading} aria-label="刷新工作报告" title="刷新工作报告" onClick={() => void refresh()} />
+          <Button type="primary" icon={<Copy size={14} />} disabled={!shownReports.length} onClick={() => void copy()}>复制报告</Button>
+        </div>
+      </div>
+      {!shownReports.length ? (
+        <div className="tf-record-table"><Flex justify="center" style={{ padding: 24 }}>{loading ? <Spin /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无报告" />}</Flex></div>
+      ) : <>
+          {projectId && !reports[0]?.members.length && <Empty description="暂无成员报告。" />}
+          {visibleCards.map(({ projectId: reportProjectId, item }) => (
+            <Card className="tf-report-card" key={reportProjectId + ':' + item.member.id} size="small"
+              title={projectId ? item.member.username : <Space size={6}><Tag>{projectKey(reportProjectId)}</Tag>{item.member.username}</Space>}>
+              <MemberSections report={item} />
+            </Card>
+          ))}
+          {membersWithoutRecords.length > 0 && <Typography.Text type="secondary">暂无记录的成员：{membersWithoutRecords.map(item => item.member.username).join('、')}</Typography.Text>}
+          {!projectId && cards.length > PAGE_SIZE && <Pagination size="small" current={currentPage} onChange={setPage}
+            total={cards.length} pageSize={PAGE_SIZE} showSizeChanger={false} />}
+        </>}
+    </div>
   );
 };

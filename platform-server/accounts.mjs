@@ -3,12 +3,19 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'n
 import { dirname, resolve } from 'node:path';
 import { fail, textField } from './common.mjs';
 
-export const ACCOUNT_PROVIDERS = ['jira', 'confluence', 'gitlab', 'jenkins', 'yunxiao', 'openai', 'anthropic', 'custom-ai'];
+export const ACCOUNT_PROVIDERS = ['jira', 'confluence', 'gitlab', 'github', 'jenkins', 'yunxiao', 'openai', 'anthropic', 'custom-ai'];
 const AI_PROVIDERS = ['openai', 'anthropic', 'custom-ai'];
 const AUTH_MODES = ['BEARER', 'BASIC', 'PRIVATE_TOKEN'];
 const known = (body, fields) => { if (!body || Object.keys(body).some(name => !fields.includes(name))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段'); };
 const providerValue = value => { if (!ACCOUNT_PROVIDERS.includes(value)) fail(400, 'ACCOUNT_PROVIDER_INVALID', '账号平台不受支持'); return value; };
 const expectedVersion = (value, row) => { if (!Number.isInteger(value) || value < 1) fail(400, 'EXPECTED_VERSION_REQUIRED', '请提供有效的expectedVersion'); if (value !== row.version) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请刷新后重试'); };
+
+export function validateGithubConnection(base, mode, allowLoopbackHttp) {
+  if (mode !== 'BEARER') fail(400, 'INVALID_AUTH_MODE', 'GitHub 仅支持 Bearer 访问令牌');
+  if (base === 'https://api.github.com') return;
+  if (allowLoopbackHttp && /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(base)) return;
+  fail(400, 'INVALID_BASE_URL', 'GitHub 服务地址须为 https://api.github.com');
+}
 
 export function createAccounts({ db, dbPath, transaction, audit, projectRole, visibleProjects, key: injectedKey, allowLoopbackHttp = false }) {
   let encryptionKey = injectedKey;
@@ -67,8 +74,26 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     if (!row.enabled) fail(409, 'ACCOUNT_DISABLED', '所选账号已停用，请重新选择');
     return row;
   }
+  function resolvePersonalAccount(user, id, provider) {
+    assertDevice(user); providerValue(provider);
+    const row = stored(textField(id, 'accountId', { max: 64 }));
+    if (!row) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
+    if (row.scope === 'PROJECT') {
+      access(user, row);
+      fail(403, 'PERSONAL_ACCOUNT_REQUIRED', '仅个人账号支持按本人平台权限同步可见项目');
+    }
+    if (row.owner_id !== user.id) fail(404, 'ACCOUNT_NOT_FOUND', '账号不存在或无权访问');
+    if (row.provider !== provider) fail(400, 'ACCOUNT_PROVIDER_MISMATCH', '所选账号与当前平台不匹配');
+    if (!row.enabled) fail(409, 'ACCOUNT_DISABLED', '所选账号已停用，请重新选择');
+    return row;
+  }
   function revalidateSelection(user, row, projectId, provider) {
     const current = resolveAccount(user, row.id, projectId, provider);
+    if (current.version !== row.version) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
+    return current;
+  }
+  function revalidatePersonalAccount(user, row, provider) {
+    const current = resolvePersonalAccount(user, row.id, provider);
     if (current.version !== row.version) fail(409, 'ACCOUNT_CHANGED', '账号配置已变化，请重新读取');
     return current;
   }
@@ -113,7 +138,8 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     if (AI_PROVIDERS.includes(provider)) fail(409, 'ACCOUNT_VERIFICATION_UNSUPPORTED', 'AI账号仅支持保存，执行器和验证尚未接入');
     if (!['CONNECTED', 'ERROR'].includes(status)) fail(400, 'INVALID_INPUT', '账号验证状态不受支持');
     transaction(() => {
-      revalidateSelection(user, row, projectId, provider);
+      if (projectId) revalidateSelection(user, row, projectId, provider);
+      else revalidatePersonalAccount(user, row, provider);
       let safeError = typeof error === 'string' ? error : null;
       if (safeError) {
         const credential = getCredential(row);
@@ -128,7 +154,7 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     assertDevice(user); const actorId = user.id;
     const fresh = () => { if (reauthorize) user = reauthorize(); if (user.id !== actorId) fail(401, 'UNAUTHENTICATED', '登录已失效'); assertDevice(user); return user; };
     fresh();
-    if (/^\/api\/accounts\/[A-Za-z0-9_-]{1,64}\/test$/.test(path)) return false;
+    if (/^\/api\/accounts\/[A-Za-z0-9_-]{1,64}\/(?:test|sync-jira-projects)$/.test(path)) return false;
     if (path === '/api/accounts') {
       if (method === 'GET') { send(200, listAccounts(user, { projectId: url.searchParams.get('projectId') || undefined, provider: url.searchParams.get('provider') || undefined })); return true; }
       if (method !== 'POST') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持GET或POST');
@@ -140,6 +166,7 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
       if (projectId && !['ADMIN', 'LEAD'].includes(projectRole(user, projectId))) fail(403, 'ACCOUNT_FORBIDDEN', '只有项目负责人或管理员可管理项目共享账号');
       const now = new Date().toISOString(); const row = { id: randomUUID(), provider, name: textField(body.name, 'name', { max: 100 }), scope, owner_id: user.id, project_id: projectId, base_url: baseUrl(body.baseUrl), auth_mode: body.authMode, organization_id: organization(body) };
       accountMode(provider, row.auth_mode);
+      if (provider === 'github') validateGithubConnection(row.base_url, row.auth_mode, allowLoopbackHttp);
       const credential = encrypt(row, credentialValues(body, null, row.base_url, row.auth_mode));
       transaction(() => { fresh(); if (projectId) access(user, row, true); db.prepare('INSERT INTO external_accounts (id,provider,name,scope,owner_id,project_id,base_url,auth_mode,credential,organization_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)').run(row.id, row.provider, row.name, row.scope, row.owner_id, row.project_id, row.base_url, row.auth_mode, credential, row.organization_id, now, now); audit(user.id, 'ACCOUNT_CREATE', row.id, projectId); });
       send(201, { account: metadata(user, stored(row.id)) }); return true;
@@ -174,11 +201,12 @@ export function createAccounts({ db, dbPath, transaction, audit, projectRole, vi
     if (body.enabled !== undefined && typeof body.enabled !== 'boolean') fail(400, 'INVALID_INPUT', 'enabled必须是布尔值');
     const nextBase = body.baseUrl === undefined ? row.base_url : baseUrl(body.baseUrl); const nextMode = body.authMode === undefined ? row.auth_mode : body.authMode;
     accountMode(row.provider, nextMode);
+    if (row.provider === 'github') validateGithubConnection(nextBase, nextMode, allowLoopbackHttp);
     const credentialChanged = ['token', 'username', 'baseUrl', 'authMode', 'organizationId'].some(name => body[name] !== undefined);
     const sealed = credentialChanged ? encrypt(row, credentialValues(body, row, nextBase, nextMode)) : row.credential;
     const nextName = body.name === undefined ? row.name : textField(body.name, 'name', { max: 100 }); const nextOrg = organization(body, row.organization_id);
     transaction(() => { fresh(); const current = access(user, stored(row.id), true); expectedVersion(body.expectedVersion, current); db.prepare('UPDATE external_accounts SET name=?,base_url=?,auth_mode=?,credential=?,organization_id=?,enabled=?,version=version+1,status=?,updated_at=?,last_checked_at=?,last_error=? WHERE id=?').run(nextName, nextBase, nextMode, sealed, nextOrg, body.enabled === undefined ? row.enabled : Number(body.enabled), credentialChanged ? 'CONFIGURED' : row.status, new Date().toISOString(), credentialChanged ? null : row.last_checked_at, credentialChanged ? null : row.last_error, row.id); audit(user.id, 'ACCOUNT_UPDATE', row.id, row.project_id); });
     send(200, { account: metadata(user, stored(row.id)) }); return true;
   }
-  return { handle, listAccounts, resolveAccount, resolveSelection, revalidateSelection, getCredential, recordCheck };
+  return { handle, listAccounts, resolveAccount, resolvePersonalAccount, resolveSelection, revalidateSelection, revalidatePersonalAccount, getCredential, recordCheck };
 }

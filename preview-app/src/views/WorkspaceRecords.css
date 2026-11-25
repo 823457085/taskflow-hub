@@ -1,0 +1,95 @@
+.tf-record-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+}
+.tf-record-toolbar, .tf-record-filters, .tf-record-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tf-record-toolbar { justify-content: space-between; flex-wrap: wrap; column-gap: 12px; }
+.tf-record-filters { max-width: 100%; flex-wrap: wrap; }
+.tf-record-actions { margin-inline-start: auto; max-width: 100%; flex-wrap: wrap; justify-content: flex-end; }
+.tf-record-actions > .ant-btn { flex-shrink: 0; }
+.tf-record-table, .tf-record-environments, .tf-knowledge-reader {
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-card-radius);
+  min-width: 0;
+}
+.tf-record-table, .tf-knowledge-reader { overflow: clip; }
+.tf-record-workspace .ant-card { box-shadow: none; }
+.tf-record-workspace .ant-table { background: var(--tf-surface); }
+.tf-record-workspace .ant-table-thead > tr > th { background: var(--tf-raised); color: var(--tf-secondary); font-size: 12px; }
+.tf-record-workspace .ant-table-tbody > tr > td { padding-block: 10px; }
+.tf-record-workspace .ant-table-pagination { margin-inline: 12px; }
+.tf-record-workspace .ant-table-placeholder .ant-empty { margin-block: 24px; }
+.tf-record-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--tf-divider);
+}
+.tf-record-composer-meta { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.tf-record-composer--project { grid-template-columns: minmax(0, 180px) minmax(0, 1fr) auto; }
+@media (max-width: 600px) {
+  .tf-record-composer--project { grid-template-columns: minmax(0, 1fr) auto; }
+  .tf-record-composer--project > .ant-select { grid-column: 1 / -1; }
+}
+.tf-record-composer-meta .ant-tag { max-width: 100%; margin: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.tf-record-environments { display: flex; overflow-x: auto; scrollbar-width: thin; }
+.tf-record-env {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1 0 200px;
+  gap: 5px;
+  padding: 12px 15px;
+  color: var(--tf-text);
+}
+.tf-record-env + .tf-record-env { border-inline-start: 1px solid var(--tf-divider); }
+.tf-record-env-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tf-record-env-header > strong, .tf-record-env-service { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tf-record-env-header > .ant-tag { margin: 0; flex-shrink: 0; }
+.tf-record-env-meta { color: var(--tf-muted); font-size: 11.5px; white-space: nowrap; }
+
+.tf-knowledge-filters { flex: 1 1 340px; }
+.tf-knowledge-search { flex: 1 0 160px; max-width: 320px; }
+.tf-knowledge-reader.tf-reading-layout {
+  grid-template-columns: minmax(230px, .38fr) minmax(0, 1fr);
+  gap: 0;
+  align-items: stretch;
+}
+.tf-knowledge-reader > .ant-table-wrapper { border-inline-end: 1px solid var(--tf-divider); }
+.tf-knowledge-reader > .ant-card { border: 0; border-radius: 0; }
+.tf-knowledge-reader .tf-reading-title { display: block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tf-knowledge-reader .ant-card-head-title > .ant-typography { max-width: 100%; }
+.tf-knowledge-reader .tf-md-preview { margin-top: 0; max-height: none; }
+
+.tf-report-sections { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 20px; }
+.tf-report-section { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.tf-report-section > .ant-typography { margin: 0; }
+.tf-report-section > .ant-flex { max-height: 220px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; }
+.tf-report-section .tf-reading-title.ant-btn { height: auto; padding-inline: 0; white-space: normal; }
+.tf-report-section .tf-reading-title > span { overflow-wrap: anywhere; }
+.tf-report-progress { grid-column: 1 / -1; border-top: 1px solid var(--tf-divider); padding-top: 10px; }
+
+@media (min-width: 921px) {
+  .tf-knowledge-reader > .ant-card > .ant-card-body { max-height: max(310px, calc(100dvh - 228px)); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+}
+@media (max-width: 920px) {
+  .tf-knowledge-reader.tf-reading-layout { grid-template-columns: minmax(0, 1fr); }
+  .tf-knowledge-reader > .ant-table-wrapper { border-inline-end: 0; border-bottom: 1px solid var(--tf-divider); }
+  .tf-knowledge-reader .ant-table-body { max-height: 25dvh !important; }
+  .tf-report-sections { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 540px) {
+  .tf-record-toolbar { column-gap: 8px; }
+  .tf-knowledge-search { flex: 1 1 120px; max-width: none; }
+  .tf-report-filters > .ant-space-compact > .ant-input { width: 138px !important; }
+  .tf-report-sections { grid-template-columns: minmax(0, 1fr); }
+}

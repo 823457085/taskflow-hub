@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canQuickApproveReview, isTaskFrozen } from '../preview-app/src/views/taskAvailability.ts';
+import { canQuickApproveReview, isTaskFrozen, requiresTaskReview } from '../preview-app/src/views/taskAvailability.ts';
 
 const node = (id, status = 'OPEN', parentId = null) => ({ id, status, parentId });
 
@@ -91,4 +91,22 @@ test('canQuickApproveReview enforces independence/soloMode, role, critical findi
     snapshot: { upstreamApprovals: [{ stage: 'PRD', status: 'PASS' }, { stage: 'TECH_SPEC', status: 'PASS' }, { stage: 'CODE_REVIEW', status: 'PASS' }, { stage: 'TEST_CASE', status: 'PASS' }] },
   };
   assert.equal(canQuickApproveReview(readyRelease, activeTask, tasks, { id: 'sre-1' }, 'SRE'), true);
+});
+
+test('main tasks own reviews and Jira subtasks only supply linked context', () => {
+  const jiraMain = { ...node('VMS-748'), externalRef: { provider: 'jira', parentKey: 'VMS-747', issueType: { subtask: false } } };
+  const jiraOrphan = { ...node('VMS-750'), externalRef: { provider: 'jira', parentKey: 'VMS-748', issueType: { subtask: true } } };
+  const linkedChild = node('VMS-800', 'OPEN', 'VMS-748');
+
+  assert.equal(requiresTaskReview(jiraMain, 'PRD'), true);
+  assert.equal(requiresTaskReview(jiraMain, 'TASK_BREAKDOWN'), false);
+  assert.equal(requiresTaskReview(node('local'), 'TASK_BREAKDOWN'), true);
+  assert.equal(requiresTaskReview(linkedChild, 'PRD'), false);
+  assert.equal(requiresTaskReview(jiraOrphan, 'PRD'), false);
+
+  const reportJob = { stage: 'PRD', report: { actorId: 'author' }, findings: [] };
+  const approver = { id: 'lead' };
+  assert.equal(canQuickApproveReview(reportJob, jiraMain, [jiraMain], approver, 'LEAD'), true);
+  assert.equal(canQuickApproveReview({ ...reportJob, reviewRequired: false }, jiraMain, [jiraMain], approver, 'LEAD'), false);
+  assert.equal(canQuickApproveReview(reportJob, linkedChild, [jiraMain, linkedChild], approver, 'LEAD'), false);
 });

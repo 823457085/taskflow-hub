@@ -102,6 +102,8 @@ test('workbench host requires a TaskFlow handoff and relays only to the signed-i
     assert.equal((await hub.wb('/api/ping')).status, 401);
     assert.equal((await hub.wb('/api/ping', { headers: { Host: 'evil.test' } })).status, 421);
     assert.equal((await hub.wb('/api/ping', { headers: { Host: 'hub.test' } })).status, 421);
+    assert.deepEqual((await hub.call('/api/me', { headers: dev.get })).body.workbench, { enabled: true, mode: 'relay' });
+    assert.deepEqual((await hub.call('/api/me', { token: devDevice.token })).body.workbench, { enabled: false, mode: null });
     assert.equal((await hub.call('/api/workbench/status', { headers: dev.get })).body.url, `https://${WB}/`);
 
     assert.equal((await hub.call('/api/workbench/codes', { method: 'POST', body: { return: '/' }, token: dev.token })).status, 403, 'bearer tokens cannot mint browser sessions');
