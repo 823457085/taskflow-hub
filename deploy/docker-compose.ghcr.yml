@@ -1,0 +1,42 @@
+# 使用 GitHub Actions 自动构建的 GHCR 镜像快速部署任务中心与工作台（支持 amd64 / arm64）
+# 使用方法：
+#   docker compose -f deploy/docker-compose.ghcr.yml pull
+#   docker compose -f deploy/docker-compose.ghcr.yml up -d
+services:
+  taskflow:
+    image: ghcr.io/823457085/taskflow-hub:latest
+    restart: unless-stopped
+    ports:
+      - "5187:5187"
+      - "5189:5189"
+    environment:
+      TASKFLOW_DEPLOYMENT: server
+      TASKFLOW_HOST: 0.0.0.0
+      TASKFLOW_PORT: "5187"
+      TASKFLOW_DB_PATH: /data/platform.sqlite
+      TASKFLOW_WEB_DIR: /app/web
+      TASKFLOW_TRUST_PROXY: "1"
+      # 挂载在 HTTPS 反代后请保持 1；纯内网 HTTP 测试时可改为 0
+      TASKFLOW_COOKIE_SECURE: ${TASKFLOW_COOKIE_SECURE:-1}
+      TASKFLOW_DEVICE_SESSION_HOURS: ${TASKFLOW_DEVICE_SESSION_HOURS:-168}
+      TASKFLOW_BRIDGE_MODES: ${TASKFLOW_BRIDGE_MODES:-read,review,develop}
+      TASKFLOW_SETUP_TOKEN: ${TASKFLOW_SETUP_TOKEN:-}
+    volumes:
+      - taskflow-data:/data
+
+  workbench:
+    image: ghcr.io/823457085/delivery-workspace:latest
+    restart: unless-stopped
+    ports:
+      - "5288:5288"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "5288"
+      DELIVERY_DATA_DIR: /data
+      DELIVERY_SCHEDULER_DISABLED: ${DELIVERY_SCHEDULER_DISABLED:-0}
+    volumes:
+      - workbench-data:/data
+
+volumes:
+  taskflow-data:
+  workbench-data:

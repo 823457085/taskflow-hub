@@ -4,7 +4,9 @@ import { accessSync, constants, existsSync, mkdirSync, realpathSync, statSync, w
 import fsp from 'node:fs/promises';
 import { homedir, platform } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { PassThrough } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 
 const RETRY_MS = 5000;
 const SILENCE_MS = 45_000;
@@ -182,6 +184,22 @@ export function commandResolver({ home = homedir(), env = process.env } = {}) {
   };
 }
 
+function agentControlRequest(url, { method = 'GET', headers, signal, body }) {
+  const target = new URL(url);
+  const request = target.protocol === 'https:' ? httpsRequest : httpRequest;
+  return new Promise((resolve, reject) => {
+    // Use separate connections for the stream and result posts so a long poll cannot hold a result in the fetch pool.
+    const req = request(target, { method, headers: body === undefined ? headers : { ...headers, 'Content-Length': Buffer.byteLength(body) }, signal, agent: false }, response => {
+      const status = response.statusCode;
+      const ok = status >= 200 && status < 300;
+      if (method !== 'GET' || !ok) response.resume();
+      resolve({ status, ok, body: method === 'GET' && ok ? Readable.toWeb(response) : null });
+    });
+    req.once('error', reject);
+    req.end(body);
+  });
+}
+
 /**
  * Personal agent: keeps one streaming connection to the platform and serves the owner's server-side workbench —
  * file access under the user's home (minus credential stores) and AI / developer command lines.
@@ -190,6 +208,7 @@ export function runRemoteAgent({ apiUrl, token, log = () => {}, signal, version 
   home = homedir(), spawnImpl = spawn }) {
   const policy = pathPolicy(home);
   const resolver = commandResolver({ home });
+  const controlRequest = fetchImpl === fetch ? agentControlRequest : fetchImpl;
   const workRoot = join(home, '.taskflow', 'remote-work');
   const auth = { Authorization: `Bearer ${token}` };
   const info = Buffer.from(JSON.stringify({ home: policy.home, platform: platform(), version })).toString('base64url');
@@ -202,8 +221,9 @@ export function runRemoteAgent({ apiUrl, token, log = () => {}, signal, version 
     while (pendingResults.length) {
       const batch = pendingResults.splice(0, 256);
       try {
-        const response = await fetchImpl(`${apiUrl}/api/bridge/remote/results`, { method: 'POST', redirect: 'error', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(batch) });
+        const response = await controlRequest(`${apiUrl}/api/bridge/remote/results`, { method: 'POST', redirect: 'error', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(batch), signal: AbortSignal.timeout(15000) });
         await response.body?.cancel();
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
       } catch (error) { log(`个人 Agent 回传结果失败：${error.message}`); }
     }
     flushing = false;
@@ -300,7 +320,7 @@ export function runRemoteAgent({ apiUrl, token, log = () => {}, signal, version 
       const arm = () => { clearTimeout(watchdog); watchdog = setTimeout(() => controller.abort(), SILENCE_MS); };
       try {
         arm();
-        const response = await fetchImpl(`${apiUrl}/api/bridge/remote/stream?info=${info}`, { headers: auth, redirect: 'error', signal: controller.signal });
+        const response = await controlRequest(`${apiUrl}/api/bridge/remote/stream?info=${info}`, { headers: auth, redirect: 'error', signal: controller.signal });
         if (response.status === 401) { stopped = true; log('个人 Agent 已停止：设备会话已失效或已被撤销，请重新配对'); return; }
         if (response.status === 404) { await response.body?.cancel(); clearTimeout(watchdog); await sleep(60_000); continue; }
         if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);

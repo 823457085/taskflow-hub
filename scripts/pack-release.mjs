@@ -36,8 +36,11 @@ function tarball(base, files, target) {
 
 if (!existsSync(join(out, 'index.html'))) throw new Error('请先构建任务中心网页（preview-app/dist）');
 
-const bridgeFiles = listFiles(root, 'git', ['ls-files', '-z', '-co', '--exclude-standard', '--', 'local-bridge', 'shared/local-client-adapter.mjs', 'shared/local-client-adapter.d.mts'])
-  .filter(file => !file.endsWith('.test.mjs') && !file.includes('/node_modules/') && file !== 'local-bridge/release.json');
+const bridgeFiles = (existsSync(join(root, '.git'))
+  ? listFiles(root, 'git', ['ls-files', '-z', '-co', '--exclude-standard', '--', 'local-bridge', 'shared/local-client-adapter.mjs', 'shared/local-client-adapter.d.mts'])
+  : listFiles(root, 'find', ['local-bridge', 'shared/local-client-adapter.mjs', 'shared/local-client-adapter.d.mts', '-type', 'f', '-print0']))
+  .map(file => file.replace(/^\.\//, ''))
+  .filter(file => !file.endsWith('.test.mjs') && !file.includes('/node_modules/') && !file.endsWith('/.DS_Store') && !/(?:^|\/)\._/.test(file) && file !== 'local-bridge/release.json');
 const bridgeVersion = contentVersion(root, bridgeFiles);
 writeFileSync(join(root, 'local-bridge', 'release.json'), `${JSON.stringify({ version: bridgeVersion }, null, 2)}\n`);
 const release = { createdAt: new Date().toISOString(), bridge: { version: bridgeVersion, ...tarball(root, [...bridgeFiles, 'local-bridge/release.json'], join(out, 'taskflow-bridge.tgz')) } };
