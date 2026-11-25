@@ -6,6 +6,7 @@ import { once } from 'node:events';
 import { createPlatform } from './server.mjs';
 
 async function startMockRemote() {
+  const gitlabToken = randomBytes(24).toString('base64url');
   const state = {
     openaiCalls: [],
     difyCalls: [],
@@ -109,6 +110,11 @@ async function startMockRemote() {
     }
 
     // GitLab mock (user, MR, diffs, discussions, notes)
+    if (url.pathname.startsWith('/gitlab/') && req.headers['private-token'] !== gitlabToken) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ message: 'GitLab fixture authentication failed' }));
+      return;
+    }
     if (url.pathname === '/gitlab/api/v4/user') {
       res.end(JSON.stringify({ id: 7, username: 'gitlab-bot', name: 'GitLab Bot', state: 'active' }));
       return;
@@ -210,6 +216,7 @@ async function startMockRemote() {
   const origin = `http://127.0.0.1:${server.address().port}`;
   return {
     origin,
+    gitlabToken,
     state,
     close: () => new Promise(resolve => server.close(resolve)),
   };
@@ -369,20 +376,26 @@ test('OpenAPI/Apifox contract lint, breaking-change diff, and declarative policy
   assert.ok(precheck.data.findings.some(item => item.title.includes('移除既有接口')));
 });
 
-test('CLOUD_AI executor (OpenAI & Dify), GitLab/Confluence webhooks, MR inline writeback, and IM notifications work end-to-end', async t => {
+test('project-shared GitLab account powers webhook imports and MR writeback alongside cloud reviews and IM notifications', async t => {
   const mock = await startMockRemote();
   const f = await createTestApp(true);
   t.after(async () => { await f.close(); await mock.close(); });
   const { adminToken, devToken, leadToken } = await f.setup();
 
-  // Configure GitLab connector for project default
-  const glConf = await f.req('/api/connectors/gitlab/config', 'POST', {
+  const gitlabAccount = await f.req('/api/accounts', 'POST', {
+    name: 'GitLab project automation',
+    provider: 'gitlab',
+    scope: 'PROJECT',
     projectId: 'default',
     baseUrl: `${mock.origin}/gitlab`,
     authMode: 'PRIVATE_TOKEN',
-    token: 'gl-secret-token-xyz',
+    token: mock.gitlabToken,
   }, adminToken);
-  assert.equal(glConf.status, 200);
+  assert.equal(gitlabAccount.status, 201);
+  assert.ok(!gitlabAccount.text.includes(mock.gitlabToken));
+  const defaults = await f.req('/api/connectors?projectId=default&defaults=1', 'GET', undefined, adminToken);
+  assert.equal(defaults.status, 200);
+  assert.equal(defaults.data.connectors.find(item => item.provider === 'gitlab').hasCredential, false);
 
   // Configure IM webhooks: Feishu & DingTalk (with signing secret) & WeCom
   const feishu = await f.req('/api/projects/default/notifications', 'POST', {
@@ -492,6 +505,10 @@ test('CLOUD_AI executor (OpenAI & Dify), GitLab/Confluence webhooks, MR inline w
   assert.equal(whEvents.data.events[0].status, 'PROCESSED');
 
   // Manual MR writeback with fallback test (force first discussion to 400 -> must fall back into summary note!)
+  const selection = await f.req('/api/accounts/select', 'POST', {
+    projectId: 'default', provider: 'gitlab', accountId: gitlabAccount.data.account.id,
+  }, leadToken);
+  assert.equal(selection.status, 200);
   mock.state.failNextGitlabDiscussion = true;
   const manualWb = await f.req(`/api/tasks/${task.id}/merge-requests/${goodHook.data.asset.id}/writeback`, 'POST', {
     jobId: codeJob.id,

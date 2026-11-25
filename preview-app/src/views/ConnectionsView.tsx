@@ -2,27 +2,25 @@ import React, { useEffect, useRef, useState } from 'react';
 import { readTogether } from './readTogether';
 import { App, Badge, Button, Card, Descriptions, Divider, Flex, Form, Input, Segmented, Select, Skeleton, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { Check, ClipboardPaste, Copy, ExternalLink, KeyRound, RefreshCw, Search } from 'lucide-react';
+import { Check, ClipboardPaste, Copy, ExternalLink, RefreshCw, Search } from 'lucide-react';
 import { api, ApiError, ASSET_ROLES, type AssetKind, isChildTask, JiraIssueMetadata, JiraProject, PlatformPermissions, Project, projectGroup, Role, timeText, User, WorkTask } from './workspaceApi';
 import { StatusBadge } from '../components/Primitives';
 import { parseSourceReference, type SourceProvider } from './sourceReference';
 import { AccountUsageSelector } from './AccountUsageSelector';
-import { GITHUB_API_ORIGIN, listAccounts, syncPersonalJiraProjects } from './accountApi';
+import { listAccounts, syncPersonalJiraProjects, type AccountAuthMode } from './accountApi';
 import { navigateWorkspace, openTaskRoute } from './workspaceNavigation';
 import { isTaskFrozen } from './taskAvailability';
-import { assetKindLabel, authModeLabel, connectorStatusLabel, mrStateLabel } from './displayLabels';
+import { assetKindLabel, connectorStatusLabel, mrStateLabel } from './displayLabels';
 import { clearSearchOnEscape } from './uiPreferences';
 import { ConnectionsAutomationPanel } from './ConnectionsAutomationPanel';
 import { LinkifiedText } from './MarkdownPreview';
 import './ConnectionsView.css';
 
 type Provider = 'jira' | 'confluence' | 'gitlab' | 'github' | 'jenkins' | 'yunxiao';
-type AuthMode = 'BEARER' | 'BASIC' | 'PRIVATE_TOKEN' | 'NONE';
-type Connector = { provider: Provider; name: string; status: string; baseUrl?: string; authMode?: AuthMode; hasCredential?: boolean; organizationId?: string; lastCheckedAt?: string; lastError?: string; localProfileAvailable?: boolean; capabilities?: string[]; readOnly: boolean; accountId?: string; accountName?: string; accountScope?: 'PERSONAL' | 'PROJECT'; selectionUnavailable?: boolean };
+type Connector = { provider: Provider; name: string; status: string; baseUrl?: string; authMode?: AccountAuthMode; hasCredential?: boolean; lastCheckedAt?: string; lastError?: string; capabilities?: string[]; readOnly: boolean; accountId?: string; accountName?: string; accountScope?: 'PERSONAL' | 'PROJECT'; selectionUnavailable?: boolean };
 type ResourceItem = Record<string, unknown> & JiraIssueMetadata;
 type ReadResult = JiraIssueMetadata & { resource: string; items?: ResourceItem[]; total?: number; title?: string; status?: string; content?: string; externalUrl?: string; version?: string | number };
 const writableMainTasks = (tasks: WorkTask[]) => tasks.filter(task => !isChildTask(task) && !isTaskFrozen(task, tasks));
-type ConfigValues = { baseUrl: string; authMode: AuthMode; username?: string; token?: string; organizationId?: string };
 const RESOURCES: Record<Provider, { value: string; label: string }[]> = {
   jira: [{ value: 'jira_issues', label: '搜索 Jira 任务' }, { value: 'jira_issue', label: '读取单个任务' }],
   confluence: [{ value: 'confluence_page', label: '读取 Confluence 页面' }],
@@ -42,28 +40,6 @@ const IMPORT_KINDS: Record<Provider, AssetKind[]> = { jira: [], confluence: ['PR
 const text = (value: unknown) => typeof value === 'string' || typeof value === 'number' ? String(value) : '';
 const required = (name: string) => ({ required: true, whitespace: true, message: `请输入${name}。` });
 const positiveId = { pattern: /^[1-9]\d*$/, message: '请输入有效的正整数 ID。' };
-const differentOrigin = (next?: string, current?: string) => {
-  if (!current) return true;
-  try { return new URL(next || '').origin !== new URL(current).origin; } catch { return true; }
-};
-
-const ConnectionConfigForm: React.FC<{ connection?: Connector; provider: Provider; disabled: boolean; loading: boolean; onSubmit: (values: ConfigValues, clearToken: () => void) => void }> = ({ connection, provider, disabled, loading, onSubmit }) => {
-  const [form] = Form.useForm<ConfigValues>();
-  const defaultAuth = connection?.authMode && connection.authMode !== 'NONE' ? connection.authMode : provider === 'jenkins' ? 'BASIC' : provider === 'gitlab' || provider === 'yunxiao' ? 'PRIVATE_TOKEN' : 'BEARER';
-  const authMode = Form.useWatch('authMode', form) as AuthMode | undefined;
-  const baseUrl = Form.useWatch('baseUrl', form) as string | undefined;
-  const credentialRequired = !connection?.hasCredential || (authMode || defaultAuth) !== connection.authMode || differentOrigin(baseUrl ?? connection.baseUrl, connection.baseUrl);
-  return <Form form={form} layout="vertical" requiredMark="optional" disabled={disabled} initialValues={{ baseUrl: provider === 'github' ? GITHUB_API_ORIGIN : connection?.baseUrl || '', authMode: defaultAuth, username: '', token: '', organizationId: connection?.organizationId || '' }} onFinish={values => onSubmit(values, () => form.setFieldValue('token', ''))}>
-    <Form.Item name="baseUrl" label="平台地址" rules={[required('平台地址'), { type: 'url', message: '请输入有效的平台地址。' }]}><Input placeholder="https://" autoComplete="off" readOnly={provider === 'github'} /></Form.Item>
-    <div className="tf-connection-form-grid">
-      <Form.Item name="authMode" label="认证方式" rules={[{ required: true, message: '请选择认证方式。' }]}><Select disabled={disabled || provider === 'github'} options={['BEARER', 'BASIC', 'PRIVATE_TOKEN'].map(value => ({ value, label: authModeLabel(value) }))} /></Form.Item>
-      {(authMode || defaultAuth) === 'BASIC' && <Form.Item name="username" label="用户名" rules={[{ required: credentialRequired, message: '请输入用户名。' }]}><Input autoComplete="off" /></Form.Item>}
-    </div>
-    <Form.Item name="token" label="访问令牌" extra={connection?.hasCredential ? '已保存凭据；同一平台保留原认证方式时，留空可继续使用。' : '令牌仅用于服务端认证，保存后不回显。'} rules={[{ required: credentialRequired, message: '请输入访问令牌。' }]}><Input.Password autoComplete="new-password" /></Form.Item>
-    {provider === 'yunxiao' && <Form.Item name="organizationId" label="云效组织 ID" rules={[required('云效组织 ID')]}><Input /></Form.Item>}
-    <Button type="primary" htmlType="submit" loading={loading} disabled={disabled}>保存并验证</Button>
-  </Form>;
-};
 
 export const ConnectionsView: React.FC<{ projectId: string; project?: Project; projects?: Project[]; role: Role; user: User; platformPermissions: PlatformPermissions; onUnauthorized: () => void; onForbidden?: () => void; onProjectsChanged?: (projectId?: string) => Promise<void> }> = ({ projectId, project, projects = [], role, user, platformPermissions, onUnauthorized, onForbidden, onProjectsChanged }) => {
   const { message } = App.useApp();
@@ -112,8 +88,6 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
   const accountAligned = resolvedAccountId !== undefined && !!connection && (connection.accountId ?? null) === resolvedAccountId && connection.status !== 'ACCOUNT_UNAVAILABLE';
   const canManage = !!projectId && roleCanManage && !accessDenied;
   const canRead = !!projectId && !accessDenied && accountAligned && (canManage || !!connection?.accountId);
-  const usingAccount = !!connection?.accountId || connection?.status === 'ACCOUNT_UNAVAILABLE' || operation === 'account-changing';
-  const canConfigureLegacy = canManage && accountAligned && !usingAccount;
   const canImportJira = ['ADMIN', 'LEAD', 'PM'].includes(role);
   const mainTaskOptions = writableMainTasks(tasks);
   const findJiraTask = (key: string) => tasks.find(task => task.jiraKey.toUpperCase() === key.toUpperCase());
@@ -416,12 +390,13 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
           </Flex>
           <div className="tf-connection-account"><AccountUsageSelector key={accountScope} userId={user.id} projectId={projectId} provider={active} disabled={busy || accessDenied} onChanging={changeAccountStart} onChanged={changeAccountComplete} onResolved={resolveAccount} onUnauthorized={onUnauthorized} onForbidden={() => { handleAccessError(new ApiError('', 403), generation.current); }} /></div>
           <Flex wrap gap={8}>
-            {canConfigureLegacy && platformPermissions.reuseLocalCredentials && connection?.localProfileAvailable && <Button type={!connection?.hasCredential ? 'primary' : 'default'} icon={<KeyRound size={16} />} disabled={busy} loading={operation === 'reuse'} onClick={() => void run(async expected => { await api(`connectors/${active}/reuse-local`, { projectId }); if (expected !== generation.current) return; await testConnection(expected); }, 'reuse')}>复用本机配置并验证</Button>}
             {canRead && <Button type={connection?.hasCredential && connection.status !== 'CONNECTED' ? 'primary' : 'default'} icon={<Check size={16} />} disabled={busy || !connection?.hasCredential || connection.status === 'ACCOUNT_UNAVAILABLE'} loading={operation === 'test'} onClick={() => void run(testConnection, 'test')}>验证连接</Button>}
             {active === 'jira' && accountAligned && connection?.accountScope === 'PERSONAL' && connection?.accountId && <Button icon={<RefreshCw size={15} />} disabled={busy} loading={operation === 'sync-personal'} onClick={() => void syncPersonalProjects()}>按 Jira 权限同步可见项目</Button>}
             <Button disabled={busy} onClick={() => navigateWorkspace('accounts')}>管理账号</Button>
           </Flex>
-          {projectId && !canRead && !accessDenied && !busy && <Typography.Text type="secondary">选择可用账号后即可读取资源。</Typography.Text>}
+          {accountAligned && !connection?.hasCredential
+            ? <Typography.Text type="secondary">请在账号管理绑定 {NAMES[active]} 账号，再在上方选择使用账号。</Typography.Text>
+            : projectId && !canRead && !accessDenied && !busy && <Typography.Text type="secondary">选择可用账号后即可读取资源。</Typography.Text>}
         </Flex>
       </Skeleton>
     </Card>
@@ -515,16 +490,6 @@ export const ConnectionsView: React.FC<{ projectId: string; project?: Project; p
           </Flex>}
         </div>}
       </Flex>
-    </Card>}
-    {canConfigureLegacy && <Card title="项目默认连接" className="tf-connection-config-card">
-      <div className="tf-connection-form-wrap">
-        <ConnectionConfigForm key={`${projectId}:${active}`} connection={connection} provider={active} disabled={busy} loading={operation === 'configure'} onSubmit={(values, clearToken) => void run(async expected => {
-          const saved = await api<{ connector: Connector }>(`connectors/${active}/config`, { projectId, baseUrl: values.baseUrl, authMode: values.authMode, ...(values.username ? { username: values.username } : {}), ...(values.token ? { token: values.token } : {}), ...(values.organizationId ? { organizationId: values.organizationId } : {}) });
-          if (expected !== generation.current) return;
-          setConnectors(current => [...current.filter(item => item.provider !== active), saved.connector]);
-          clearToken(); notify('连接配置已保存。'); await testConnection(expected);
-        }, 'configure')} />
-      </div>
     </Card>}
     {projectId && !accessDenied && (
       <section id="tf-project-automation" aria-label="项目自动化配置" className="tf-connection-automation">

@@ -1,7 +1,7 @@
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { readTogether } from './readTogether';
-import { Alert, App, Button, Card, Drawer, Dropdown, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Card, Checkbox, Drawer, Dropdown, Empty, Flex, Form, Input, Segmented, Select, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import type { InputRef } from 'antd';
 import { ArrowLeft, Bookmark, ChevronDown, ChevronLeft, ChevronRight, KeyRound, Keyboard, LayoutGrid, Link2, List, LogOut, MonitorSmartphone, Plus, RefreshCw, Search, ShieldCheck } from 'lucide-react';
 import { api, ApiError, isChildTask, memberName, MemberCandidate, NO_PLATFORM_PERMISSIONS, NO_PROJECT_PERMISSIONS, normalizePlatformPermissions, normalizeProjectPermissions, PlatformPermissions, Project, ProjectMember, projectGroup, Role, TaskStatus, User, WorkTask } from './workspaceApi';
@@ -73,7 +73,8 @@ async function readPreviewBuildMeta(): Promise<PreviewBuildMeta | null> {
     return null;
   }
 }
-type LoginValues = { username: string; password: string; setupToken?: string };
+type LoginValues = { username: string; password: string; setupToken?: string; rememberPassword?: boolean };
+type PasswordCredentialConstructor = new (data: { id: string; password: string }) => Credential;
 type NewTaskValues = { jiraKey?: string; title: string; type: WorkTask['type']; parentId?: string; assigneeId?: string };
 
 const routeFallback = <Card><Skeleton active paragraph={{ rows: 5 }} /></Card>;
@@ -81,6 +82,8 @@ const routeFallback = <Card><Skeleton active paragraph={{ rows: 5 }} /></Card>;
 export const PlatformServiceView: React.FC<{ headerActions?: HTMLElement | null; section?: WorkspaceSection; onSessionChange?: (authenticated: boolean) => void; onAccessChange?: (access: { manageMembers: boolean; manageConnections: boolean }) => void }> = ({ headerActions, section = 'overview', onSessionChange, onAccessChange }) => {
   const { message, modal } = App.useApp();
   const [loginForm] = Form.useForm<LoginValues>();
+  const PasswordCredential = (window as typeof window & { PasswordCredential?: PasswordCredentialConstructor }).PasswordCredential;
+  const canRememberPassword = window.isSecureContext && typeof PasswordCredential === 'function' && typeof navigator.credentials?.store === 'function';
   const [taskForm] = Form.useForm<NewTaskValues>();
   const [user, setUser] = useState<User | null>(null);
   const [initializing, setInitializing] = useState(true);
@@ -476,9 +479,20 @@ export const PlatformServiceView: React.FC<{ headerActions?: HTMLElement | null;
     };
     window.addEventListener('hashchange', update); return () => window.removeEventListener('hashchange', update);
   }, []);
-  const authenticate = ({ setupToken, ...values }: LoginValues, setup: boolean) => perform(async () => {
+  const authenticate = ({ setupToken, rememberPassword, ...values }: LoginValues, setup: boolean) => perform(async () => {
     if (setup) await api('setup', { ...values, ...(setupToken ? { setupToken } : {}) });
-    await api('login', values); loginForm.setFieldsValue({ password: '', setupToken: '' }); await refresh('');
+    const { user: signedInUser } = await api<{ user: User }>('login', values);
+    if (rememberPassword && canRememberPassword) {
+      void navigator.credentials.store(new PasswordCredential({ id: signedInUser.username, password: values.password })).catch(() => {
+        // An unavailable password manager must not interrupt sign-in.
+      });
+    }
+    try {
+      await refresh('');
+    } catch (error) {
+      loginForm.resetFields(['password', 'setupToken']);
+      throw error;
+    }
   });
   const switchProject = (id: string, destination?: WorkspaceSection) => {
     if (selectedTaskId) closeTaskDrawer();
@@ -842,9 +856,12 @@ export const PlatformServiceView: React.FC<{ headerActions?: HTMLElement | null;
       <Flex vertical gap={24}>
         <div><span className="tf-login-icon"><ShieldCheck size={24} /></span><Title level={2}>登录平台</Title><Paragraph type="secondary">任务、版本化资产、评审记录与质量门禁集中跟踪。</Paragraph></div>
         <Form name="platform-login" form={loginForm} layout="vertical" requiredMark={false} disabled={busy} onFinish={values => void authenticate(values, false)}>
-          <Form.Item htmlFor="service-username" label="用户名" name="username" rules={[{ required: true, message: '请输入用户名。' }, { min: 3, max: 64, message: '用户名需为 3–64 个字符。' }, { pattern: /^[a-zA-Z0-9_.-]+$/, message: '用户名仅支持字母、数字和_.-。' }]}><Input id="service-username" autoComplete="username" maxLength={64} /></Form.Item>
-          <Form.Item htmlFor="service-password" label="密码（8–256 字符）" name="password" rules={[{ required: true, message: '请输入密码。' }, { min: 8, max: 256, message: '密码需为 8–256 个字符。' }]}><Input.Password id="service-password" autoComplete="current-password" maxLength={256} /></Form.Item>
-          <Form.Item htmlFor="service-setup-token" label="初始化口令（仅服务器部署首次创建管理员时填写）" name="setupToken"><Input.Password id="service-setup-token" autoComplete="off" maxLength={256} /></Form.Item>
+          <Form.Item htmlFor="service-username" label="用户名" name="username" rules={[{ required: true, message: '请输入用户名。' }, { min: 3, max: 64, message: '用户名需为 3–64 个字符。' }, { pattern: /^[a-zA-Z0-9_.-]+$/, message: '用户名仅支持字母、数字和_.-。' }]}><Input id="service-username" name="username" autoComplete="username" maxLength={64} /></Form.Item>
+          <Form.Item htmlFor="service-password" label="密码（8–256 字符）" name="password" preserve={false} rules={[{ required: true, message: '请输入密码。' }, { min: 8, max: 256, message: '密码需为 8–256 个字符。' }]}><Input.Password id="service-password" name="password" autoComplete="current-password" maxLength={256} /></Form.Item>
+          <Form.Item htmlFor="service-setup-token" label="初始化口令（仅服务器部署首次创建管理员时填写）" name="setupToken" preserve={false}><Input.Password id="service-setup-token" autoComplete="off" maxLength={256} /></Form.Item>
+          {canRememberPassword && <Form.Item name="rememberPassword" valuePropName="checked" preserve={false} extra="登录成功后，由浏览器询问是否保存。">
+            <Checkbox>记住密码</Checkbox>
+          </Form.Item>}
           <Flex vertical gap={12}>
             <Button type="primary" htmlType="submit" block loading={busy}>登录</Button>
             <Button block disabled={busy} onClick={() => void loginForm.validateFields().then(values => authenticate(values, true)).catch(() => {})}>创建初始管理员并登录</Button>

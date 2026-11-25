@@ -295,6 +295,11 @@ export function RequirementsCenter({
             onChange={value => { setDeviceChoice({ key: deviceKey, value }); writeStoredString(deviceKey, value); }}
           />
         </label>}
+        {serverMode && !devices.length && <span className="tf-requirements-execution-label">
+          当前项目暂无已授权的 Bridge 设备。请前往
+          <Button type="link" size="small" onClick={() => { setSettingsOpen(false); navigateWorkspace('local'); }}>本地 AI 接入</Button>
+          为设备授权本项目。
+        </span>}
         {!serverMode && runner === 'workbench' && !workbenchAuthorized && <span className="tf-requirements-execution-label">
           当前账号尚未授权本项目接入本地工作台，请先前往
           <Button type="link" size="small" onClick={() => { setSettingsOpen(false); navigateWorkspace('local'); }}>本地 AI 接入</Button>
