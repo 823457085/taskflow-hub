@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Alert, App as AntApp, Button, Collapse, Flex, Grid, Segmented, Space, Switch, Tag, Tooltip, Typography } from 'antd';
-import { Copy, Pencil } from 'lucide-react';
-import { Asset, AssetKind, memberName, timeText, User } from './workspaceApi';
+import { Alert, App as AntApp, Button, Flex, Grid, Select, Tag, Tooltip, Typography } from 'antd';
+import { Copy, ExternalLink, Pencil, ShieldAlert } from 'lucide-react';
+import { api, Asset, AssetKind, Finding, memberName, timeText, User } from './workspaceApi';
 import { Empty } from './WorkspaceFields';
 import { assetMetaCodeLabel } from './displayLabels';
 import {
@@ -15,6 +15,7 @@ import {
 } from './assetDiff';
 import { isLikelyMarkdown, parseMarkdownBlocks, summarizeMarkdownChecklists } from './markdownLite';
 import { MarkdownPreview } from './MarkdownPreview';
+import './TaskRecords.css';
 
 type AssetViewerMode = 'pretty' | 'split' | 'md' | 'rev-diff' | 'rev-split' | 'raw';
 
@@ -92,111 +93,176 @@ export const TaskAssetList: React.FC<{
   const { message } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
   const [viewModes, setViewModes] = useState<Record<string, AssetViewerMode>>({});
-  const [showHistory, setShowHistory] = useState(false);
+  const [selectionId, setSelectionId] = useState('');
+  const [versionId, setVersionId] = useState('');
+  const [scanningId, setScanningId] = useState('');
+  const [scanResults, setScanResults] = useState<Record<string, { kind: string; findings: { severity: Finding['severity']; title: string; detail: string; location?: string }[] }>>({});
+
+  const analyzeAsset = async (asset: Asset) => {
+    if (scanningId) return;
+    setScanningId(asset.id);
+    try {
+      const res = await api<{ kind: string; findings: { severity: Finding['severity']; title: string; detail: string; location?: string }[] }>(
+        `tasks/${encodeURIComponent(asset.taskId)}/assets/${encodeURIComponent(asset.id)}/analyze-contract`,
+        {},
+      );
+      setScanResults(prev => ({ ...prev, [asset.id]: { kind: res.kind, findings: res.findings || [] } }));
+      void message.success(res.findings?.length ? `扫描完成，发现 ${res.findings.length} 项契约/安全提示。` : '扫描完成，未发现契约或规则异常。');
+    } catch (error) {
+      void message.error(error instanceof Error ? error.message : '静态扫描失败。');
+    } finally {
+      setScanningId('');
+    }
+  };
 
   if (!assets.length) {
-    return <Empty>{allowedKinds.length && !frozen ? '尚无材料，可使用上方「粘贴链接导入」「提取本地 Git 代码」或「添加材料」快速补齐。' : '尚无材料。'}</Empty>;
+    return <Empty>暂无材料。</Empty>;
   }
 
   const copy = (text: string, success: string) => {
     void navigator.clipboard.writeText(text).then(() => message.success(success)).catch(() => message.warning('浏览器未能复制，请手动选择复制。'));
   };
 
-  const isLatest = (asset: Asset) => !assets.some(other => other.kind === asset.kind && other.logicalKey === asset.logicalKey && other.revision > asset.revision);
-  const historyCount = assets.filter(asset => !isLatest(asset)).length;
-  const visible = [...assets]
-    .filter(asset => showHistory || isLatest(asset))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const sameMaterial = (left: Asset, right: Asset) => left.kind === right.kind && left.logicalKey === right.logicalKey;
+  const latest = assets.filter(asset => !assets.some(other => sameMaterial(other, asset) && other.revision > asset.revision))
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const selection = assets.find(asset => asset.id === selectionId);
+  const current = (selection && latest.find(asset => sameMaterial(asset, selection))) || latest[0];
+  const versions = assets.filter(asset => sameMaterial(asset, current)).sort((left, right) => right.revision - left.revision);
+  const asset = versions.find(item => item.id === versionId) || current;
+  const diffStats = parseUnifiedDiffStats(asset.content);
+  const isMd = !diffStats.hasHunks && isLikelyMarkdown(asset.content, asset.kind);
+  const checklistStats = isMd ? summarizeMarkdownChecklists(parseMarkdownBlocks(asset.content)) : { checked: 0, total: 0 };
+  const risk = ['CODE', 'TECH_SPEC', 'RELEASE_PLAN'].includes(asset.kind) ? analyzeAssetRiskSignals(asset.content) : { tier: 'NONE' as const, signals: [] };
+  const prevAsset = versions.find(candidate => candidate.revision < asset.revision);
+  const rawMode = viewModes[asset.id] || (diffStats.hasHunks ? 'pretty' : isMd ? 'md' : 'raw');
+  const mode: AssetViewerMode = !screens.md && rawMode === 'split' ? 'pretty' : !screens.md && rawMode === 'rev-split' ? 'rev-diff' : rawMode;
 
-  return <Flex vertical gap={10}>
-    {historyCount > 0 && <Flex justify="space-between" align="center" gap={8} wrap>
-      <Typography.Text type="secondary" className="tf-table-hint">{showHistory ? `共 ${assets.length} 个版本` : `显示每份材料的最新版本，另有 ${historyCount} 个历史版本`}</Typography.Text>
-      <Space size={6}><Switch size="small" checked={showHistory} onChange={setShowHistory} aria-label="显示历史版本" /><Typography.Text type="secondary">显示历史版本</Typography.Text></Space>
-    </Flex>}
-    <Collapse items={visible.map(asset => {
-    const diffStats = parseUnifiedDiffStats(asset.content);
-    const isMd = !diffStats.hasHunks && isLikelyMarkdown(asset.content, asset.kind);
-    const checklistStats = isMd ? summarizeMarkdownChecklists(parseMarkdownBlocks(asset.content)) : { checked: 0, total: 0 };
-    const risk = ['CODE', 'TECH_SPEC', 'RELEASE_PLAN'].includes(asset.kind) ? analyzeAssetRiskSignals(asset.content) : { tier: 'NONE' as const, signals: [] };
-    const prevAsset = assets
-      .filter(candidate => candidate.kind === asset.kind && candidate.logicalKey === asset.logicalKey && candidate.revision < asset.revision)
-      .sort((a, b) => b.revision - a.revision)[0];
-    const rawMode = viewModes[asset.id] || (diffStats.hasHunks ? 'pretty' : isMd ? 'md' : 'raw');
-    const mode: AssetViewerMode = !screens.md && rawMode === 'split' ? 'pretty' : !screens.md && rawMode === 'rev-split' ? 'rev-diff' : rawMode;
+  const modeOptions: { value: AssetViewerMode; label: string }[] = [];
+  if (diffStats.hasHunks) {
+    modeOptions.push({ value: 'pretty', label: '统一对比' });
+    if (screens.md) modeOptions.push({ value: 'split', label: '双栏对比' });
+  } else if (isMd) {
+    modeOptions.push({ value: 'md', label: '排版预览' });
+  }
+  if (prevAsset) {
+    modeOptions.push({ value: 'rev-diff', label: `对比 r${prevAsset.revision}` });
+    if (screens.md) modeOptions.push({ value: 'rev-split', label: `双栏 r${prevAsset.revision}` });
+  }
+  if (modeOptions.length) modeOptions.push({ value: 'raw', label: '原始文本' });
 
-    const modeOptions: { value: AssetViewerMode; label: string }[] = [];
-    if (diffStats.hasHunks) {
-      modeOptions.push({ value: 'pretty', label: '统一对比' });
-      if (screens.md) modeOptions.push({ value: 'split', label: '双栏对比' });
-    } else if (isMd) {
-      modeOptions.push({ value: 'md', label: '排版预览' });
-    }
-    if (prevAsset) {
-      modeOptions.push({ value: 'rev-diff', label: `对比 r${prevAsset.revision}` });
-      if (screens.md) modeOptions.push({ value: 'rev-split', label: `双栏 r${prevAsset.revision}` });
-    }
-    if (modeOptions.length) modeOptions.push({ value: 'raw', label: '原始文本' });
+  const scan = scanResults[asset.id];
+  const scanLabel = asset.kind === 'CODE' ? '安全规则扫描' : '接口契约校验';
+  const assetLabel = assetMetaCodeLabel(asset.kind, asset.logicalKey, asset.revision);
+  const authorLabel = `${memberName(members, asset.actorId)} · ${timeText(asset.createdAt)}`;
 
-    return {
-      key: asset.id,
-      label: <div className="tf-table-title">
-        <Space size={8} wrap>
-          <Typography.Text type="secondary"><code>{assetMetaCodeLabel(asset.kind, asset.logicalKey, asset.revision)}</code></Typography.Text>
-          {diffStats.hasHunks && (
-            <Space size={6}>
-              <span className="tf-diff-stat-add">+{diffStats.additions}</span>
-              <span className="tf-diff-stat-del">-{diffStats.deletions}</span>
-              {diffStats.files.length > 0 && <Tag style={{ marginInlineEnd: 0 }}>{diffStats.files.length} 个文件</Tag>}
-            </Space>
-          )}
-          {checklistStats.total > 0 && (
-            <Tag color={checklistStats.checked === checklistStats.total ? 'success' : 'processing'} style={{ marginInlineEnd: 0 }}>
-              核查项 {checklistStats.checked}/{checklistStats.total}
-            </Tag>
-          )}
-          {!isLatest(asset) && <Tag style={{ marginInlineEnd: 0 }}>历史版本</Tag>}
-          {prevAsset && <Tag color="blue" style={{ marginInlineEnd: 0 }}>可对比 r{prevAsset.revision}</Tag>}
-          {risk.signals.map(sig => (
-            <Tag key={sig.code} color={sig.level === 'HIGH' ? 'error' : sig.level === 'MEDIUM' ? 'warning' : 'default'} style={{ marginInlineEnd: 0 }}>{sig.label}</Tag>
+  return (
+    <div className="tf-task-materials">
+      <div className="tf-task-materials-layout">
+        <nav className="tf-material-list" aria-label="材料列表">
+          {latest.map(item => (
+            <button
+              key={item.id}
+              type="button"
+              className="tf-material-option"
+              aria-current={item.id === current.id || undefined}
+              title={item.title}
+              onClick={() => { setSelectionId(item.id); setVersionId(''); }}
+            >
+              <strong className="tf-record-ellipsis">{item.title}</strong>
+              <small className="tf-record-ellipsis">{assetMetaCodeLabel(item.kind, item.logicalKey, item.revision)}</small>
+            </button>
           ))}
-        </Space>
-        <Typography.Text strong className="tf-break">{asset.title}</Typography.Text>
-      </div>,
-      children: <div className="tf-detail-stack tf-detail-stack-small">
-        <Flex justify="space-between" align="center" gap={8} wrap>
-          <Typography.Text type="secondary">{memberName(members, asset.actorId)} · {timeText(asset.createdAt)}</Typography.Text>
-          <Space size={6} wrap>
-            {modeOptions.length > 1 && (
-              <Segmented<AssetViewerMode>
-                size="small"
-                aria-label={`切换 ${asset.title} 视图模式`}
-                value={mode}
-                options={modeOptions}
-                onChange={val => setViewModes(prev => ({ ...prev, [asset.id]: val }))}
-              />
+        </nav>
+
+        <article className="tf-material-content">
+          <header className="tf-material-header">
+            <div className="tf-material-title">
+              <h3 className="tf-record-ellipsis" title={asset.title}>{asset.title}</h3>
+              <div className="tf-record-meta tf-record-ellipsis" title={`${assetLabel} · ${authorLabel}`}>
+                {assetLabel} · {authorLabel}
+              </div>
+            </div>
+            <div className="tf-record-actions" aria-label="材料操作" role="group">
+              {versions.length > 1 && (
+                <Select
+                  size="small"
+                  aria-label="材料版本"
+                  value={asset.id}
+                  onChange={setVersionId}
+                  options={versions.map(item => ({ value: item.id, label: `r${item.revision}${item.id === current.id ? '（最新）' : ''}` }))}
+                />
+              )}
+              {modeOptions.length > 1 && (
+                <Select<AssetViewerMode>
+                  aria-label="材料查看方式"
+                  size="small"
+                  value={mode}
+                  options={modeOptions}
+                  onChange={value => setViewModes(prev => ({ ...prev, [asset.id]: value }))}
+                />
+              )}
+              <Tooltip title="复制材料内容">
+                <Button size="small" icon={<Copy size={14} />} aria-label="复制材料内容" onClick={() => copy(asset.content, '材料内容已复制到剪贴板。')} />
+              </Tooltip>
+              {asset.sourceUrl && (
+                <Tooltip title="打开材料来源">
+                  <Button size="small" icon={<ExternalLink size={14} />} aria-label="打开材料来源" href={asset.sourceUrl} target="_blank" rel="noreferrer" />
+                </Tooltip>
+              )}
+              {['TECH_SPEC', 'CODE'].includes(asset.kind) && (
+                <Tooltip title={scanLabel}>
+                  <Button size="small" icon={<ShieldAlert size={14} />} aria-label={scanLabel} loading={scanningId === asset.id} disabled={busy} onClick={() => void analyzeAsset(asset)} />
+                </Tooltip>
+              )}
+              {!frozen && allowedKinds.includes(asset.kind) && (
+                <Tooltip title="基于此版更新">
+                  <Button size="small" icon={<Pencil size={14} />} aria-label="基于此版更新" disabled={busy} onClick={() => onUpdateFromBasis(asset)} />
+                </Tooltip>
+              )}
+            </div>
+          </header>
+
+          <div className="tf-material-evidence">
+            {checklistStats.total > 0 && <span>核查项 {checklistStats.checked}/{checklistStats.total}</span>}
+            {risk.signals.map(sig => (
+              <Tag key={sig.code} color={sig.level === 'HIGH' ? 'error' : sig.level === 'MEDIUM' ? 'warning' : 'default'}>{sig.label}</Tag>
+            ))}
+            {diffStats.files.length > 0 && (
+              <span className="tf-record-ellipsis" title={diffStats.files.join(' · ')}>
+                {diffStats.files.length} 个文件 · {diffStats.files[0]}
+              </span>
             )}
-            <Button size="small" icon={<Copy size={13} />} onClick={() => copy(asset.content, '材料内容已复制到剪贴板。')}>复制内容</Button>
-            {!frozen && allowedKinds.includes(asset.kind) && (
-              <Button size="small" icon={<Pencil size={13} />} disabled={busy} onClick={() => onUpdateFromBasis(asset)}>基于此版更新</Button>
-            )}
-          </Space>
-        </Flex>
-        <Space size={6} wrap>
-          <Tooltip title={`点击复制完整指纹：${asset.sha256}`}>
-            <Typography.Text type="secondary" code style={{ cursor: 'pointer' }} onClick={() => copy(asset.sha256, 'SHA256 指纹已复制。')}>
-              SHA256 {asset.sha256.slice(0, 12)}
-            </Typography.Text>
-          </Tooltip>
-          {diffStats.files.length > 0 && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              涉及文件：{diffStats.files.slice(0, 5).join(' · ')}{diffStats.files.length > 5 ? ` 等 ${diffStats.files.length} 个` : ''}
-            </Typography.Text>
+            <Tooltip title={`复制完整指纹 ${asset.sha256}`}>
+              <Button type="text" size="small" className="tf-material-fingerprint" onClick={() => copy(asset.sha256, 'SHA256 指纹已复制。')}>
+                SHA256 {asset.sha256.slice(0, 12)}
+              </Button>
+            </Tooltip>
+          </div>
+
+          {scan && (
+            <Alert
+              type={scan.findings.some(item => item.severity === 'CRITICAL') ? 'error' : scan.findings.length ? 'warning' : 'success'}
+              showIcon
+              title={`${scan.kind === 'API_SPEC' ? '接口契约预检' : '确定性规则扫描'} · ${scan.findings.length ? `发现 ${scan.findings.length} 项` : '全部通过'}`}
+              description={scan.findings.length ? (
+                <div className="tf-material-scan" tabIndex={0} aria-label="扫描结果">
+                  {scan.findings.map((item, index) => (
+                    <div key={index}>
+                      <Tag color={item.severity === 'CRITICAL' ? 'error' : item.severity === 'WARN' ? 'warning' : 'default'}>{item.severity}</Tag>
+                      <strong>{item.title}</strong>{item.location ? ` (${item.location})` : ''} — {item.detail}
+                    </div>
+                  ))}
+                </div>
+              ) : undefined}
+            />
           )}
-        </Space>
-        {asset.sourceUrl && <Typography.Link href={asset.sourceUrl} target="_blank" rel="noreferrer" className="tf-break">{asset.sourceUrl}</Typography.Link>}
-        <AssetBody asset={asset} prevAsset={prevAsset} mode={mode} isMd={isMd} hasHunks={diffStats.hasHunks} />
-      </div>,
-    };
-  })} />
-  </Flex>;
+
+          <div key={`${asset.id}:${mode}`} className="tf-material-preview" tabIndex={0} role="region" aria-label="材料正文">
+            <AssetBody asset={asset} prevAsset={prevAsset} mode={mode} isMd={isMd} hasHunks={diffStats.hasHunks} />
+          </div>
+        </article>
+      </div>
+    </div>
+  );
 };

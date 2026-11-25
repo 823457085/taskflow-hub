@@ -14,18 +14,18 @@ export const STAGE_INPUTS = {
   PRD: { required: ['PRD'], optional: [], children: false },
   TASK_BREAKDOWN: { required: [], optional: ['PRD'], children: true },
   TECH_SPEC: { required: ['PRD', 'TECH_SPEC'], optional: [], children: false },
-  CODE_REVIEW: { required: ['PRD', 'TECH_SPEC', 'CODE'], optional: [], children: false },
-  TEST_CASE: { required: ['PRD', 'TECH_SPEC', 'CODE', 'TEST_CASE'], optional: [], children: false },
+  CODE_REVIEW: { required: ['PRD', 'CODE'], optional: ['TECH_SPEC'], children: false },
+  TEST_CASE: { required: ['PRD', 'TEST_CASE'], optional: ['TECH_SPEC', 'CODE'], children: false },
   RELEASE: { required: KINDS, optional: [], children: false },
 };
-export const REVIEW_ROLES = { ADMIN: REVIEW_STAGES, LEAD: ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE'], DEV: ['TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW'], QA: ['TEST_CASE'], SRE: ['RELEASE'], PM: ['PRD', 'TASK_BREAKDOWN'] };
+export const REVIEW_ROLES = { ADMIN: REVIEW_STAGES, LEAD: ['PRD', 'TASK_BREAKDOWN', 'TECH_SPEC', 'CODE_REVIEW', 'TEST_CASE'], DEV: REVIEW_STAGES, QA: ['TEST_CASE'], SRE: ['RELEASE'], PM: ['PRD', 'TASK_BREAKDOWN'] };
 export const APPROVAL_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TASK_BREAKDOWN: ['ADMIN', 'LEAD'], TECH_SPEC: ['ADMIN', 'LEAD'], CODE_REVIEW: ['ADMIN', 'LEAD'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE: ['ADMIN', 'SRE'] };
 export const REPORT_VERDICTS = ['PASS', 'CONDITIONAL', 'FAIL'];
 export const CHECKLIST_RESULTS = ['PASS', 'WARN', 'FAIL', 'NA'];
 export const FINDING_CATEGORIES = ['CORRECTNESS', 'SECURITY', 'SPEC_ALIGN', 'CONTRACT', 'TESTS', 'MAINTAINABILITY'];
 export const RISK_LEVELS = ['low', 'medium', 'high'];
 export const RULE_ENFORCEMENTS = ['WARN', 'BLOCK'];
-export const ASSET_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'], CODE: ['ADMIN', 'LEAD', 'DEV'], TEST_CASE: ['ADMIN', 'LEAD', 'QA'], RELEASE_PLAN: ['ADMIN', 'LEAD', 'SRE'] };
+export const ASSET_ROLES = { PRD: ['ADMIN', 'LEAD', 'PM', 'DEV'], TECH_SPEC: ['ADMIN', 'LEAD', 'DEV'], CODE: ['ADMIN', 'LEAD', 'DEV'], TEST_CASE: ['ADMIN', 'LEAD', 'QA', 'DEV'], RELEASE_PLAN: ['ADMIN', 'LEAD', 'SRE', 'DEV'] };
 export const STAGE_AGENTS = {
   PRD: { persona: 'ai-pm', skills: ['prd-completeness-audit', 'state-machine-validator'] },
   TASK_BREAKDOWN: { persona: 'ai-delivery-lead', skills: ['requirement-coverage-map', 'subtask-granularity-check'] },
@@ -50,6 +50,13 @@ export function publicGitRemote(value) {
 export function textField(value, name, { min = 1, max = 200, preserve = false } = {}) {
   if (typeof value !== 'string' || value.trim().length < min || value.length > max || /[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(value)) fail(400, 'INVALID_INPUT', `${name}格式不正确`);
   return preserve ? value : value.trim();
+}
+export const isModelId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/:@+,\[\]=\-]{0,119}$/.test(value);
+export function optionalModelId(value) {
+  if (value === undefined || value === null) return null;
+  const model = typeof value === 'string' ? value.trim() : value;
+  if (!isModelId(model)) fail(400, 'INVALID_AI_MODEL', '请输入有效的模型标识');
+  return model;
 }
 export const publicUser = user => ({ id: user.id, username: user.username, role: user.role });
 export function bumpParentContexts(db, parentIds) {

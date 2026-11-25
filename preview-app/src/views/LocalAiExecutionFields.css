@@ -1,0 +1,161 @@
+.tf-ai-execution-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+}
+
+.tf-ai-execution-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.tf-ai-execution-field label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  color: var(--tf-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tf-ai-execution-field .ant-select,
+.tf-ai-execution-field .ant-input-affix-wrapper {
+  width: 100%;
+  min-width: 0;
+}
+
+.tf-ai-execution-field input[readonly] {
+  color: var(--tf-muted);
+  text-overflow: ellipsis;
+}
+
+.tf-ai-known-model input,
+input.tf-ai-known-model {
+  font-family: var(--font-mono);
+}
+
+.tf-ai-known-model input::placeholder,
+input.tf-ai-known-model::placeholder {
+  color: var(--tf-secondary);
+}
+
+.tf-ai-default-label {
+  color: var(--tf-muted);
+  font-size: 11px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tf-ai-model-invalid {
+  color: var(--tf-error);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.tf-ai-run-identity {
+  display: inline-block;
+  max-width: min(100%, 360px);
+  overflow: hidden;
+  color: var(--tf-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.tf-ai-workflow-config {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--tf-border);
+  border-radius: 10px;
+  background: var(--tf-surface);
+}
+
+.tf-ai-workflow-config > .ant-segmented {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.tf-ai-workflow-config .ant-segmented-item-label {
+  white-space: nowrap;
+}
+
+.tf-agent-session-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(140px, 100%), 1fr));
+  gap: 12px 16px;
+  margin: 0;
+  padding: 12px 14px;
+  border-block: 1px solid var(--tf-border);
+  background: var(--tf-raised);
+}
+
+.tf-agent-session-facts dt {
+  color: var(--tf-muted);
+  font-size: 11px;
+}
+
+.tf-agent-session-facts dd {
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--tf-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-agent-session-workspace {
+  grid-column: 1 / -1;
+}
+
+.tf-agent-session-model {
+  display: block;
+  max-width: min(100%, 194px);
+  overflow: hidden;
+  color: var(--tf-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-ai-run-history {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(138px, 38%);
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  min-width: 0;
+  background: var(--tf-raised);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+}
+.tf-ai-run-history > * { min-width: 0; }
+.tf-ai-run-history > strong { white-space: nowrap; }
+.tf-ai-run-history .tf-ai-run-identity { max-width: 100%; }
+@media (max-width: 520px) {
+  .tf-ai-run-history { grid-template-columns: minmax(0, 1fr) minmax(115px, 44%); }
+  .tf-ai-run-history > strong { grid-column: 1 / -1; }
+}
+
+.tf-agent-sessions-toolbar {
+  padding: 10px 12px;
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-card-radius, 12px);
+}
+.tf-agent-sessions-reader > .ant-table-wrapper {
+  border: 1px solid var(--tf-border);
+  background: var(--tf-surface);
+  border-radius: var(--tf-card-radius, 12px);
+  overflow: hidden;
+}
+.tf-agent-sessions-reader > .ant-card > .ant-card-body {
+  max-height: max(300px, calc(100dvh - 245px));
+  overflow: auto;
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
+}

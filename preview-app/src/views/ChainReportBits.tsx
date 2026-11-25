@@ -1,5 +1,5 @@
 import React from 'react';
-import { Collapse, Flex, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Flex, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { findingCategoryLabel, riskLevelLabel } from './displayLabels';
 import type {
   ChainLinkStatus, ChecklistItem, FindingCategory, LocalAiRunDraft,
@@ -18,6 +18,7 @@ export const LINK_STATUS_META: Record<ChainLinkStatus, { label: string; tone: 'd
   REVIEWING: { label: '审核中', tone: 'active' },
   AWAITING_DECISION: { label: '待确认', tone: 'active' },
   PASS: { label: '通过', tone: 'done' },
+  LINKED: { label: '已关联', tone: 'idle' },
   CONDITIONAL: { label: '有条件通过', tone: 'warn' },
   CHANGES_REQUESTED: { label: '退回修改', tone: 'error' },
   BLOCKED: { label: '阻断', tone: 'error' },
@@ -35,7 +36,7 @@ const RISK_COLORS: Record<RiskLevel, string> = { low: 'success', medium: 'warnin
 
 export const VerdictTag: React.FC<{ verdict?: ReportVerdict | null; score?: number | null; meta?: ReportMeta }> = ({ verdict, score, meta }) => {
   if (!verdict && (score === null || score === undefined) && !meta?.riskLevel && !meta?.effortScore) return null;
-  return <span className="tf-verdict">
+  return <span className="tf-verdict" style={{ display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, maxWidth: '100%' }}>
     {verdict && <Tag color={VERDICT_META[verdict].color} style={{ marginInlineEnd: 0 }}>AI 结论：{VERDICT_META[verdict].label}</Tag>}
     {score !== null && score !== undefined && <Tooltip title="AI 按本环节审核清单给出的评分（0-100）"><Tag style={{ marginInlineEnd: 0 }}>评分 {score}</Tag></Tooltip>}
     {meta?.riskLevel && <Tag color={RISK_COLORS[meta.riskLevel]} style={{ marginInlineEnd: 0 }}>{riskLevelLabel(meta.riskLevel)}</Tag>}
@@ -45,18 +46,70 @@ export const VerdictTag: React.FC<{ verdict?: ReportVerdict | null; score?: numb
 
 export const ChecklistTable: React.FC<{ items: ChecklistItem[]; compact?: boolean }> = ({ items, compact }) => {
   if (!items.length) return null;
-  return <Table<ChecklistItem>
-    className="tf-checklist-table"
-    size="small"
-    rowKey={(item, index) => `${index}:${item.item}`}
-    pagination={false}
-    dataSource={items}
-    columns={[
-      { title: '审核项', dataIndex: 'item', render: value => <Typography.Text className="tf-break">{value}</Typography.Text> },
-      { title: '结果', dataIndex: 'result', width: 92, render: (value: ChecklistItem['result']) => <Tag color={RESULT_META[value]?.color}>{RESULT_META[value]?.label || value}</Tag> },
-      ...(compact ? [] : [{ title: '依据 / 差距', dataIndex: 'note', render: (value: string, item: ChecklistItem) => <Typography.Text type="secondary" className="tf-break">{value}{item.ref ? <Typography.Text code style={{ marginInlineStart: 6 }}>{item.ref}</Typography.Text> : null}</Typography.Text> }]),
-    ]}
-  />;
+  return (
+    <div
+      className="tf-checklist-table"
+      style={{
+        display: 'grid',
+        gap: 8,
+        minWidth: 0,
+      }}
+    >
+      {items.map((item, index) => {
+        const meta = RESULT_META[item.result] || { label: item.result, color: 'default' };
+        const refs = item.ref
+          ? item.ref.split(/[,，;；]+/).map(s => s.trim()).filter(Boolean)
+          : [];
+        return (
+          <div
+            key={`${index}:${item.item}`}
+            style={{
+              padding: '10px 12px',
+              borderRadius: 8,
+              border: '1px solid var(--tf-border)',
+              background: 'var(--tf-surface)',
+              display: 'grid',
+              gap: 6,
+              minWidth: 0,
+            }}
+          >
+            <Flex align="center" justify="space-between" gap={8} wrap>
+              <Space size={8} align="center" wrap style={{ minWidth: 0, flex: 1 }}>
+                <Tag color={meta.color} style={{ marginInlineEnd: 0, flexShrink: 0 }}>
+                  {meta.label}
+                </Tag>
+                <Typography.Text strong className="tf-break" style={{ fontSize: 13 }}>
+                  {item.item}
+                </Typography.Text>
+              </Space>
+            </Flex>
+            {!compact && item.note && (
+              <Typography.Paragraph
+                type="secondary"
+                className="tf-break"
+                style={{ margin: 0, fontSize: 12.5, lineHeight: 1.6 }}
+              >
+                {item.note}
+              </Typography.Paragraph>
+            )}
+            {!compact && refs.length > 0 && (
+              <Flex gap={6} wrap>
+                {refs.map((refStr, idx) => (
+                  <Typography.Text
+                    key={`${idx}:${refStr}`}
+                    code
+                    style={{ fontSize: 11.5, wordBreak: 'break-all', margin: 0 }}
+                  >
+                    {refStr}
+                  </Typography.Text>
+                ))}
+              </Flex>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 };
 
 export const FindingMetaBadges: React.FC<{ category?: FindingCategory; confidence?: number; ruleId?: string }> = ({ category, confidence, ruleId }) => {
@@ -75,30 +128,21 @@ export const FindingMetaBadges: React.FC<{ category?: FindingCategory; confidenc
 export const SuggestedPatchView: React.FC<{ patch?: { before: string; after: string } }> = ({ patch }) => {
   if (!patch || (!patch.before && !patch.after)) return null;
   return (
-    <Collapse
-      ghost
-      size="small"
-      items={[{
-        key: 'patch',
-        label: '查看建议修复代码（Before → After）',
-        children: (
-          <div style={{ display: 'grid', gap: 6 }}>
-            {patch.before && <pre className="tf-code-panel" style={{ margin: 0, borderLeft: '3px solid var(--tf-error, #dc2626)' }}>- {patch.before}</pre>}
-            {patch.after && <pre className="tf-code-panel" style={{ margin: 0, borderLeft: '3px solid var(--tf-success, #16a34a)' }}>+ {patch.after}</pre>}
-          </div>
-        ),
-      }]}
-    />
+    <section aria-label="建议修复代码" style={{ display: 'grid', gap: 6, minWidth: 0 }}>
+      <Typography.Text strong>建议修复代码</Typography.Text>
+      {patch.before && <pre className="tf-code-panel" style={{ margin: 0, maxHeight: 200, borderLeft: '3px solid var(--tf-error, #dc2626)' }}>- {patch.before}</pre>}
+      {patch.after && <pre className="tf-code-panel" style={{ margin: 0, maxHeight: 200, borderLeft: '3px solid var(--tf-success, #16a34a)' }}>+ {patch.after}</pre>}
+    </section>
   );
 };
 
 export const ReportMetaSummary: React.FC<{ meta?: ReportMeta }> = ({ meta }) => {
   if (!meta) return null;
-  const collapseItems = [];
+  const sections: { key: string; title: string; children: React.ReactNode }[] = [];
   if (meta.clarifyQuestions?.length) {
-    collapseItems.push({
+    sections.push({
       key: 'clarify',
-      label: `待澄清问题清单（${meta.clarifyQuestions.length} 条）`,
+      title: `待澄清问题（${meta.clarifyQuestions.length}）`,
       children: (
         <ul style={{ margin: 0, paddingLeft: 18, display: 'grid', gap: 6 }}>
           {meta.clarifyQuestions.map(q => (
@@ -117,12 +161,13 @@ export const ReportMetaSummary: React.FC<{ meta?: ReportMeta }> = ({ meta }) => 
     });
   }
   if (meta.walkthrough?.length) {
-    collapseItems.push({
+    sections.push({
       key: 'walkthrough',
-      label: `改动概览 Walkthrough（${meta.walkthrough.length} 项）`,
+      title: `改动概览（${meta.walkthrough.length}）`,
       children: (
         <Table<WalkthroughItem>
           size="small"
+          scroll={{ x: 360 }}
           pagination={false}
           rowKey={(item, idx) => `${idx}:${item.file}`}
           dataSource={meta.walkthrough}
@@ -136,9 +181,9 @@ export const ReportMetaSummary: React.FC<{ meta?: ReportMeta }> = ({ meta }) => 
     });
   }
   if (meta.compliance && (meta.compliance.compliant.length || meta.compliance.missing.length || meta.compliance.manualCheck.length)) {
-    collapseItems.push({
+    sections.push({
       key: 'compliance',
-      label: `需求达成三分法（满足 ${meta.compliance.compliant.length} · 缺失 ${meta.compliance.missing.length} · 人工核验 ${meta.compliance.manualCheck.length}）`,
+      title: '需求核验',
       children: (
         <Flex vertical gap={8}>
           {!!meta.compliance.compliant.length && <div><Tag color="success">已满足</Tag><Typography.Text>{meta.compliance.compliant.join('；')}</Typography.Text></div>}
@@ -148,16 +193,21 @@ export const ReportMetaSummary: React.FC<{ meta?: ReportMeta }> = ({ meta }) => 
       ),
     });
   }
-  if (!collapseItems.length && !meta.coverageMetrics) return null;
+  if (!sections.length && !meta.coverageMetrics) return null;
   return (
-    <Flex vertical gap={6} style={{ marginTop: 6 }}>
+    <Flex vertical gap={12} style={{ marginTop: 6, minWidth: 0 }}>
       {meta.coverageMetrics && (
         <Space size={6} wrap>
           {typeof meta.coverageMetrics.coveragePrd === 'number' && <Tag color="blue">PRD 覆盖率 {meta.coverageMetrics.coveragePrd}%</Tag>}
           {typeof meta.coverageMetrics.traceAc === 'number' && <Tag color="purple">AC 测试追溯 {meta.coverageMetrics.traceAc}%</Tag>}
         </Space>
       )}
-      {collapseItems.length > 0 && <Collapse ghost size="small" items={collapseItems} />}
+      {sections.map(item => (
+        <section key={item.key} aria-label={item.title} style={{ display: 'grid', gap: 8, minWidth: 0 }}>
+          <Typography.Text strong>{item.title}</Typography.Text>
+          {item.children}
+        </section>
+      ))}
     </Flex>
   );
 };

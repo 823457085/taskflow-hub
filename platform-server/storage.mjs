@@ -75,10 +75,13 @@ export function openStorage(dbPath) {
     add('external_accounts', 'deleted_at', 'TEXT');
     add('local_ai_runs', 'runner', "TEXT NOT NULL DEFAULT 'local'");
     add('local_ai_runs', 'workbench_key', 'TEXT');
+    add('local_ai_runs', 'model', 'TEXT');
+    add('local_ai_runs', 'effective_model', 'TEXT');
     add('local_ai_runs', 'device_id', 'TEXT');
     add('local_ai_runs', 'phase', 'TEXT');
     add('local_ai_runs', 'lease_until', 'INTEGER');
     add('local_device_sessions', 'team_dispatch', 'INTEGER NOT NULL DEFAULT 0');
+    add('local_device_sessions', 'model_engines', "TEXT NOT NULL DEFAULT '[]'");
     db.exec(`CREATE TABLE IF NOT EXISTS todos (
       id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),owner_id TEXT NOT NULL REFERENCES users(id),assignee_id TEXT REFERENCES users(id),task_id TEXT REFERENCES tasks(id),
       title TEXT NOT NULL,details TEXT NOT NULL DEFAULT '',due_date TEXT NOT NULL DEFAULT '',
@@ -117,11 +120,155 @@ export function openStorage(dbPath) {
       enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),author_id TEXT NOT NULL REFERENCES users(id),updated_by TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
       UNIQUE(project_id,name));
       CREATE TABLE IF NOT EXISTS team_skill_revisions (id TEXT PRIMARY KEY,skill_id TEXT NOT NULL REFERENCES team_skills(id),version INTEGER NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,enabled INTEGER NOT NULL,actor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL);
-      CREATE INDEX IF NOT EXISTS skill_revision_idx ON team_skill_revisions(skill_id,version DESC);`);
+      CREATE INDEX IF NOT EXISTS skill_revision_idx ON team_skill_revisions(skill_id,version DESC);
+      CREATE TABLE IF NOT EXISTS cloud_ai_configs (
+        project_id TEXT PRIMARY KEY REFERENCES projects(id),
+        provider_type TEXT NOT NULL CHECK(provider_type IN ('openai_compatible','dify')),
+        name TEXT NOT NULL,
+        base_url TEXT NOT NULL,
+        model TEXT NOT NULL DEFAULT '',
+        dify_mode TEXT NOT NULL DEFAULT 'workflow' CHECK(dify_mode IN ('workflow','chat')),
+        credential TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        auto_stages TEXT NOT NULL DEFAULT '[]',
+        auto_writeback_mr INTEGER NOT NULL DEFAULT 0 CHECK(auto_writeback_mr IN (0,1)),
+        timeout_ms INTEGER NOT NULL DEFAULT 60000,
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_by TEXT NOT NULL REFERENCES users(id),
+        updated_at TEXT NOT NULL,
+        last_checked_at TEXT,
+        last_error TEXT
+      );
+      CREATE TABLE IF NOT EXISTS project_webhooks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        provider TEXT NOT NULL CHECK(provider IN ('gitlab','confluence','generic')),
+        name TEXT NOT NULL,
+        secret TEXT NOT NULL,
+        secret_preview TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        auto_review INTEGER NOT NULL DEFAULT 1 CHECK(auto_review IN (0,1)),
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        last_triggered_at TEXT,
+        last_status TEXT,
+        last_message TEXT
+      );
+      CREATE INDEX IF NOT EXISTS webhook_project_idx ON project_webhooks(project_id,created_at DESC);
+      CREATE TABLE IF NOT EXISTS webhook_events (
+        id TEXT PRIMARY KEY,
+        webhook_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        provider TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        task_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS webhook_event_project_idx ON webhook_events(project_id,created_at DESC);
+      CREATE TABLE IF NOT EXISTS project_im_webhooks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        channel TEXT NOT NULL CHECK(channel IN ('feishu','dingtalk','wecom','generic')),
+        name TEXT NOT NULL,
+        webhook_url TEXT NOT NULL,
+        url_preview TEXT NOT NULL DEFAULT '',
+        signing_secret TEXT,
+        events TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        last_sent_at TEXT,
+        last_error TEXT
+      );
+      CREATE INDEX IF NOT EXISTS im_webhook_project_idx ON project_im_webhooks(project_id,created_at DESC);
+      CREATE TABLE IF NOT EXISTS im_notification_logs (
+        id TEXT PRIMARY KEY,
+        im_webhook_id TEXT NOT NULL,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        channel TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS im_log_project_idx ON im_notification_logs(project_id,created_at DESC);
+      CREATE TABLE IF NOT EXISTS mr_writebacks (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id),
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        asset_id TEXT NOT NULL,
+        job_id TEXT NOT NULL REFERENCES jobs(id),
+        provider TEXT NOT NULL,
+        posted_count INTEGER NOT NULL DEFAULT 0,
+        inline_count INTEGER NOT NULL DEFAULT 0,
+        summary_posted INTEGER NOT NULL DEFAULT 0,
+        actor_id TEXT NOT NULL,
+        mode TEXT NOT NULL CHECK(mode IN ('MANUAL','AUTO')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS mr_writeback_task_idx ON mr_writebacks(task_id,created_at DESC);
+      CREATE TABLE IF NOT EXISTS personal_skills (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        owner_id TEXT NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        description TEXT NOT NULL,
+        content TEXT NOT NULL,
+        scopes TEXT NOT NULL DEFAULT '[]',
+        files TEXT NOT NULL DEFAULT '[]',
+        source TEXT NOT NULL DEFAULT 'manual',
+        version INTEGER NOT NULL DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(project_id,owner_id,name)
+      );
+      CREATE INDEX IF NOT EXISTS personal_skill_owner_idx ON personal_skills(project_id,owner_id,name);`);
     add('reports', 'verdict', 'TEXT'); add('reports', 'score', 'INTEGER'); add('reports', 'checklist', 'TEXT');
     add('reports', 'meta', 'TEXT');
     add('findings', 'category', 'TEXT'); add('findings', 'confidence', 'INTEGER'); add('findings', 'rule_id', 'TEXT'); add('findings', 'patch_json', 'TEXT');
     add('local_ai_runs', 'action_type', 'TEXT');
+    add('team_skills', 'scopes', "TEXT NOT NULL DEFAULT '[]'");
+    add('team_skills', 'files', "TEXT NOT NULL DEFAULT '[]'");
+    add('team_skills', 'source', "TEXT NOT NULL DEFAULT 'manual'");
+    add('team_skill_revisions', 'scopes', "TEXT NOT NULL DEFAULT '[]'");
+    add('team_skill_revisions', 'files', "TEXT NOT NULL DEFAULT '[]'");
+    db.exec(`CREATE TABLE IF NOT EXISTS skill_catalog (
+      id TEXT PRIMARY KEY,source_project_id TEXT,owner_id TEXT NOT NULL REFERENCES users(id),
+      visibility TEXT NOT NULL CHECK(visibility IN ('TEAM','PERSONAL')),
+      name TEXT NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,
+      scopes TEXT NOT NULL DEFAULT '[]',files TEXT NOT NULL DEFAULT '[]',source TEXT NOT NULL DEFAULT 'manual',
+      version INTEGER NOT NULL DEFAULT 1,enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      updated_by TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS skill_catalog_revisions (
+      id TEXT PRIMARY KEY,skill_id TEXT NOT NULL REFERENCES skill_catalog(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,title TEXT NOT NULL,description TEXT NOT NULL,content TEXT NOT NULL,
+      scopes TEXT NOT NULL,files TEXT NOT NULL,enabled INTEGER NOT NULL,
+      actor_id TEXT NOT NULL REFERENCES users(id),created_at TEXT NOT NULL,
+      UNIQUE(skill_id,version)
+    );
+    CREATE TABLE IF NOT EXISTS project_skill_links (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      skill_id TEXT NOT NULL REFERENCES skill_catalog(id) ON DELETE CASCADE,
+      PRIMARY KEY(project_id,skill_id)
+    );
+    CREATE INDEX IF NOT EXISTS project_skill_links_skill_idx ON project_skill_links(skill_id,project_id);`);
+    if (!db.prepare('SELECT version FROM schema_migrations WHERE version=7').get()) {
+      db.exec(`INSERT INTO skill_catalog (id,source_project_id,owner_id,visibility,name,title,description,content,scopes,files,source,version,enabled,updated_by,created_at,updated_at)
+        SELECT id,project_id,author_id,'TEAM',name,name,description,content,scopes,files,source,version,enabled,updated_by,created_at,updated_at FROM team_skills;
+        INSERT INTO skill_catalog (id,source_project_id,owner_id,visibility,name,title,description,content,scopes,files,source,version,enabled,updated_by,created_at,updated_at)
+        SELECT id,project_id,owner_id,'PERSONAL',name,name,description,content,scopes,files,source,version,enabled,owner_id,created_at,updated_at FROM personal_skills;
+        INSERT INTO project_skill_links (project_id,skill_id)
+        SELECT source_project_id,id FROM skill_catalog WHERE source_project_id IS NOT NULL;
+        INSERT INTO skill_catalog_revisions (id,skill_id,version,title,description,content,scopes,files,enabled,actor_id,created_at)
+        SELECT r.id,r.skill_id,r.version,s.name,r.description,r.content,r.scopes,r.files,r.enabled,r.actor_id,r.created_at
+        FROM team_skill_revisions r JOIN team_skills s ON s.id=r.skill_id;`);
+      db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(7, new Date().toISOString());
+    }
     const interruptedAt = new Date().toISOString();
     db.prepare("UPDATE local_ai_runs SET status='INTERRUPTED',error='服务重启，本地执行已中断',finished_at=?,updated_at=? WHERE status='RUNNING' AND runner='local'").run(interruptedAt, interruptedAt);
     db.prepare('INSERT OR IGNORE INTO projects VALUES (?,?,?,?)').run('default', 'DEFAULT', '默认项目', new Date().toISOString());
@@ -134,6 +281,7 @@ export function openStorage(dbPath) {
     db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (?,?)').run(3, new Date().toISOString());
     db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (?,?)').run(4, new Date().toISOString());
     db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (?,?)').run(5, new Date().toISOString());
+    db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES (?,?)').run(6, new Date().toISOString());
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
   return db;

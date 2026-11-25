@@ -22,12 +22,49 @@ export type MarkdownBlock =
   | { type: 'hr' }
   | { type: 'paragraph'; text: string };
 
-const SAFE_HTTP_URL_RE = /^https?:\/\/[^\s<>"]+$/i;
+const SAFE_HTTP_URL_RE = /^https?:\/\/[^\s<>"\\\u0000-\u001F\u007F]+$/i;
+const CLOSING_BRACKETS: Record<string, string> = { ')': '(', ']': '[', '}': '{' };
 const TABLE_SEPARATOR_RE = /^\|?\s*:?-{2,}:?(?:\s*\|\s*:?-{2,}:?)+\s*\|?$/;
 
 export function isSafeHttpUrl(url: string): boolean {
-  if (!url) return false;
-  return SAFE_HTTP_URL_RE.test(url.trim());
+  if (!SAFE_HTTP_URL_RE.test(url.trim())) return false;
+  try {
+    const parsed = new URL(url);
+    return !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+export function parsePlainUrlTokens(text: string): InlineToken[] {
+  const tokens: InlineToken[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"'\x60|\\，。；：！？、…（）【】《》“”‘’]+/gi)) {
+    const raw = match[0];
+    const balance: Record<string, number> = { ')': 0, ']': 0, '}': 0 };
+    for (const [close, open] of Object.entries(CLOSING_BRACKETS)) {
+      balance[close] = raw.split(open).length - raw.split(close).length;
+    }
+    let end = raw.length;
+    while (end > 0) {
+      const char = raw[end - 1];
+      if (/[.,!?;:]/.test(char)) {
+        end -= 1;
+      } else if (balance[char] < 0) {
+        balance[char] += 1;
+        end -= 1;
+      } else {
+        break;
+      }
+    }
+    const href = raw.slice(0, end);
+    if (!isSafeHttpUrl(href)) continue;
+    if (match.index > lastIndex) tokens.push({ type: 'text', text: text.slice(lastIndex, match.index) });
+    tokens.push({ type: 'link', href, text: href });
+    lastIndex = match.index + end;
+  }
+  if (lastIndex < text.length) tokens.push({ type: 'text', text: text.slice(lastIndex) });
+  return tokens;
 }
 
 export function isLikelyMarkdown(content: string, kind?: string): boolean {
@@ -41,13 +78,13 @@ export function isLikelyMarkdown(content: string, kind?: string): boolean {
 export function parseInlineTokens(text: string): InlineToken[] {
   if (!text) return [];
   const tokens: InlineToken[] = [];
-  const pattern = /`([^`\n]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*/g;
+  const pattern = /\x60([^\x60\n]+)\x60|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*\n]+)\*\*|<(https?:\/\/[^\s<>"]+)>/gi;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = pattern.exec(text)) !== null) {
     if (match.index > lastIndex) {
-      tokens.push({ type: 'text', text: text.slice(lastIndex, match.index) });
+      tokens.push(...parsePlainUrlTokens(text.slice(lastIndex, match.index)));
     }
     if (match[1] !== undefined) {
       tokens.push({ type: 'code', text: match[1] });
@@ -60,12 +97,16 @@ export function parseInlineTokens(text: string): InlineToken[] {
       }
     } else if (match[4] !== undefined) {
       tokens.push({ type: 'strong', text: match[4] });
+    } else if (isSafeHttpUrl(match[5])) {
+      tokens.push({ type: 'link', text: match[5], href: match[5] });
+    } else {
+      tokens.push({ type: 'text', text: match[0] });
     }
     lastIndex = pattern.lastIndex;
   }
 
   if (lastIndex < text.length) {
-    tokens.push({ type: 'text', text: text.slice(lastIndex) });
+    tokens.push(...parsePlainUrlTokens(text.slice(lastIndex)));
   }
   return tokens;
 }

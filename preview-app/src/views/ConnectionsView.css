@@ -5,6 +5,10 @@
   min-width: 0;
 }
 .tf-connections > * { min-width: 0; }
+.tf-connections .ant-card-head-wrapper { flex-wrap: wrap; gap: 8px; }
+.tf-connections .ant-card-head-title { min-width: 0; white-space: normal; }
+.tf-connections .ant-card-extra { max-width: 100%; }
+.tf-connections .ant-space-item > .ant-tag { margin-inline-end: 0; }
 .tf-connections .ant-typography,
 .tf-connections .ant-divider {
   margin-bottom: 0;
@@ -14,26 +18,30 @@
 .tf-connections h5.ant-typography {
   margin: 0;
 }
-.tf-connections-summary .ant-card-body {
-  padding-block: 12px;
-}
 .tf-connection-catalog .ant-card-body { display: grid; gap: 12px; }
-.tf-connections-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border-radius: var(--tf-control-radius, 7px);
-  color: var(--tf-secondary);
+.tf-connections-provider-card > .ant-card-body {
+  display: grid;
+  grid-template-columns: minmax(144px, 184px) minmax(0, 1fr);
+  gap: 16px;
+}
+.tf-connection-provider-nav {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-self: start;
+  gap: 4px;
+  padding: 6px;
   background: var(--tf-raised);
-  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
 }
-.tf-connections-shield {
+.tf-connection-provider-nav .ant-btn { justify-content: space-between; min-width: 0; }
+.tf-connection-provider-nav .ant-btn[aria-pressed="true"] {
   color: var(--tf-accent);
-  flex: 0 0 auto;
+  background: var(--tf-accent-soft);
+  border-color: transparent;
 }
+.tf-connection-automation { scroll-margin-top: 16px; }
+.tf-connection-source-section { display: grid; gap: 8px; min-width: 0; }
 .tf-connection-form-wrap,
 .tf-connection-resource-form,
 .tf-connection-account {
@@ -41,9 +49,6 @@
   max-width: 640px;
 }
 .tf-connection-input-mode { margin-bottom: var(--tf-space-5, 24px); }
-.tf-connection-form-wrap .ant-divider {
-  margin: 0 0 var(--tf-space-5, 24px);
-}
 .tf-connection-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -68,8 +73,11 @@
 }
 .tf-connection-source {
   margin: 0;
-  max-height: 360px;
+  max-height: 480px;
+  padding: 12px;
   overflow: auto;
+  border-radius: var(--tf-control-radius, 7px);
+  background: var(--tf-raised);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--font-mono, ui-monospace);
@@ -79,9 +87,10 @@
 .tf-break-anywhere { overflow-wrap: anywhere; }
 .tf-mono { font-family: var(--font-mono, ui-monospace); }
 @media (max-width: 639px) {
+  .tf-connections-provider-card > .ant-card-body { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .tf-connection-provider-nav { flex-flow: row wrap; }
+  .tf-connection-provider-nav .ant-btn { flex: none; }
   .tf-connection-form-grid { grid-template-columns: minmax(0, 1fr); }
   .tf-connections .ant-card-head { padding-block: var(--tf-space-4, 16px); }
-  .tf-connections .ant-card-head-wrapper { flex-wrap: wrap; gap: var(--tf-space-3, 12px); }
-  .tf-connections .ant-card-head-title { white-space: normal; }
   .tf-connections .ant-card-extra { margin-inline-start: 0; }
 }

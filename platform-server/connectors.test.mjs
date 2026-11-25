@@ -74,6 +74,107 @@ async function fixture(options = {}) {
   const holdNext = path => { const hold = { path, started: Promise.withResolvers(), resume: Promise.withResolvers() }; assert.ok(!state.hold, 'only one upstream gate at a time'); state.hold = hold; return { started: hold.started.promise, release: hold.resume.resolve }; };
   return { platform, state, base, dir, logs, admin, call, member, config, holdNext, async close() { await platform.close(); await Promise.all([new Promise(resolve => upstream.close(resolve)), new Promise(resolve => target.close(resolve))]); rmSync(dir, { recursive: true, force: true }); } };
 }
+test('GitHub verifies the personal account and reads repository and PR metadata through its project selection', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const dev = await f.member('github-reader', 'DEV');
+  const other = await f.member('other-github-reader', 'DEV');
+  const received = [];
+  f.state.handle = (req, url) => {
+    received.push({ accept: req.headers.accept, agent: req.headers['user-agent'] });
+    if (url.pathname === '/user') return { value: { id: 42, login: 'github-reader', name: 'Developer', email: 'private@example.invalid' } };
+    if (url.pathname === '/repos/team/app') return { value: { full_name: 'Team/App', private: true, default_branch: 'main' } };
+    if (url.pathname === '/repos/team/app/pulls/7') return { value: {
+      number: 7, title: 'L_PULL_TITLE', state: 'open', changed_files: 1, base: { ref: 'main', sha: 'c'.repeat(40), repo: { full_name: 'Team/App' } },
+      head: { ref: 'feature/example', sha: 'e'.repeat(40) },
+    } };
+  };
+
+  const input = { provider: 'github', name: 'GitHub', scope: 'PERSONAL', baseUrl: f.base, authMode: 'BEARER', token: secret };
+  assert.equal((await f.call('/api/accounts', 'POST', { ...input, baseUrl: 'https://example.invalid' }, dev.token)).body.error.code, 'INVALID_BASE_URL');
+  assert.equal((await f.call('/api/accounts', 'POST', { ...input, authMode: 'BASIC' }, dev.token)).body.error.code, 'INVALID_AUTH_MODE');
+  assert.equal((await f.call('/api/connectors/github/config', 'POST', { ...input, baseUrl: 'https://api.github.com/elsewhere' })).body.error.code, 'INVALID_BASE_URL');
+  const created = await f.call('/api/accounts', 'POST', input, dev.token);
+  assert.equal(created.status, 201);
+  const { id, version } = created.body.account;
+  const verifyPath = '/api/accounts/' + id + '/test';
+  const verifyInput = { expectedVersion: version, projectId: 'default' };
+  assert.equal((await f.call(verifyPath, 'POST', verifyInput, other.token)).status, 404);
+  const checked = await f.call(verifyPath, 'POST', verifyInput, dev.token);
+  assert.equal(checked.status, 200);
+  assert.equal(checked.body.account.status, 'CONNECTED');
+  assert.deepEqual(checked.body.identity, { id: '42', name: 'github-reader', displayName: 'Developer' });
+
+  const selection = { projectId: 'default', provider: 'github', accountId: id };
+  assert.equal((await f.call('/api/accounts/select', 'POST', selection, dev.token)).status, 200);
+  const lookup = { projectId: 'default', repository: 'team/app' };
+  const repo = await f.call('/api/connectors/github/read', 'POST', { ...lookup, resource: 'github_repo' }, dev.token);
+  assert.equal(repo.status, 200);
+  assert.equal(repo.body.externalUrl, 'https://github.com/team/app');
+  assert.equal(JSON.parse(repo.body.content).defaultBranch, 'main');
+  const pull = await f.call('/api/connectors/github/read', 'POST', { ...lookup, resource: 'github_pull', pullNumber: '7' }, dev.token);
+  assert.equal(pull.status, 200);
+  assert.equal(pull.body.externalUrl, 'https://github.com/team/app/pull/7');
+  assert.equal(pull.body.title, 'L_PULL_TITLE');
+  assert.equal(JSON.parse(pull.body.content).headSha, 'e'.repeat(40));
+  const prohibited = await f.call('/api/connectors/github/import', 'POST', { ...lookup, resource: 'github_pull', pullNumber: '7' }, dev.token);
+  assert.equal(prohibited.status, 405);
+  assert.deepEqual(f.state.requests.map(({ method, url }) => [method, url]), [
+    ['GET', '/user'], ['GET', '/user'], ['GET', '/repos/team/app'], ['GET', '/user'], ['GET', '/repos/team/app/pulls/7'],
+  ]);
+  assert.ok(f.state.requests.every(request => request.auth === 'Bearer ' + secret));
+  assert.ok(received.every(({ accept, agent }) => accept === 'application/vnd.github+json' && agent === 'TaskFlow'));
+
+  const { body: { task } } = await f.call('/api/tasks', 'POST', { projectId: 'default', title: 'Review GitHub PR' }, dev.token);
+  const original = f.state.handle;
+  const patch = '@@ -1 +1 @@\n-return 1;\n+return 2;';
+  f.state.handle = (req, url) => url.pathname === '/repos/team/app/pulls/7/files'
+    ? { value: [{ filename: 'main.ts', patch }] }
+    : original(req, url);
+  const request = { ...lookup, resource: 'github_pull', pullNumber: '7', taskId: task.id, kind: 'CODE', includeDiff: true };
+  const imported = await f.call('/api/connectors/github/import', 'POST', request, dev.token);
+  assert.equal(imported.status, 200);
+  assert.equal(JSON.parse(imported.body.asset.content).diffs[0].diff, patch);
+  f.state.handle = (req, url) => url.pathname === '/repos/team/app/pulls/7/files'
+    ? { value: [{ filename: 'main.ts' }] }
+    : original(req, url);
+  assert.equal((await f.call('/api/connectors/github/import', 'POST', request, dev.token)).body.error.code, 'REMOTE_CONTENT_INCOMPLETE');
+});
+
+test('a personal Yunxiao account can verify and read Codeup without Flow permissions', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const dev = await f.member('codeup-reader', 'DEV');
+  const flow = '/oapi/v1/flow/organizations/org/pipelines';
+  const repos = '/oapi/v1/codeup/organizations/org/repositories';
+  const mrs = '/oapi/v1/codeup/organizations/org/changeRequests';
+  f.state.handle = (_req, url) => {
+    if (url.pathname === flow) return { status: 403, value: { message: 'L_FLOW_DENIED' } };
+  };
+  const created = await f.call('/api/accounts', 'POST', {
+    provider: 'yunxiao', scope: 'PERSONAL', name: 'Codeup', baseUrl: f.base,
+    authMode: 'PRIVATE_TOKEN', organizationId: 'org', token: secret,
+  }, dev.token);
+  assert.equal(created.status, 201);
+  const { id, version } = created.body.account;
+  const projectId = 'default';
+  const verify = await f.call(`/api/accounts/${id}/test`, 'POST', { expectedVersion: version, projectId }, dev.token);
+  assert.equal(verify.status, 200);
+  assert.equal(verify.body.account.status, 'CONNECTED');
+  assert.deepEqual(verify.body.verifiedResource, { resource: 'yunxiao_repos', organizationId: 'org', count: 1 });
+  assert.equal((await f.call('/api/accounts/select', 'POST', { projectId, provider: 'yunxiao', accountId: id }, dev.token)).status, 200);
+  const read = resource => f.call('/api/connectors/yunxiao/read', 'POST', { projectId, resource }, dev.token);
+  const codeup = await read('yunxiao_mrs');
+  assert.equal(codeup.status, 200);
+  assert.equal(codeup.body.items[0].localId, '42');
+  const denied = await read('yunxiao_pipelines');
+  assert.equal(denied.status, 502);
+  assert.equal(denied.body.error.message, 'L_FLOW_DENIED');
+  assert.deepEqual(f.state.requests.map(({ method, url }) => [method, url.split('?')[0]]), [
+    ['GET', flow], ['GET', repos], ['GET', repos], ['GET', mrs], ['GET', flow],
+  ]);
+});
+
 for (const provider of ['gitlab', 'yunxiao']) {
   test(`${provider}: approved MR is merged through the operator account and read back without changing the reviewed asset`, async () => {
     const f = await fixture();
@@ -317,7 +418,7 @@ test('Jira project catalog sync is atomic, preserves credentials and members, an
   } finally { await f.close(); }
 });
 
-test('Jira parent imported later links same-source children, invalidates both contexts, and skips frozen children', async () => {
+test('Jira parent imported later links same-source children without invalidating parent reviews and skips frozen children', async () => {
   const f = await fixture(); const { call, state, platform } = f;
   try {
     await f.config('jira'); const synced = await call('/api/connectors/jira/sync-projects', 'POST', { projectIds: ['101'] }); const project = synced.body.projects.find(item => item.jira?.id === '101');
@@ -326,21 +427,22 @@ test('Jira parent imported later links same-source children, invalidates both co
     const importIssue = key => call('/api/connectors/jira/import', 'POST', { projectId: project.id, resource: 'jira_issue', issueKey: key });
     const child = (await importIssue('TEST-20')).body.task; assert.equal(child.parentId, null);
     await call(`/api/tasks/${child.id}/assets`, 'POST', { kind: 'PRD', title: 'L_PRD', content: 'L_PRD' });
-    const review = (await call('/api/reviews', 'POST', { taskId: child.id, stage: 'PRD', executionMode: 'HUMAN_REVIEW' })).body.job;
+    const review = await call('/api/reviews', 'POST', { taskId: child.id, stage: 'PRD', executionMode: 'HUMAN_REVIEW' });
+    assert.equal(review.body.error.code, 'SUBTASK_REVIEW_NOT_REQUIRED');
     const beforeChild = (await call(`/api/tasks/${child.id}`)).body.task;
-    const parentImport = await importIssue('TEST-10'); const parent = parentImport.body.task; assert.deepEqual(parentImport.body.linkedChildren, [child.id]); assert.equal(parent.contextVersion, 2);
-    const linkedChild = (await call(`/api/tasks/${child.id}`)).body.task; assert.equal(linkedChild.parentId, parent.id); assert.equal(linkedChild.contextVersion, beforeChild.contextVersion + 1); assert.equal((await call(`/api/jobs/${review.id}`)).body.job.stale, true);
+    const parentImport = await importIssue('TEST-10'); const parent = parentImport.body.task; assert.deepEqual(parentImport.body.linkedChildren, [child.id]); assert.equal(parent.contextVersion, 1);
+    const linkedChild = (await call(`/api/tasks/${child.id}`)).body.task; assert.equal(linkedChild.parentId, parent.id); assert.equal(linkedChild.contextVersion, beforeChild.contextVersion + 1);
     assert.equal((await importIssue('TEST-20')).body.imported, false);
     const parentBeforeMove = (await call(`/api/tasks/${parent.id}`)).body.task;
     state.issues['TEST-20'] = issue('TEST-20', 'TEST-30'); await importIssue('TEST-20');
-    assert.equal((await call(`/api/tasks/${child.id}`)).body.task.parentId, null); assert.equal((await call(`/api/tasks/${parent.id}`)).body.task.contextVersion, parentBeforeMove.contextVersion + 1);
+    assert.equal((await call(`/api/tasks/${child.id}`)).body.task.parentId, null); assert.equal((await call(`/api/tasks/${parent.id}`)).body.task.contextVersion, parentBeforeMove.contextVersion);
     platform.db.prepare("UPDATE tasks SET status='DONE' WHERE id=?").run(child.id);
     const nextParent = await importIssue('TEST-30'); assert.equal(nextParent.body.skippedChildren[0].id, child.id); assert.equal(nextParent.body.skippedChildren[0].reason, 'TASK_DONE'); assert.equal((await call(`/api/tasks/${child.id}`)).body.task.parentId, null);
     platform.db.prepare("UPDATE tasks SET status='OPEN' WHERE id=?").run(child.id);
     const relinkedParent = await importIssue('TEST-30'); assert.equal(relinkedParent.body.imported, true); assert.deepEqual(relinkedParent.body.linkedChildren, [child.id]);
     const relinked = await importIssue('TEST-20'); assert.equal(relinked.body.imported, false); assert.equal(relinked.body.task.parentId, nextParent.body.task.id);
     const newParentBefore = (await call(`/api/tasks/${nextParent.body.task.id}`)).body.task;
-    assert.equal(newParentBefore.contextVersion, nextParent.body.task.contextVersion + 1);
+    assert.equal(newParentBefore.contextVersion, nextParent.body.task.contextVersion);
     platform.db.prepare("UPDATE tasks SET status='DONE' WHERE id=?").run(nextParent.body.task.id);
     state.issues['TEST-20'].fields.description = 'L_CANNOT_CHANGE_UNDER_DONE';
     assert.equal((await importIssue('TEST-20')).body.error.code, 'ANCESTOR_DONE');
@@ -472,5 +574,75 @@ test('Yunxiao Codeup read-only connector lists repos/MRs and imports merged MRs 
     assert.equal(commitImport.status, 200);
     assert.equal(commitImport.body.asset.kind, 'CODE');
     assert.match(commitImport.body.asset.content, /feat: show offline status/);
+  } finally { await f.close(); }
+});
+
+test('Yunxiao Codeup merged MR falls back to diffs/patches and mergedRevision^1 when commits API lacks token permission', async () => {
+  const f = await fixture(); const { call, config } = f;
+  const mergeSha = '1'.repeat(40);
+  const baseSha = '2'.repeat(40);
+  const headSha = '3'.repeat(40);
+  const oldHeadSha = '4'.repeat(40);
+  const repo = '/oapi/v1/codeup/organizations/org/repositories/10001';
+  let patchesEnabled = true;
+  f.state.handle = (_req, url) => {
+    if (url.pathname === `${repo}/changeRequests/647`) {
+      return { value: {
+        localId: 647, projectId: 10001, title: 'fix: adyen withdrawal', status: 'MERGED',
+        sourceBranch: 'feature/vms', targetBranch: 'i18n-test', mergedRevision: mergeSha,
+        author: { name: 'L_AUTHOR' }, detailUrl: 'https://codeup.aliyun.com/org/team/app/change/647',
+      } };
+    }
+    if (url.pathname === `${repo}/commits/${mergeSha}`) {
+      return { status: 403, value: { message: 'Current token has no permission to api.' } };
+    }
+    if (url.pathname === `${repo}/changeRequests/647/diffs/patches`) {
+      if (!patchesEnabled) return { status: 404, value: { message: 'Not Found' } };
+      return { value: [
+        { relatedMergeItemType: 'MERGE_SOURCE', versionNo: 1, commitId: oldHeadSha },
+        { relatedMergeItemType: 'MERGE_SOURCE', versionNo: 2, commitId: headSha },
+        { relatedMergeItemType: 'MERGE_TARGET', versionNo: 1, commitId: baseSha },
+      ] };
+    }
+    if (url.pathname === `${repo}/compares`) {
+      const from = url.searchParams.get('from');
+      const to = url.searchParams.get('to');
+      if (from === baseSha && to === headSha) {
+        return { value: {
+          commits: [{ shortId: headSha.slice(0, 8), title: 'fix: adyen withdrawal', authorName: 'L_AUTHOR' }],
+          diffs: [{ oldPath: 'src/withdrawal.vue', newPath: 'src/withdrawal.vue', diff: '@@ -1 +1 @@\n-disabled\n+enabled' }],
+        } };
+      }
+      if (from === `${mergeSha}^1` && to === mergeSha) {
+        return { value: {
+          commits: [{ shortId: mergeSha.slice(0, 8), title: 'merge: adyen withdrawal', authorName: 'L_AUTHOR' }],
+          diffs: [{ oldPath: 'src/fallback.vue', newPath: 'src/fallback.vue', diff: '@@ -1 +1 @@\n-before\n+after' }],
+        } };
+      }
+      return { value: { commits: [], diffs: [] } };
+    }
+  };
+  try {
+    await config('yunxiao', { authMode: 'PRIVATE_TOKEN', organizationId: 'org' });
+    const task = (await call('/api/tasks', 'POST', { jiraKey: 'CODEUP-2', title: 'Codeup fallback task' })).body.task;
+
+    // 1. Falls back to latest MERGE_TARGET..MERGE_SOURCE from diffs/patches when commits API returns 403
+    const viaPatches = await call('/api/connectors/yunxiao/import', 'POST', {
+      resource: 'yunxiao_mr', repositoryId: '10001', mrLocalId: '647', taskId: task.id,
+    });
+    assert.equal(viaPatches.status, 200);
+    assert.match(viaPatches.body.asset.content, /## Unified Diff/);
+    assert.match(viaPatches.body.asset.content, /src\/withdrawal\.vue/);
+    assert.match(viaPatches.body.asset.content, /@@ -1 \+1 @@/);
+
+    // 2. Falls back to mergedRevision^1..mergedRevision when diffs/patches is also unavailable
+    patchesEnabled = false;
+    const viaParentRef = await call('/api/connectors/yunxiao/import', 'POST', {
+      resource: 'yunxiao_mr', repositoryId: '10001', mrLocalId: '647', taskId: task.id,
+    });
+    assert.equal(viaParentRef.status, 200);
+    assert.match(viaParentRef.body.asset.content, /## Unified Diff/);
+    assert.match(viaParentRef.body.asset.content, /src\/fallback\.vue/);
+    assert.match(viaParentRef.body.asset.content, /@@ -1 \+1 @@/);
   } finally { await f.close(); }
 });

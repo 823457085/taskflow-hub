@@ -189,7 +189,7 @@ test('accounts and choices survive a file-backed restart without changing legacy
     const selected = f.internal.resolveSelection(login.user, { projectId: 'default', provider: 'jira' });
     assert.equal(f.internal.getCredential(selected).token, created.secret);
     assert.deepEqual(f.app.db.prepare('SELECT id,version,credential FROM connector_configs').all(), legacy);
-    assert.equal(f.app.db.prepare('SELECT max(version) AS n FROM schema_migrations').get().n, 5);
+    assert.equal(f.app.db.prepare('SELECT max(version) AS n FROM schema_migrations').get().n, 7);
     assert.equal((await stat(join(directory, 'connectors.key'))).mode & 0o777, 0o600);
     assert.equal((await stat(dbPath)).mode & 0o777, 0o600);
   } finally { await f.close(); }

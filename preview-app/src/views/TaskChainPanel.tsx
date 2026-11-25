@@ -1,158 +1,91 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Card, Collapse, Drawer, Empty, Flex, Skeleton, Space, Table, Tag, Tooltip, Typography } from 'antd';
-import { AlertTriangle, CheckCircle2, Copy, Download, ExternalLink, FileBarChart, GitBranch, ListTree, MinusCircle, RefreshCw, Sparkles, Square, XCircle } from 'lucide-react';
+import { App as AntApp, Button, Drawer, Dropdown, Empty, Flex, Input, Modal, Popconfirm, Skeleton, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import type { MenuProps } from 'antd';
+import { AlertTriangle, CheckCircle2, Copy, Download, ExternalLink, FileBarChart, GitBranch, ListTree, MinusCircle, MoreHorizontal, Plus, RefreshCw, Sparkles, Square, XCircle } from 'lucide-react';
 import { api, ApiError, CHAIN_STAGE_ORDER, CHAIN_STAGE_SHORT } from './workspaceApi';
 import type {
   ChainCheck, ChainChild, ChainLink, ChainLinkStatus, ChainNextAction, ChainObject,
-  ChainStatusMap, DeliveryChain, LocalAiEngineId, LocalAiRun, LocalAutomationCapabilities,
+  ChainStatusMap, DeliveryChain, LocalAiRun, LocalAutomationCapabilities, Stage,
 } from './workspaceApi';
-import { ChecklistTable, FindingMetaBadges, LINK_STATUS_META, ReportMetaSummary, SuggestedPatchView, VerdictTag } from './ChainReportBits';
+import { ChecklistTable, LINK_STATUS_META, ReportMetaSummary } from './ChainReportBits';
 import { MarkdownPreview } from './MarkdownPreview';
-import { readStoredChoice } from './uiPreferences';
+import { AiRunIdentity, availableAiEngine, LocalAiExecutionFields, readAiEngine, useAiModelSelection } from './LocalAiExecutionFields';
+import { severityLabel, taskStatusLabel } from './displayLabels';
+import { ReviewExportActions } from './ReviewExportActions';
 import './TaskChainPanel.css';
 
-const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
-const OVERALL_META: Record<DeliveryChain['overall']['status'], { label: string; color: string }> = {
-  PASS: { label: '全链路通过', color: 'success' },
-  BLOCKED: { label: '存在阻断', color: 'error' },
-  IN_PROGRESS: { label: '推进中', color: 'processing' },
+const DEFAULT_VISIBLE_FINDINGS = 3;
+const DEFAULT_WAIVE_REASON = '已人工确认风险可控，暂不阻塞当前任务。';
+const DETAIL_PAGINATION = { size: 'small', pageSize: 5, hideOnSinglePage: true, showSizeChanger: false } as const;
+
+const PLAIN_STAGE_TITLE: Record<Stage, string> = {
+  PRD: '需求文档',
+  TASK_BREAKDOWN: '任务拆分',
+  TECH_SPEC: '技术方案',
+  CODE_REVIEW: '代码审查',
+  TEST_CASE: '测试用例',
+  RELEASE: '上线检查',
 };
+
+const PLAIN_STATUS_TEXT: Record<ChainLinkStatus, string> = {
+  PASS: '已通过',
+  LINKED: '已关联',
+  BLOCKED: '未通过',
+  CHANGES_REQUESTED: '需修改',
+  CONDITIONAL: '有提醒',
+  AWAITING_DECISION: '待确认',
+  STALE: '需重审',
+  REVIEWING: '评审中',
+  READY: '待评审',
+  MISSING: '缺材料',
+};
+
+function plainStageBadge(link: ChainLink): { label: string; tone: string } {
+  const baseTone = (LINK_STATUS_META[link.status] || LINK_STATUS_META.MISSING).tone;
+  if (link.status === 'LINKED') return { label: link.statusLabel || '已关联', tone: baseTone };
+  if (link.status === 'BLOCKED' && link.advisory) {
+    return { label: '建议优化', tone: 'warn' };
+  }
+  return { label: PLAIN_STATUS_TEXT[link.status] || link.statusLabel, tone: baseTone };
+}
 
 export const ChainStatusDots: React.FC<{ statuses: ChainStatusMap | null | undefined; size?: 'small' | 'default' }> = ({ statuses, size = 'default' }) => {
   if (!statuses) return <Typography.Text type="secondary">—</Typography.Text>;
-  return <span className={`tf-chain-dots ${size === 'small' ? 'is-small' : ''}`} aria-label="交付链路进度">
+  return <span className={`tf-chain-dots ${size === 'small' ? 'is-small' : ''}`} aria-label="AI 评审进度">
     {CHAIN_STAGE_ORDER.map(stage => {
       const status = statuses[stage];
       const meta = LINK_STATUS_META[status] || LINK_STATUS_META.MISSING;
-      return <Tooltip key={stage} title={`${CHAIN_STAGE_SHORT[stage]}：${meta.label}`}><span className={`tf-chain-dot tone-${meta.tone}`}>{size === 'small' ? null : CHAIN_STAGE_SHORT[stage]}</span></Tooltip>;
+      const text = PLAIN_STATUS_TEXT[status] || meta.label;
+      return <Tooltip key={stage} title={`${PLAIN_STAGE_TITLE[stage]}：${text}`}><span className={`tf-chain-dot tone-${meta.tone}`}>{size === 'small' ? null : CHAIN_STAGE_SHORT[stage]}</span></Tooltip>;
     })}
   </span>;
 };
 
-const StatusPill: React.FC<{ status: ChainLinkStatus; label?: string }> = ({ status, label }) => {
-  const meta = LINK_STATUS_META[status] || LINK_STATUS_META.MISSING;
-  return <span className={`tf-chain-pill tone-${meta.tone}`}>{label || meta.label}</span>;
-};
-
 const CheckIcon: React.FC<{ check: ChainCheck }> = ({ check }) => {
-  if (check.ok === true) return <CheckCircle2 size={15} className="tf-chain-check-icon is-ok" />;
-  if (check.ok === false) return check.level === 'required' ? <XCircle size={15} className="tf-chain-check-icon is-fail" /> : <AlertTriangle size={15} className="tf-chain-check-icon is-warn" />;
-  return <MinusCircle size={15} className="tf-chain-check-icon is-na" />;
+  if (check.ok === true) return <CheckCircle2 size={14} className="tf-chain-check-icon is-ok" />;
+  if (check.ok === false) return check.level === 'required' ? <XCircle size={14} className="tf-chain-check-icon is-fail" /> : <AlertTriangle size={14} className="tf-chain-check-icon is-warn" />;
+  return <MinusCircle size={14} className="tf-chain-check-icon is-na" />;
 };
 
 const ObjectRow: React.FC<{ object: ChainObject; onOpenTask: (id: string) => void; onLinkChild?: (key: string) => void; linking?: boolean }> = ({ object, onOpenTask, onLinkChild, linking }) => {
+  const unlinked = object.type === 'jira-unlinked';
+  const title = unlinked ? object.key || object.label : object.label;
   const icon = ['mr', 'branch', 'local-diff', 'repo', 'repo-local'].includes(object.type) ? <GitBranch size={13} /> : object.type === 'task' ? <ListTree size={13} /> : null;
   const label = object.type === 'task' && object.taskId
-    ? <Typography.Link onClick={() => onOpenTask(object.taskId!)}>{object.label}</Typography.Link>
-    : object.url ? <Typography.Link href={object.url} target="_blank" rel="noreferrer">{object.label}<ExternalLink size={11} className="tf-chain-ext-icon" /></Typography.Link>
-      : <Typography.Text>{object.label}</Typography.Text>;
-  return <li className={`tf-chain-object ${object.type === 'jira-unlinked' ? 'is-unlinked' : ''}`}>
-    {icon && <span className="tf-chain-object-icon">{icon}</span>}
-    <span className="tf-break">{label}{object.meta ? <Typography.Text type="secondary" className="tf-chain-object-meta"> · {object.meta}</Typography.Text> : null}{object.assignee ? <Typography.Text type="secondary" className="tf-chain-object-meta"> · {object.assignee}</Typography.Text> : null}</span>
-    {object.type === 'jira-unlinked' && object.key && onLinkChild && <Button type="link" size="small" className="tf-chain-object-action" loading={linking} onClick={() => onLinkChild(object.key!)}>导入并关联</Button>}
+    ? <button type="button" className="tf-chain-object-link" onClick={() => onOpenTask(object.taskId!)}>{title}</button>
+    : object.url ? <Typography.Link href={object.url} target="_blank" rel="noreferrer">{title}<ExternalLink size={11} className="tf-chain-ext-icon" /></Typography.Link>
+      : <Typography.Text>{title}</Typography.Text>;
+  const meta = unlinked ? 'Jira 未导入' : [object.meta, object.assignee].filter(Boolean).join(' · ');
+  return <li className="tf-chain-object">
+    <span className="tf-chain-object-label">
+      {icon && <span className="tf-chain-object-icon" aria-hidden="true">{icon}</span>}
+      <span className="tf-chain-object-title" title={object.label}>{label}</span>
+    </span>
+    {meta && <Typography.Text type="secondary" className="tf-chain-object-meta" title={meta}>{meta}</Typography.Text>}
+    {unlinked && object.key && onLinkChild && (
+      <Button type="link" size="small" className="tf-chain-object-action" loading={linking} onClick={() => onLinkChild(object.key!)}>导入</Button>
+    )}
   </li>;
-};
-
-const LinkCard: React.FC<{
-  link: ChainLink; current: boolean; frozen: boolean; linkingKey: string;
-  onAction: (link: ChainLink, action: ChainNextAction) => void; onOpenTask: (id: string) => void; onLinkChild: (key: string) => void; onAddInput?: (link: ChainLink) => void;
-}> = ({ link, current, frozen, linkingKey, onAction, onOpenTask, onLinkChild, onAddInput }) => {
-  const meta = LINK_STATUS_META[link.status];
-  const review = link.review;
-  const failedRequired = link.checks.filter(check => check.ok === false && check.level === 'required').length;
-  const warnings = link.checks.filter(check => check.ok === false && check.level === 'advice').length;
-  const actionDisabled = frozen && !['VIEW', 'DECIDE'].includes(link.next.type);
-  const primary = ['AI_REVIEW', 'DECIDE', 'ADD_INPUT', 'ADD_SUBTASKS', 'FIX'].includes(link.next.type);
-  const openClarifies = (review?.meta?.clarifyQuestions || []).filter(q => !q.resolved).length;
-  return <section id={`chain-link-${link.id}`} className={`tf-chain-link tone-${meta.tone} ${current ? 'is-current' : ''}`} aria-label={`${link.index}. ${link.title}`}>
-    <div className="tf-chain-link-rail"><span className="tf-chain-link-index">{link.index}</span></div>
-    <Card size="small" className="tf-chain-link-card">
-      <Flex justify="space-between" align="start" gap={12} wrap className="tf-chain-link-head">
-        <div className="tf-chain-link-heading">
-          <Space size={8} wrap>
-            <Typography.Title level={5} className="tf-chain-link-title">{link.title}</Typography.Title>
-            <StatusPill status={link.status} label={link.statusLabel} />
-            {link.advisory && <Tooltip title="建议项：显示 AI 结论，但不阻止任务完成"><Tag>建议项</Tag></Tooltip>}
-            {current && <Tag color="processing">当前环节</Tag>}
-          </Space>
-          <Typography.Text type="secondary" className="tf-chain-link-purpose">{link.purpose}</Typography.Text>
-        </div>
-        <Space size={6} wrap>
-          {review && link.next.type !== 'VIEW' && link.next.type !== 'DECIDE' && <Button size="small" onClick={() => onAction(link, { type: 'VIEW', label: '查看报告', stage: link.stage, jobId: review.jobId })}>查看报告</Button>}
-          <Button size="small" type={primary ? 'primary' : 'default'} icon={link.next.type === 'AI_REVIEW' ? <Sparkles size={14} /> : undefined} disabled={actionDisabled} onClick={() => onAction(link, link.next)}>{link.next.label}</Button>
-        </Space>
-      </Flex>
-      <div className="tf-chain-link-grid">
-        <div className="tf-chain-col">
-          <Flex justify="space-between" align="center" gap={6}>
-            <Typography.Text strong className="tf-chain-col-title">关联对象</Typography.Text>
-            {!frozen && onAddInput && <Button type="link" size="small" className="tf-chain-object-action" onClick={() => onAddInput(link)}>{link.id === 'BREAKDOWN' ? '+ 拆分子任务' : '+ 补充 / 更新'}</Button>}
-          </Flex>
-          {link.objects.length ? <ul className="tf-chain-objects">{link.objects.map((object, index) => <ObjectRow key={`${object.type}:${object.label}:${index}`} object={object} onOpenTask={onOpenTask} onLinkChild={frozen ? undefined : onLinkChild} linking={linkingKey === object.key} />)}</ul>
-            : <Typography.Text type="secondary">尚未关联{link.missing.length ? `（缺${link.missing.join('、')}）` : ''}</Typography.Text>}
-        </div>
-        <div className="tf-chain-col">
-          <Typography.Text strong className="tf-chain-col-title">规则检查{failedRequired ? <Tag color="error" className="tf-chain-col-tag">{failedRequired} 项必需未满足</Tag> : warnings ? <Tag color="warning" className="tf-chain-col-tag">{warnings} 项建议</Tag> : null}</Typography.Text>
-          <ul className="tf-chain-checks">{link.checks.map(check => <li key={check.id}>
-            <CheckIcon check={check} />
-            <span className="tf-break"><span className={check.ok === false && check.level === 'required' ? 'tf-chain-check-fail' : ''}>{check.label}</span>{check.level === 'required' && <Typography.Text type="secondary" className="tf-chain-required">必需</Typography.Text>}<Typography.Text type="secondary" className="tf-chain-check-detail">{check.detail}</Typography.Text></span>
-          </li>)}</ul>
-        </div>
-        <div className="tf-chain-col">
-          <Typography.Text strong className="tf-chain-col-title">AI 审核</Typography.Text>
-          {review ? <div className="tf-chain-review">
-            <Space size={4} wrap>
-              <VerdictTag verdict={review.verdict} score={review.score} meta={review.meta} />
-              {review.stale && <Tag color="warning">材料已变化</Tag>}
-              {!review.reportedAt && <Tag color="processing">等待 AI 报告</Tag>}
-            </Space>
-            {review.summary && <Typography.Paragraph type="secondary" ellipsis={{ rows: 3, expandable: true, symbol: '展开' }} className="tf-chain-review-summary">{review.summary}</Typography.Paragraph>}
-            {review.reportedAt && <Space size={6} wrap className="tf-chain-finding-counts">
-              <Tag color={review.findings.critical ? 'error' : 'default'}>阻断 {review.findings.critical}</Tag>
-              <Tag color={review.findings.warn ? 'warning' : 'default'}>警告 {review.findings.warn}</Tag>
-              {review.findings.waived > 0 && <Tag>已豁免 {review.findings.waived}</Tag>}
-              {openClarifies > 0 && <Tag color="orange">待澄清 {openClarifies}</Tag>}
-            </Space>}
-            {review.decision && <Typography.Text type="secondary" className="tf-chain-decision">人工确认：{review.decision.decision === 'APPROVE' ? '批准' : '退回'} · {review.decision.reason}</Typography.Text>}
-          </div> : <Typography.Text type="secondary">{link.status === 'MISSING' ? '资料齐备后可发起 AI 审核' : '尚未审核'}</Typography.Text>}
-        </div>
-      </div>
-      {link.delta && (
-        <div className="tf-chain-delta">
-          <Collapse
-            ghost
-            size="small"
-            items={[{
-              key: 'delta',
-              label: (
-                <Space size={6} wrap>
-                  <Tag color="blue" style={{ marginInlineEnd: 0 }}>变更增量 r{link.delta.fromRevision} → r{link.delta.toRevision}</Tag>
-                  <Typography.Text type="success">+{link.delta.additions}</Typography.Text>
-                  <Typography.Text type="danger">-{link.delta.deletions}</Typography.Text>
-                  {link.delta.changedHeadings.length > 0 && <Typography.Text type="secondary">涉及章节：{link.delta.changedHeadings.join('、')}</Typography.Text>}
-                </Space>
-              ),
-              children: link.delta.previewLines.length ? (
-                <div className="tf-chain-delta-lines">
-                  {link.delta.previewLines.map((line, i) => (
-                    <div key={i} className={line.kind === '+' ? 'tf-chain-delta-add' : 'tf-chain-delta-del'}>
-                      {line.kind} {line.text}
-                    </div>
-                  ))}
-                </div>
-              ) : <Typography.Text type="secondary">内容字节重排，无增删行预览。</Typography.Text>,
-            }]}
-          />
-        </div>
-      )}
-      <Collapse ghost size="small" className="tf-chain-link-more" items={[
-        ...(review?.meta ? [{ key: 'meta', label: '结构化洞察（Walkthrough / 需求对照 / 澄清清单）', children: <ReportMetaSummary meta={review.meta} /> }] : []),
-        ...(review?.checklist.length ? [{ key: 'checklist', label: `AI 检查清单（${review.checklist.length} 项）`, children: <ChecklistTable items={review.checklist} /> }] : []),
-        ...(review?.findings.items.length ? [{ key: 'findings', label: `问题清单（${review.findings.items.length}）`, children: <ul className="tf-chain-findings">{review.findings.items.map(item => <li key={item.id}><Space size={6} wrap><Tag color={item.severity === 'CRITICAL' ? 'error' : item.severity === 'WARN' ? 'warning' : 'default'}>{item.severity}</Tag><FindingMetaBadges category={item.category} confidence={item.confidence} ruleId={item.ruleId} />{item.waived && <Tag>已豁免</Tag>}<Typography.Text strong>{item.title}</Typography.Text></Space><Typography.Paragraph type="secondary" className="tf-preserve">{item.detail}{item.location ? `（${item.location}）` : ''}</Typography.Paragraph><SuggestedPatchView patch={item.suggestedPatch} /></li>)}</ul> }] : []),
-        { key: 'focus', label: '本环节审核要点', children: <ol className="tf-chain-focus">{link.focus.map(item => <li key={item}>{item}</li>)}</ol> },
-      ]} />
-    </Card>
-  </section>;
 };
 
 export const ChainReportDrawer: React.FC<{ taskId: string; jiraKey: string; open: boolean; onClose: () => void; onUnauthorized: () => void }> = ({ taskId, jiraKey, open, onClose, onUnauthorized }) => {
@@ -170,10 +103,10 @@ export const ChainReportDrawer: React.FC<{ taskId: string; jiraKey: string; open
   }, [open, taskId]);
   const download = () => {
     const url = URL.createObjectURL(new Blob([markdown], { type: 'text/markdown;charset=utf-8' }));
-    const link = document.createElement('a'); link.href = url; link.download = `${jiraKey}-交付链路审核报告.md`;
+    const link = document.createElement('a'); link.href = url; link.download = `${jiraKey}-AI评审总报告.md`;
     document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
   };
-  return <Drawer title={<Space size={8}><FileBarChart size={18} />交付链路审核报告 · {jiraKey}</Space>} size={880} open={open} onClose={onClose} className="tf-task-detail-drawer"
+  return <Drawer title={<Space size={8}><FileBarChart size={18} />AI 评审总报告 · {jiraKey}</Space>} size={880} open={open} onClose={onClose} className="tf-task-detail-drawer"
     extra={<Space size={6}>
       <Button icon={<Copy size={14} />} disabled={!markdown} onClick={() => { void navigator.clipboard.writeText(markdown).then(() => message.success('报告已复制为 Markdown，可直接粘贴到 Jira / Confluence。')).catch(() => message.warning('浏览器未能复制，请使用下载。')); }}>复制</Button>
       <Button type="primary" icon={<Download size={14} />} disabled={!markdown} onClick={download}>下载 .md</Button>
@@ -184,23 +117,49 @@ export const ChainReportDrawer: React.FC<{ taskId: string; jiraKey: string; open
 
 export const TaskChainPanel: React.FC<{
   taskId: string; refreshKey: string; frozen: boolean;
+  wizardMode?: boolean;
+  focusStage?: Stage;
+  onSelectStage?: (stage?: Stage) => void;
+  onChainLoaded?: (chain: DeliveryChain) => void;
   onAction: (link: ChainLink, action: ChainNextAction) => void;
+  onRunAiReview?: (stage: Stage) => void;
   onAddInput?: (link: ChainLink) => void;
+  onImportOpenApi?: () => void;
+  onSyncJiraChildren?: () => void; syncingJiraChildren?: boolean;
+  approvableJobIds?: readonly string[];
+  waivableJobIds?: readonly string[];
+  onQuickApprove?: (jobId: string) => void;
+  onQuickWaive?: (jobId: string, findingId: string, reason: string) => Promise<void> | void;
   onOpenTask: (id: string) => void; onUnauthorized: () => void; onForbidden?: () => void; onChanged?: () => Promise<void> | void;
-}> = ({ taskId, refreshKey, frozen, onAction, onAddInput, onOpenTask, onUnauthorized, onForbidden, onChanged }) => {
+}> = ({
+  taskId, refreshKey, frozen, focusStage, onSelectStage, onChainLoaded,
+  onAction, onRunAiReview, onAddInput, onImportOpenApi, onSyncJiraChildren, syncingJiraChildren,
+  approvableJobIds = [], waivableJobIds = [], onQuickApprove, onQuickWaive,
+  onOpenTask, onUnauthorized, onForbidden, onChanged,
+}) => {
   const { message } = AntApp.useApp();
   const [chain, setChain] = useState<DeliveryChain | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [reportOpen, setReportOpen] = useState(false);
   const [linkingKey, setLinkingKey] = useState('');
   const [analyzeRun, setAnalyzeRun] = useState<LocalAiRun | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
-  const [analyzeOpen, setAnalyzeOpen] = useState(false);
+  const [analysisSetupOpen, setAnalysisSetupOpen] = useState(false);
+  const [analysisCaps, setAnalysisCaps] = useState<LocalAutomationCapabilities | null>(null);
+  const [analysisEngine, setAnalysisEngine] = useState(readAiEngine);
+  const executionRunner = analysisCaps?.deployment === 'server' ? 'bridge' : 'local';
+  const analysisModel = useAiModelSelection(analysisCaps, analysisEngine, executionRunner);
+  const [localStage, setLocalStage] = useState<Stage | undefined>(undefined);
+  const [waiveDrafts, setWaiveDrafts] = useState<Record<string, string>>({});
+  const [waivingId, setWaivingId] = useState('');
   const sequence = useRef(0);
+
+  useEffect(() => {
+    setLocalStage(undefined);
+    setAnalysisSetupOpen(false);
+    setWaiveDrafts({});
+  }, [taskId]);
 
   const load = useCallback(async () => {
     const current = ++sequence.current;
-    setLoading(true);
     try {
       const [data, runsRes] = await Promise.all([
         api<{ chain: DeliveryChain }>(`tasks/${encodeURIComponent(taskId)}/chain`),
@@ -208,15 +167,15 @@ export const TaskChainPanel: React.FC<{
       ]);
       if (current === sequence.current) {
         setChain(data.chain);
+        onChainLoaded?.(data.chain);
         const latestAnalyze = (runsRes.runs || []).find(r => r.actionType === 'CHAIN_ANALYZE') || null;
         setAnalyzeRun(latestAnalyze);
-        if (latestAnalyze?.status === 'RUNNING') setAnalyzeOpen(true);
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) onUnauthorized();
       else if (error instanceof ApiError && error.status === 403) onForbidden?.();
-      else void message.error(error instanceof Error ? error.message : '交付链路加载失败。');
-    } finally { if (current === sequence.current) setLoading(false); }
+      else void message.error(error instanceof Error ? error.message : '评审流程加载失败。');
+    }
   }, [taskId]);
   useEffect(() => { void load(); }, [load, refreshKey]);
 
@@ -231,27 +190,32 @@ export const TaskChainPanel: React.FC<{
     return () => window.clearInterval(timer);
   }, [analyzeRun?.id, analyzeRun?.status]);
 
+  useEffect(() => {
+    if (!analysisSetupOpen) return;
+    let visible = true;
+    void api<LocalAutomationCapabilities>('local-automation/capabilities').then(result => {
+      if (!visible) return;
+      setAnalysisCaps(result);
+      setAnalysisEngine(preferred => availableAiEngine(result, preferred));
+    }).catch(() => {});
+    return () => { visible = false; };
+  }, [analysisSetupOpen]);
+
   const startCrossAnalyze = async () => {
-    if (analyzing || analyzeRun?.status === 'RUNNING') return;
+    if (analyzing || analyzeRun?.status === 'RUNNING' || analysisModel.invalid) return;
     setAnalyzing(true);
     try {
-      let engine = readStoredChoice('taskflow.ai.engine', ENGINE_IDS, 'codex');
-      try {
-        const caps = await api<LocalAutomationCapabilities>('local-automation/capabilities');
-        if (!caps.engines.some(e => e.id === engine && e.available)) {
-          engine = caps.engines.find(e => e.available)?.id || engine;
-        }
-      } catch { /* fallback to stored choice */ }
       const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(taskId)}/ai-runs`, {
         mode: 'read',
         actionType: 'CHAIN_ANALYZE',
-        engine,
+        engine: analysisEngine,
+        ...(analysisModel.model ? { model: analysisModel.model } : {}),
       });
       setAnalyzeRun(res.run);
-      setAnalyzeOpen(true);
-      void message.success('已发起跨环节 AI 一致性深度检查（/analyze）。');
+      setAnalysisSetupOpen(false);
+      void message.success('已发起跨阶段 AI 一致性检查。');
     } catch (error) {
-      void message.error(error instanceof Error ? error.message : '启动跨环节一致性检查失败。');
+      void message.error(error instanceof Error ? error.message : '启动一致性检查失败。');
     } finally {
       setAnalyzing(false);
     }
@@ -267,13 +231,12 @@ export const TaskChainPanel: React.FC<{
     }
   };
 
-  // Import a Jira item declared in the dev task (交付物 / 相关开发事项) and link it as a child of this task.
   const linkChild = async (key: string) => {
     if (!chain) return;
     setLinkingKey(key);
     try {
       const result = await api<{ task: { jiraKey: string }; imported: boolean; linkedToParent: boolean }>('jira/tasks/import', { reference: key, projectId: chain.task.projectId, parentTaskId: chain.task.id });
-      void message.success(`${result.task.jiraKey} 已${result.imported ? '导入并' : ''}关联为研发子任务。`);
+      void message.success(`${result.task.jiraKey} 已${result.imported ? '导入并' : ''}关联为子任务。`);
       await onChanged?.();
       await load();
     } catch (error) {
@@ -282,110 +245,375 @@ export const TaskChainPanel: React.FC<{
     } finally { setLinkingKey(''); }
   };
 
-  if (!chain) return <Card><Skeleton active paragraph={{ rows: 8 }} /></Card>;
-  const overall = OVERALL_META[chain.overall.status];
+  if (!chain) return <div style={{ padding: '12px 0' }}><Skeleton active paragraph={{ rows: 5 }} /></div>;
+
+  const activeStage = focusStage ?? localStage;
+  const selectStage = (stage: Stage) => {
+    if (onSelectStage) onSelectStage(stage);
+    else setLocalStage(stage);
+  };
+
   const currentLink = chain.links.find(link => link.id === chain.overall.currentLinkId) || null;
-  const metrics = chain.analysis?.metrics;
+  const focusedLink = activeStage ? chain.links.find(link => link.stage === activeStage) || null : null;
+  const activeLink = focusedLink || currentLink || chain.links[0];
+  if (!activeLink) return null;
+  const activeBadge = plainStageBadge(activeLink);
+  const autoLinked = activeLink.status === 'LINKED' && activeLink.stage === 'TASK_BREAKDOWN';
+
+  const stepReview = activeLink.review;
+  const canApproveHere = !frozen && !!stepReview && !!onQuickApprove && approvableJobIds.includes(stepReview.jobId);
+  const canWaiveHere = !frozen && !!stepReview && !!onQuickWaive && waivableJobIds.includes(stepReview.jobId);
+
   const conflicts = chain.analysis?.conflicts || [];
-  const jumpTo = (id: string) => document.getElementById(`chain-link-${id}`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  const stepConflicts = conflicts.filter(c => c.linkIds.includes(activeLink.id));
+  const activeFindings = (stepReview && !stepReview.stale ? stepReview.findings.items : [])
+    .filter(item => item.severity !== 'INFO' && !item.waived)
+    .sort((a, b) => Number(b.severity === 'CRITICAL') - Number(a.severity === 'CRITICAL'));
+  const visibleFindings = activeFindings.slice(0, DEFAULT_VISIBLE_FINDINGS);
 
-  return <div className="tf-chain-panel">
-    <Card className="tf-chain-overview" size="small">
-      <Flex justify="space-between" align="start" gap={12} wrap>
-        <div className="tf-chain-overview-main">
-          <Space size={8} wrap>
-            <Typography.Title level={5} className="tf-chain-overview-title">交付链路</Typography.Title>
-            <Tag color={overall.color}>{overall.label}</Tag>
-            <Typography.Text type="secondary">门禁 {chain.overall.passed}/{chain.overall.total} 通过</Typography.Text>
-            {chain.overall.score !== null && <Typography.Text type="secondary">· AI 平均评分 {chain.overall.score}</Typography.Text>}
-            {chain.requirementKeys.length > 0 && <Typography.Text type="secondary">· 需求 {chain.requirementKeys.join('、')}</Typography.Text>}
-            {chain.parent && <Typography.Text type="secondary">· 父任务 <Typography.Link onClick={() => onOpenTask(chain.parent!.id)}>{chain.parent.jiraKey}</Typography.Link></Typography.Text>}
-          </Space>
-          <Typography.Text type="secondary" className="tf-chain-overview-hint">
-            {currentLink ? <>下一步：<Typography.Text strong>{currentLink.index}. {currentLink.title}</Typography.Text> — {currentLink.next.label}</> : '全部环节已通过，可在顶部「一键完成核验」归档任务。'}
-          </Typography.Text>
-          {metrics && (
-            <div className="tf-chain-metrics">
-              {metrics.coveragePrd !== null && <Tag color={metrics.coveragePrd >= 100 ? 'success' : 'warning'} style={{ marginInlineEnd: 0 }}>PRD 覆盖 {metrics.coveragePrd}%</Tag>}
-              {metrics.traceAc !== null && <Tag color={metrics.traceAc >= 100 ? 'success' : 'warning'} style={{ marginInlineEnd: 0 }}>AC 追溯 {metrics.traceAc}%</Tag>}
-              {metrics.clarifyOpenCount > 0 && <Tag color="orange" style={{ marginInlineEnd: 0 }}>待澄清 {metrics.clarifyOpenCount} 项</Tag>}
-              {metrics.conflictCount > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>一致性冲突 {metrics.conflictCount} 项</Tag>}
-              {metrics.constitutionCount > 0 && (
-                <Tooltip title={`已识别仓库工程规范：${chain.analysis?.constitutionFiles.join('、')}`}>
-                  <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>规范 Constitution {metrics.constitutionCount}</Tag>
-                </Tooltip>
-              )}
-              {metrics.customRuleCount > 0 && <Tag color="purple" style={{ marginInlineEnd: 0 }}>项目规则 {metrics.customRuleCount}</Tag>}
-            </div>
-          )}
-        </div>
-        <Space size={6} wrap>
-          <Button icon={<RefreshCw size={14} />} loading={loading} onClick={() => void load()}>刷新</Button>
-          {analyzeRun?.status === 'RUNNING' ? (
-            <Button danger icon={<Square size={13} />} onClick={() => void stopCrossAnalyze()}>停止交叉检查</Button>
-          ) : (
-            <Button icon={<Sparkles size={14} />} loading={analyzing} onClick={() => void startCrossAnalyze()}>AI 交叉检查</Button>
-          )}
-          {currentLink && !frozen && <Button icon={currentLink.next.type === 'AI_REVIEW' ? <Sparkles size={14} /> : undefined} onClick={() => onAction(currentLink, currentLink.next)}>{currentLink.next.label}</Button>}
-          <Button type="primary" icon={<FileBarChart size={14} />} onClick={() => setReportOpen(true)}>链路审核报告</Button>
-        </Space>
-      </Flex>
-      <ol className="tf-chain-strip" aria-label="交付链路环节">
-        {chain.links.map(link => <li key={link.id}>
-          <button type="button" className={`tf-chain-strip-node tone-${LINK_STATUS_META[link.status].tone} ${link.id === chain.overall.currentLinkId ? 'is-current' : ''}`} onClick={() => jumpTo(link.id)}>
-            <span className="tf-chain-strip-index">{link.index}</span>
-            <span className="tf-chain-strip-text"><span className="tf-chain-strip-title">{link.title}</span><span className="tf-chain-strip-status">{link.statusLabel}{link.review?.score !== null && link.review?.score !== undefined ? ` · ${link.review.score}` : ''}</span></span>
+  const requiredIssues = activeLink.checks.filter(check => check.ok === false && check.level === 'required');
+  const otherChecks = activeLink.checks.filter(check => !requiredIssues.includes(check));
+  const passedChecks = activeLink.checks.filter(c => c.ok === true).length;
+  const totalChecks = activeLink.checks.length;
+
+  const triggerAiReview = () => {
+    if (onRunAiReview) {
+      onRunAiReview(activeLink.stage);
+      return;
+    }
+    onAction(activeLink, { type: 'AI_REVIEW', label: '发起 AI 评审', stage: activeLink.stage, jobId: stepReview?.jobId });
+  };
+
+  const openFullReport = () => {
+    if (!stepReview) return;
+    onAction(activeLink, { type: 'VIEW', label: '查看完整报告', stage: activeLink.stage, jobId: stepReview.jobId });
+  };
+
+  const submitWaive = async (findingId: string) => {
+    if (!stepReview || !onQuickWaive) return;
+    const reason = (waiveDrafts[findingId] ?? DEFAULT_WAIVE_REASON).trim() || DEFAULT_WAIVE_REASON;
+    setWaivingId(findingId);
+    try {
+      await onQuickWaive(stepReview.jobId, findingId, reason);
+      await load();
+    } finally {
+      setWaivingId('');
+    }
+  };
+
+  const missingInput = activeLink.status === 'MISSING';
+  const inputLabel = activeLink.id === 'BREAKDOWN' ? '拆分子任务' : '补充材料';
+  const reviewLabel = activeLink.status === 'REVIEWING' ? '生成评审报告' : stepReview ? '重新评审' : '发起评审';
+  const reviewInMenu = canApproveHere || activeLink.status === 'PASS' || activeLink.status === 'REVIEWING' || activeLink.status === 'AWAITING_DECISION';
+  const analysisRunning = analyzeRun?.status === 'RUNNING';
+  const auditReport = analyzeRun?.draft?.answer || analyzeRun?.output || '';
+  const stageActions: MenuProps['items'] = [
+    ...(!frozen && !missingInput && onAddInput ? [{ key: 'input', icon: <Plus size={14} />, label: inputLabel }] : []),
+    ...(!frozen && activeLink.stage === 'TECH_SPEC' && onImportOpenApi ? [{ key: 'openapi', label: '导入接口' }] : []),
+    ...(!frozen && !missingInput && reviewInMenu ? [{ key: 'review', icon: <Sparkles size={14} />, label: reviewLabel }] : []),
+    analysisRunning ? { key: 'stop', icon: <Square size={14} />, label: '停止跨阶段检查', danger: true }
+      : { key: 'check', label: '跨阶段一致性检查', disabled: analyzing },
+  ];
+  const runStageAction: MenuProps['onClick'] = ({ key }) => {
+    if (key === 'input') onAddInput?.(activeLink);
+    else if (key === 'openapi') onImportOpenApi?.();
+    else if (key === 'review') triggerAiReview();
+    else if (key === 'stop') void stopCrossAnalyze();
+    else if (key === 'check') { setAnalysisEngine(readAiEngine()); setAnalysisSetupOpen(true); }
+  };
+
+  return <div className="tf-wizard-panel">
+    {analysisSetupOpen && <Modal title="跨阶段一致性检查" open width={460}
+      onCancel={() => setAnalysisSetupOpen(false)} onOk={() => void startCrossAnalyze()} okText="开始检查"
+      confirmLoading={analyzing} okButtonProps={{ disabled: analysisModel.invalid }}>
+      <LocalAiExecutionFields capabilities={analysisCaps} engine={analysisEngine} onEngineChange={setAnalysisEngine}
+        model={analysisModel} runner={executionRunner} disabled={analyzing} />
+    </Modal>}
+    <nav className="tf-wizard-steps" aria-label="交付阶段">
+      {chain.links.map(link => {
+        const isStepActive = link.id === activeLink.id;
+        const stepBadge = plainStageBadge(link);
+        const stepTitle = link.status === 'LINKED' ? 'Jira 子任务' : PLAIN_STAGE_TITLE[link.stage];
+        return (
+          <button
+            key={link.id}
+            type="button"
+            className={`tf-wizard-step tone-${stepBadge.tone}${isStepActive ? ' is-active' : ''}`}
+            aria-label={`${stepTitle} · ${stepBadge.label}`}
+            aria-pressed={isStepActive}
+            title={`${stepTitle} · ${stepBadge.label}`}
+            onClick={() => selectStage(link.stage)}
+          >
+            <span className="tf-wizard-step-dot" aria-hidden="true" />
+            <span className="tf-wizard-step-name">{link.status === 'LINKED' ? '子任务' : CHAIN_STAGE_SHORT[link.stage]}</span>
+            <span className="tf-wizard-step-state">{stepBadge.label}</span>
           </button>
-        </li>)}
-      </ol>
-      {chain.overall.blockers.length > 0 && <Alert type="error" showIcon className="tf-chain-blockers" title={`${chain.overall.blockers.length} 项阻断需要处理`} description={<ul>{chain.overall.blockers.slice(0, 6).map((item, index) => <li key={index}><Typography.Link onClick={() => jumpTo(item.linkId)}>[{item.link}]</Typography.Link> <Typography.Text strong>{item.title}</Typography.Text> <Typography.Text type="secondary">{item.detail}</Typography.Text></li>)}{chain.overall.blockers.length > 6 && <li>… 其余 {chain.overall.blockers.length - 6} 项见链路审核报告</li>}</ul>} />}
-      {conflicts.length > 0 && <Alert type="warning" showIcon className="tf-chain-blockers" title={`跨环节一致性巡检（/analyze）发现 ${conflicts.length} 项偏差`} description={<ul>{conflicts.map(c => <li key={c.id}>{c.linkIds.map(lid => <Typography.Link key={lid} onClick={() => jumpTo(lid)} style={{ marginInlineEnd: 4 }}>[{chain.links.find(l => l.id === lid)?.title || lid}]</Typography.Link>)}<Typography.Text strong>{c.title}</Typography.Text> <Typography.Text type="secondary">{c.detail}</Typography.Text></li>)}</ul>} />}
-      {analyzeRun && (
-        <Collapse
-          activeKey={analyzeOpen ? ['analyze-ai'] : []}
-          onChange={keys => setAnalyzeOpen(keys.includes('analyze-ai'))}
-          size="small"
-          items={[{
-            key: 'analyze-ai',
-            label: (
-              <Space size={8} wrap>
-                <Sparkles size={14} />
-                <span>AI 全链路深度一致性报告（/analyze）</span>
-                <Tag color={analyzeRun.status === 'SUCCEEDED' ? 'success' : analyzeRun.status === 'RUNNING' ? 'processing' : 'error'}>
-                  {analyzeRun.status === 'RUNNING' ? '分析中…' : analyzeRun.status === 'SUCCEEDED' ? '已完成' : '执行异常'}
-                </Tag>
-              </Space>
-            ),
-            children: (analyzeRun.draft?.answer || analyzeRun.output)
-              ? <MarkdownPreview content={analyzeRun.draft?.answer || analyzeRun.output} />
-              : <Typography.Text type="secondary">{analyzeRun.error || '正在读取全链路 PRD / 方案 / 代码 / 测试快照对比一致性…'}</Typography.Text>,
-          }]}
-        />
-      )}
-    </Card>
+        );
+      })}
+    </nav>
 
-    <div className="tf-chain-links">
-      {chain.links.map(link => <LinkCard key={link.id} link={link} current={link.id === chain.overall.currentLinkId} frozen={frozen} linkingKey={linkingKey} onAction={onAction} onAddInput={onAddInput} onOpenTask={onOpenTask} onLinkChild={key => void linkChild(key)} />)}
+    <div className="tf-wizard-stage-head">
+      <div className="tf-wizard-stage-title-wrap">
+        <Typography.Title level={5} className="tf-chain-overview-title">{autoLinked ? 'Jira 子任务' : PLAIN_STAGE_TITLE[activeLink.stage]}</Typography.Title>
+        <span className={`tf-chain-pill tone-${activeBadge.tone}`}>{activeBadge.label}</span>
+      </div>
+
+      {autoLinked ? onSyncJiraChildren && (
+        <Button size="small" icon={<RefreshCw size={14} />} loading={syncingJiraChildren} onClick={onSyncJiraChildren}>刷新 Jira 子任务</Button>
+      ) : <Space size={6} className="tf-wizard-stage-actions">
+        {!frozen && missingInput && onAddInput && (
+          <Button size="small" type="primary" icon={<Plus size={14} />} onClick={() => onAddInput(activeLink)}>{inputLabel}</Button>
+        )}
+        {canApproveHere && stepReview && (
+          <Button size="small" type="primary" icon={<CheckCircle2 size={14} />} onClick={() => onQuickApprove?.(stepReview.jobId)}>
+            批准通过
+          </Button>
+        )}
+        {!frozen && !missingInput && !reviewInMenu && (
+          <Button size="small" type="primary" onClick={triggerAiReview}>{reviewLabel}</Button>
+        )}
+        <Dropdown trigger={['click']} menu={{ items: stageActions, onClick: runStageAction }}>
+          <Button size="small" type="text" loading={analyzing} icon={<MoreHorizontal size={16} />} aria-label="更多环节操作" />
+        </Dropdown>
+      </Space>}
     </div>
 
-    {chain.traceability.length > 0 && <Card size="small" title="追溯矩阵：需求点 → 子任务" className="tf-chain-trace">
-      <Table size="small" pagination={false} rowKey={(row, index) => `${index}:${row.point}`} dataSource={chain.traceability} columns={[
-        { title: '需求点', dataIndex: 'point', render: value => <span className="tf-break">{value}</span> },
-        { title: '覆盖', dataIndex: 'result', width: 90, render: value => <Tag color={value === 'PASS' ? 'success' : value === 'FAIL' ? 'error' : value === 'WARN' ? 'warning' : 'default'}>{{ PASS: '已覆盖', WARN: '部分', FAIL: '未覆盖', NA: '不适用' }[value as string] || value}</Tag> },
-        { title: '承接子任务', width: 220, render: (_, row) => row.tasks.length ? <div className="tf-chain-trace-tasks">{row.tasks.map(item => <span key={item.key} className="tf-chain-trace-task">{item.taskId ? <Typography.Link onClick={() => onOpenTask(item.taskId!)}>{item.key}</Typography.Link> : <Typography.Text>{item.key}</Typography.Text>}<ChainStatusDots statuses={item.links} size="small" /></span>)}</div> : <Typography.Text type="danger">无</Typography.Text> },
-        { title: '说明', dataIndex: 'note', render: value => <Typography.Text type="secondary" className="tf-break">{value}</Typography.Text> },
-      ]} />
-    </Card>}
+    {autoLinked ? (
+      <section className="tf-simple-section" aria-label="Jira 子任务列表">
+        {chain.children.length > 0 ? (
+          <Table<ChainChild> key={taskId} size="small" pagination={DETAIL_PAGINATION} rowKey="id" dataSource={chain.children} scroll={{ x: 390 }} columns={[
+            { title: '子任务', render: (_, child) => <div className="tf-table-title"><Button type="link" size="small" onClick={() => onOpenTask(child.id)}>{child.jiraKey}</Button><Typography.Text className="tf-break">{child.title}</Typography.Text></div> },
+            { title: '状态', width: 96, render: (_, child) => child.jiraStatus || taskStatusLabel(child.status) },
+            { title: '来源', width: 90, render: (_, child) => child.url ? <Typography.Link href={child.url} target="_blank" rel="noreferrer">Jira 原单</Typography.Link> : '本地' },
+          ]} />
+        ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无关联子任务" />}
+      </section>
+    ) : <>
 
-    {chain.children.length > 0 && <Card size="small" title={`研发子任务链路（${chain.children.length}）`} className="tf-chain-children">
-      <Table<ChainChild> size="small" pagination={false} rowKey="id" dataSource={chain.children} scroll={{ x: 640 }} columns={[
-        { title: '子任务', render: (_, child) => <div className="tf-table-title"><Typography.Link onClick={() => onOpenTask(child.id)}>{child.jiraKey}</Typography.Link><Typography.Text type="secondary" className="tf-break">{child.title}</Typography.Text></div> },
-        { title: '受理人', dataIndex: 'assignee', width: 110, render: value => value || '—' },
-        { title: 'Jira 状态', dataIndex: 'jiraStatus', width: 100, render: value => value || '—' },
-        { title: '链路进度', width: 300, render: (_, child) => <ChainStatusDots statuses={child.links} /> },
-      ]} />
-    </Card>}
+    {requiredIssues.length > 0 && (
+      <section className="tf-simple-section">
+        <Typography.Text strong>待处理</Typography.Text>
+        <ul className="tf-chain-checks tf-chain-bounded-list" tabIndex={requiredIssues.length > 5 ? 0 : undefined} aria-label="待处理的检查">
+          {requiredIssues.map(check => (
+            <li key={check.id}>
+              <CheckIcon check={check} />
+              <span className="tf-break">{check.detail || check.label}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )}
 
-    <ChainReportDrawer taskId={taskId} jiraKey={chain.task.jiraKey} open={reportOpen} onClose={() => setReportOpen(false)} onUnauthorized={onUnauthorized} />
+    {(activeLink.objects.length > 0 || !requiredIssues.length) && (
+      <section className="tf-simple-section">
+        <Typography.Text strong>关联材料</Typography.Text>
+
+        {activeLink.objects.length > 0 ? (
+          <ul className="tf-chain-objects tf-chain-bounded-list" tabIndex={activeLink.objects.length > 5 ? 0 : undefined} aria-label="关联材料">
+            {activeLink.objects.map((object, index) => (
+              <ObjectRow
+                key={`${object.type}:${object.label}:${index}`}
+                object={object}
+                onOpenTask={onOpenTask}
+                onLinkChild={frozen ? undefined : key => void linkChild(key)}
+                linking={linkingKey === object.key}
+              />
+            ))}
+          </ul>
+        ) : (
+          <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+            {activeLink.missing.length ? `缺少 ${activeLink.missing.join('、')}` : '暂无关联材料'}
+          </Typography.Text>
+        )}
+      </section>
+    )}
+
+    {stepReview && (
+      <section className="tf-stage-review-box">
+        <Flex justify="space-between" align="center" gap={8} className="tf-wizard-section-head">
+          <Space size={8} align="center">
+            <Typography.Text strong>{activeFindings.length ? `评审问题 (${activeFindings.length})` : '评审记录'}</Typography.Text>
+            {stepReview.decision && (
+              <Typography.Text type="secondary">{stepReview.decision.decision === 'APPROVE' ? '已批准' : '已退回'}</Typography.Text>
+            )}
+          </Space>
+          <Space size={8} align="center" wrap>
+            {(stepReview.summary || stepReview.findings.items.length > 0) && (
+              <ReviewExportActions
+                data={{
+                  task: { jiraKey: chain.task.jiraKey, title: chain.task.title, url: chain.task.url },
+                  stage: activeLink.stage,
+                  isDraft: !stepReview.reportedAt,
+                  stale: stepReview.stale,
+                  report: {
+                    summary: stepReview.summary,
+                    verdict: stepReview.verdict,
+                    score: stepReview.score,
+                    checklist: stepReview.checklist,
+                    meta: stepReview.meta,
+                    tool: stepReview.tool,
+                    createdAt: stepReview.reportedAt || stepReview.createdAt,
+                  },
+                  findings: stepReview.findings.items,
+                }}
+              />
+            )}
+            <Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={openFullReport}>
+              {stepReview.reportedAt ? '查看报告' : '查看评审'}
+            </Button>
+          </Space>
+        </Flex>
+
+        {visibleFindings.length > 0 && (
+          <ul className="tf-wizard-findings">
+            {visibleFindings.map(item => (
+              <li key={item.id} className="tf-wizard-finding">
+                <div className="tf-wizard-finding-head">
+                  <Tag color={item.severity === 'CRITICAL' ? 'error' : 'warning'}>
+                    {severityLabel(item.severity)}
+                  </Tag>
+                  <Typography.Text strong className="tf-wizard-finding-title" title={item.title}>{item.title}</Typography.Text>
+                  {item.severity === 'CRITICAL' && canWaiveHere && (
+                    <Popconfirm
+                      title="忽略这条严重问题？"
+                      description={
+                        <div style={{ width: 260, marginTop: 6 }}>
+                          <Input
+                            size="small"
+                            placeholder="填写忽略理由"
+                            value={waiveDrafts[item.id] ?? DEFAULT_WAIVE_REASON}
+                            onChange={e => setWaiveDrafts(prev => ({ ...prev, [item.id]: e.target.value }))}
+                          />
+                        </div>
+                      }
+                      okText="确认忽略"
+                      cancelText="取消"
+                      onConfirm={() => void submitWaive(item.id)}
+                    >
+                      <Button size="small" type="link" loading={waivingId === item.id} style={{ paddingInline: 4, height: 'auto' }}>
+                        忽略此条
+                      </Button>
+                    </Popconfirm>
+                  )}
+                </div>
+                <Typography.Paragraph type="secondary" className="tf-wizard-finding-description" title={item.detail}>
+                  {item.detail}
+                </Typography.Paragraph>
+                {item.location && (
+                  <Typography.Text code className="tf-wizard-finding-location" title={item.location}>{item.location}</Typography.Text>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    )}
+
+    <section className="tf-simple-section">
+      <Typography.Text strong>检查结果 <Typography.Text type="secondary">({passedChecks}/{totalChecks})</Typography.Text></Typography.Text>
+      <div className="tf-simple-details-body">
+        <ul className="tf-chain-checks tf-chain-bounded-list" tabIndex={otherChecks.length > 5 ? 0 : undefined} aria-label="检查清单">
+          {otherChecks.map(check => (
+            <li key={check.id}>
+              <CheckIcon check={check} />
+              <div className="tf-wizard-check-text">
+                <span className="tf-wizard-check-label" title={check.label}>{check.label}</span>
+                {check.detail && <Typography.Text type="secondary" className="tf-chain-check-detail" title={check.detail}>{check.detail}</Typography.Text>}
+              </div>
+            </li>
+          ))}
+        </ul>
+
+        {analysisRunning && <Typography.Text type="secondary">跨阶段检查进行中</Typography.Text>}
+
+        {stepConflicts.length > 0 && (
+          <div className="tf-simple-subblock">
+            <Typography.Text strong style={{ fontSize: 12.5 }}>跨阶段一致性提醒（{stepConflicts.length}）</Typography.Text>
+            <ul className="tf-stage-conflict-list tf-chain-bounded-list" tabIndex={stepConflicts.length > 3 ? 0 : undefined} aria-label="跨阶段一致性提醒">
+              {stepConflicts.map(c => (
+                <li key={c.id}>
+                  <Typography.Text strong>{c.title}</Typography.Text>{' '}
+                  <Typography.Text type="secondary">{c.detail}</Typography.Text>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {activeLink.delta && (
+          <div className="tf-chain-delta">
+            <Space size={6} wrap>
+              <Tag color="blue" style={{ marginInlineEnd: 0 }}>版本变化 r{activeLink.delta.fromRevision} → r{activeLink.delta.toRevision}</Tag>
+              <Typography.Text type="success">+{activeLink.delta.additions}</Typography.Text>
+              <Typography.Text type="danger">-{activeLink.delta.deletions}</Typography.Text>
+            </Space>
+            {activeLink.delta.previewLines.length > 0 && (
+              <div className="tf-chain-delta-lines">
+                {activeLink.delta.previewLines.map((line, i) => (
+                  <div key={i} className={line.kind === '+' ? 'tf-chain-delta-add' : 'tf-chain-delta-del'}>
+                    {line.kind} {line.text}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {analyzeRun && (
+          <div className="tf-simple-subblock">
+            <Flex align="center" justify="space-between" gap={8} wrap>
+              <Typography.Text strong>跨阶段检查</Typography.Text>
+              {auditReport && <Button size="small" type="link" icon={<Copy size={13} />} onClick={() => {
+                void navigator.clipboard.writeText(auditReport).then(() => message.success('报告已复制。')).catch(() => message.error('无法写入剪贴板。'));
+              }}>复制报告</Button>}
+            </Flex>
+            <AiRunIdentity run={analyzeRun} />
+            {analyzeRun.draft?.summary && <Typography.Text type="secondary" className="tf-break">{analyzeRun.draft.summary}</Typography.Text>}
+          </div>
+        )}
+
+        {stepReview?.meta && (
+          <div className="tf-simple-subblock">
+            <Typography.Text strong style={{ fontSize: 12.5 }}>结构化洞察</Typography.Text>
+            <div className="tf-chain-evidence" tabIndex={0} aria-label="结构化评审明细">
+              <ReportMetaSummary meta={stepReview.meta} />
+            </div>
+          </div>
+        )}
+
+        {stepReview?.checklist && stepReview.checklist.length > 0 && (
+          <div className="tf-simple-subblock">
+            <Typography.Text strong style={{ fontSize: 12.5 }}>AI 检查清单（{stepReview.checklist.length} 项）</Typography.Text>
+            <div className="tf-chain-evidence" tabIndex={stepReview.checklist.length > 3 ? 0 : undefined} aria-label="AI 检查清单">
+              <ChecklistTable items={stepReview.checklist} />
+            </div>
+          </div>
+        )}
+
+        {activeLink.stage === 'TASK_BREAKDOWN' && chain.traceability.length > 0 && (
+          <div className="tf-simple-subblock">
+            <Typography.Text strong style={{ fontSize: 12.5 }}>需求点 → 子任务覆盖情况</Typography.Text>
+            <Table key={taskId} size="small" pagination={DETAIL_PAGINATION} rowKey={(row, index) => `${index}:${row.point}`} dataSource={chain.traceability} scroll={{ x: 440 }} columns={[
+              { title: '需求点', dataIndex: 'point', render: value => <span className="tf-break">{value}</span> },
+              { title: '覆盖', dataIndex: 'result', width: 90, render: value => <Tag color={value === 'PASS' ? 'success' : value === 'FAIL' ? 'error' : value === 'WARN' ? 'warning' : 'default'}>{{ PASS: '已覆盖', WARN: '部分', FAIL: '未覆盖', NA: '不适用' }[value as string] || value}</Tag> },
+              { title: '子任务', width: 200, render: (_, row) => row.tasks.length ? <div className="tf-chain-trace-tasks">{row.tasks.map(item => <span key={item.key} className="tf-chain-trace-task">{item.taskId ? <Typography.Link onClick={() => onOpenTask(item.taskId!)}>{item.key}</Typography.Link> : <Typography.Text>{item.key}</Typography.Text>}</span>)}</div> : <Typography.Text type="danger">无</Typography.Text> },
+              { title: '说明', dataIndex: 'note', render: value => <Typography.Text type="secondary" className="tf-break">{value}</Typography.Text> },
+            ]} />
+          </div>
+        )}
+
+        {activeLink.stage === 'TASK_BREAKDOWN' && chain.children.length > 0 && (
+          <div className="tf-simple-subblock">
+            <Typography.Text strong style={{ fontSize: 12.5 }}>研发子任务进度（{chain.children.length}）</Typography.Text>
+            <Table<ChainChild> key={taskId} size="small" pagination={DETAIL_PAGINATION} rowKey="id" dataSource={chain.children} scroll={{ x: 340 }} columns={[
+              { title: '子任务', render: (_, child) => <div className="tf-table-title"><Typography.Link onClick={() => onOpenTask(child.id)}>{child.jiraKey}</Typography.Link><Typography.Text type="secondary" className="tf-break">{child.title}</Typography.Text></div> },
+              { title: '负责人', dataIndex: 'assignee', width: 96, render: value => value || '—' },
+              { title: '状态', width: 96, render: (_, child) => taskStatusLabel(child.status) },
+            ]} />
+          </div>
+        )}
+      </div>
+    </section>
+    </>}
   </div>;
 };

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { App, Button, Card, Checkbox, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
 import type { TableColumnsType } from 'antd';
-import { KeyRound, Plus, RefreshCw, Search } from 'lucide-react';
+import { Plus, RefreshCw, Search } from 'lucide-react';
 import { api, ApiError, Project, timeText, User } from './workspaceApi';
 import { readTogether } from './readTogether';
 import { navigateWorkspace } from './workspaceNavigation';
@@ -20,8 +20,9 @@ const canVerifyAccount = (account: ExternalAccount) => account.enabled && accoun
 
 export const AccountsView: React.FC<{
   user: User; project?: Project; projects: Project[];
+  onPickProject?: (projectId: string) => void;
   onUnauthorized: () => void; onForbidden?: () => void; onChanged?: () => Promise<void>;
-}> = ({ user, project, projects, onUnauthorized, onForbidden, onChanged }) => {
+}> = ({ user, project, projects, onPickProject, onUnauthorized, onForbidden, onChanged }) => {
   const { message, modal } = App.useApp();
   const screens = Grid.useBreakpoint();
   const [form] = Form.useForm<AccountFormValues>();
@@ -192,7 +193,14 @@ export const AccountsView: React.FC<{
     } });
   };
   const personalJiraAccount = accounts.find(account => account.scope === 'PERSONAL' && account.provider === 'jira' && account.enabled);
-  const actions = (account: ExternalAccount) => <Space wrap size={4}>{account.scope === 'PERSONAL' && account.provider === 'jira' && account.enabled && <Button type="link" size="small" disabled={busy} onClick={() => syncJira(account)}>同步可见项目</Button>}{canVerifyAccount(account) && <Button type="link" size="small" disabled={busy} onClick={() => verify(account)}>验证</Button>}{account.canManage && <><Button type="link" size="small" disabled={busy} onClick={() => beginEdit(account)}>编辑</Button><Button type="text" size="small" disabled={busy} onClick={() => toggle(account)}>{account.enabled ? '停用' : '启用'}</Button><Button type="text" size="small" danger disabled={busy} onClick={() => remove(account)}>删除</Button></>}</Space>;
+  const actions = (account: ExternalAccount) => {
+    const sharedProjectId = account.projectId;
+    if (!project && account.scope === 'PROJECT') return sharedProjectId && onPickProject
+      ? <Button type="link" size="small" disabled={busy} onClick={() => onPickProject(sharedProjectId)}>打开项目</Button>
+      : null;
+    return <Space wrap size={4}>{account.scope === 'PERSONAL' && account.provider === 'jira' && account.enabled && <Button type="link" size="small" disabled={busy} onClick={() => syncJira(account)}>同步可见项目</Button>}{canVerifyAccount(account) && <Button type="link" size="small" disabled={busy} onClick={() => verify(account)}>验证</Button>}{account.canManage && <><Button type="link" size="small" disabled={busy} onClick={() => beginEdit(account)}>编辑</Button><Button type="text" size="small" disabled={busy} onClick={() => toggle(account)}>{account.enabled ? '停用' : '启用'}</Button><Button type="text" size="small" danger disabled={busy} onClick={() => remove(account)}>删除</Button></>}</Space>;
+  };
+  const accountById = new Map(accounts.map(account => [account.id, account]));
   const scopeLabel = (account: ExternalAccount) => account.scope === 'PERSONAL' ? '我的个人账号' : projects.find(item => item.id === account.projectId)?.name || '项目共享账号';
   const visible = accounts.filter(account =>
     (!providerFilter || account.provider === providerFilter) &&
@@ -200,19 +208,18 @@ export const AccountsView: React.FC<{
     (!search.trim() || `${account.name} ${account.baseUrl} ${accountProviderName(account.provider)}`.toLowerCase().includes(search.trim().toLowerCase()))
   );
   const columns: TableColumnsType<ExternalAccount> = [
-    { title: '账号', key: 'name', width: 260, render: (_, account) => <div className="tf-account-name"><Typography.Text strong>{account.name}</Typography.Text><Typography.Text type="secondary">{accountProviderName(account.provider)} · {scopeLabel(account)}</Typography.Text></div> },
+    { title: '账号', key: 'name', width: 192, render: (_, account) => <div className="tf-account-name"><Typography.Text strong>{account.name}</Typography.Text><Typography.Text type="secondary">{accountProviderName(account.provider)} · {scopeLabel(account)}</Typography.Text></div> },
     { title: '服务地址', dataIndex: 'baseUrl', render: value => <Typography.Text className="tf-account-url">{value}</Typography.Text> },
-    { title: '状态', key: 'status', width: 180, render: (_, account) => <Flex vertical gap={6}><Space wrap size={[6, 6]}><StatusBadge variant={account.status === 'CONNECTED' ? 'green' : account.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(account.status)}</StatusBadge>{!account.enabled && <Tag>已停用</Tag>}</Space><Typography.Text type="secondary" className="tf-account-meta">{account.lastCheckedAt ? timeText(account.lastCheckedAt) : '尚未验证'}</Typography.Text>{account.lastError && <Typography.Text type="secondary" className="tf-account-meta">{account.lastError}</Typography.Text>}</Flex> },
+    { title: '状态', key: 'status', width: 132, render: (_, account) => <Flex vertical gap={6}><Space wrap size={[6, 6]}><StatusBadge variant={account.status === 'CONNECTED' ? 'green' : account.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(account.status)}</StatusBadge>{!account.enabled && <Tag>已停用</Tag>}</Space><Typography.Text type="secondary" className="tf-account-meta">{account.lastCheckedAt ? timeText(account.lastCheckedAt) : '尚未验证'}</Typography.Text>{account.lastError && <Typography.Text type="secondary" className="tf-account-meta">{account.lastError}</Typography.Text>}</Flex> },
     { title: '操作', key: 'action', width: 296, render: (_, account) => actions(account) },
   ];
   if (accessDenied) return null;
   return <div className="tf-accounts">
-    <Card className="tf-accounts-card" title="绑定的账号" extra={<Space wrap size={8}>{personalJiraAccount && <Button icon={<RefreshCw size={15} />} disabled={busy} onClick={() => syncJira(personalJiraAccount)}>按 Jira 权限同步项目</Button>}<Button icon={<RefreshCw size={15} />} loading={loading} disabled={busy} onClick={() => void refresh()}>刷新</Button><Button type="primary" icon={<Plus size={15} />} disabled={busy} onClick={beginCreate}>绑定账号</Button></Space>}>
-      <Flex gap={12} wrap className="tf-account-toolbar">
+    <Card className="tf-accounts-card tf-account-registry" title="已绑定账号" extra={<Space wrap size={8}>{personalJiraAccount && <Button icon={<RefreshCw size={15} />} disabled={busy} onClick={() => syncJira(personalJiraAccount)}>按 Jira 权限同步项目</Button>}<Button icon={<RefreshCw size={15} />} loading={loading} disabled={busy} onClick={() => void refresh()}>刷新</Button><Button type="primary" icon={<Plus size={15} />} disabled={busy} onClick={beginCreate}>绑定账号</Button></Space>}>
+      <Flex gap={8} align="center" wrap className="tf-account-toolbar">
         <Segmented aria-label="账号范围" value={filter} options={[{ label: '全部', value: 'all' }, { label: '我的账号', value: 'PERSONAL' }, { label: '项目共享', value: 'PROJECT' }]} onChange={value => setFilter(value)} />
         <Select aria-label="按平台筛选账号" allowClear placeholder="全部平台" value={providerFilter} options={ACCOUNT_PROVIDERS} onChange={setProviderFilter} />
         <Input
-          style={{ maxWidth: 260 }}
           prefix={<Search size={15} />}
           aria-label="搜索账号"
           placeholder="搜索账号名或地址（Esc 清空）"
@@ -222,33 +229,50 @@ export const AccountsView: React.FC<{
           onKeyDown={clearSearchOnEscape(search, () => setSearch(''))}
         />
       </Flex>
-      {screens.md ? <Table rowKey="id" columns={columns} dataSource={visible} loading={loading} scroll={{ x: 860 }} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={accounts.length ? '没有符合条件的账号。' : '还没有绑定账号。'} /> }} /> : <List className="tf-account-mobile-list" rowKey="id" loading={loading} dataSource={visible} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={accounts.length ? '没有符合条件的账号。' : '还没有绑定账号。'} /> }} renderItem={account => <List.Item><div className="tf-account-name"><Typography.Text strong>{account.name}</Typography.Text><Typography.Text type="secondary">{accountProviderName(account.provider)} · {scopeLabel(account)}</Typography.Text><Typography.Text className="tf-account-url">{account.baseUrl}</Typography.Text></div><Space wrap size={[8, 8]}><StatusBadge variant={account.status === 'CONNECTED' ? 'green' : account.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(account.status)}</StatusBadge>{!account.enabled && <Tag>已停用</Tag>}<Typography.Text type="secondary" className="tf-account-meta">{account.lastCheckedAt ? timeText(account.lastCheckedAt) : '尚未验证'}</Typography.Text></Space>{account.lastError && <Typography.Text type="secondary" className="tf-account-meta">{account.lastError}</Typography.Text>}{actions(account)}</List.Item>} />}
-      <Typography.Paragraph type="secondary" className="tf-account-note">个人账号仅本人管理；项目共享账号由有权限的负责人管理。保存表示凭据已加密入库，连接可用性以实际验证和读取结果为准。</Typography.Paragraph>
+      {screens.md ? <Table rowKey="id" columns={columns} dataSource={visible} loading={loading} scroll={{ x: 720 }} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={accounts.length ? '没有符合条件的账号。' : '还没有绑定账号。'} /> }} /> : <List className="tf-account-mobile-list" rowKey="id" loading={loading} dataSource={visible} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={accounts.length ? '没有符合条件的账号。' : '还没有绑定账号。'} /> }} renderItem={account => <List.Item><div className="tf-account-name"><Typography.Text strong>{account.name}</Typography.Text><Typography.Text type="secondary">{accountProviderName(account.provider)} · {scopeLabel(account)}</Typography.Text><Typography.Text className="tf-account-url">{account.baseUrl}</Typography.Text></div><Space wrap size={[8, 8]}><StatusBadge variant={account.status === 'CONNECTED' ? 'green' : account.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(account.status)}</StatusBadge>{!account.enabled && <Tag>已停用</Tag>}<Typography.Text type="secondary" className="tf-account-meta">{account.lastCheckedAt ? timeText(account.lastCheckedAt) : '尚未验证'}</Typography.Text></Space>{account.lastError && <Typography.Text type="secondary" className="tf-account-meta">{account.lastError}</Typography.Text>}{actions(account)}</List.Item>} />}
+      <Typography.Text type="secondary" className="tf-account-note">凭据加密保存。可用性以连接验证为准。</Typography.Text>
     </Card>
-    <Card className="tf-accounts-card" title="当前项目使用账号">
-      {!project ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="先选择项目，再选择各平台使用的账号。" /> : <>
-        <Typography.Paragraph type="secondary">{project.key} · {project.name}。以下选择仅影响你在此项目使用的身份，不会改动其他成员的选择。停用、删除或失权的已选账号不会自动回退到其他账号。</Typography.Paragraph>
-        <div className="tf-account-selections">{ACCOUNT_PROVIDERS.map(item => {
-          const selectedId = selections.find(selection => selection.projectId === project.id && selection.provider === item.value)?.accountId || '';
-          const options = accounts.filter(account => account.provider === item.value).map(account => {
-            const sourceMatches = item.value !== 'jira' || !project.jira || account.baseUrl === project.jira.baseUrl;
-            return { value: account.id, label: `${account.name} · ${account.scope === 'PERSONAL' ? '个人' : '项目共享'}${!account.enabled ? ' · 已停用' : ''}${!sourceMatches ? ' · 与项目 Jira 实例不匹配' : ''}`, disabled: !account.enabled || !account.canUse || !sourceMatches };
-          });
-          if (selectedId && !options.some(option => option.value === selectedId)) options.push({ value: selectedId, label: '原选择已不可用，请重新选择', disabled: true });
-          return <Form.Item key={item.value} label={item.label} layout="vertical" extra={item.ai ? '仅保存使用偏好，云端 AI 执行器尚未接入。' : undefined}><Select aria-label={`${item.label} 当前使用账号`} value={selectedId} loading={loading} disabled={busy || loading} options={[{ value: '', label: item.ai ? '暂不选择 AI 账号' : '使用项目默认连接', disabled: false }, ...options]} onChange={value => changeSelection(item.value, value)} /></Form.Item>;
-        })}</div>
-      </>}
-    </Card>
-    {project && <Card className="tf-accounts-card" title="已有项目默认连接"><Typography.Paragraph type="secondary">保留原有配置。未指定其他账号时，研发平台读取继续使用这些项目连接。</Typography.Paragraph><Descriptions bordered size="small" column={1} items={legacyConnectors.map(connector => ({ key: connector.provider, label: connector.name, children: <Flex vertical gap={4}><Space wrap size={[8, 8]}><StatusBadge variant={connector.status === 'CONNECTED' ? 'green' : connector.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(connector.status)}</StatusBadge><Typography.Text type="secondary" className="tf-account-meta">{connector.hasCredential ? '已保存凭据' : '尚无凭据'}</Typography.Text></Space><Typography.Text className="tf-account-url">{connector.baseUrl || '—'}</Typography.Text></Flex> }))} /></Card>}
-    <Card className="tf-accounts-card" title={<Space size={8}><KeyRound size={16} />AI 账号与本地工具</Space>}><Typography.Paragraph type="secondary">AI API 账号支持加密保存、个人与项目隔离及使用偏好管理；云端执行、额度读取和自动切换尚未接入，保存不代表模型已运行。</Typography.Paragraph><Typography.Paragraph type="secondary">Codex CLI、Claude Code、Cursor 的本地登录由各工具维护，本平台不收集 auth.json 或浏览器登录数据。</Typography.Paragraph><Button onClick={() => navigateWorkspace('local')}>前往本地 AI 接入</Button></Card>
+    <div className="tf-account-project-settings">
+      <Card className="tf-accounts-card" title="项目使用账号" extra={<Button size="small" type="text" onClick={() => navigateWorkspace('local')}>本地工具接入</Button>}>
+        {!project ? <List<Project>
+          rowKey="id" dataSource={projects} loading={loading}
+          pagination={{ pageSize: 8, hideOnSinglePage: true, showSizeChanger: false, size: 'small' }}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚无可访问的项目" /> }}
+          renderItem={item => {
+            const assigned = selections.filter(selection => selection.projectId === item.id && selection.accountId);
+            return <List.Item extra={onPickProject && <Button type="link" size="small" disabled={busy}
+              aria-label={`配置 ${item.key} 项目账号`} onClick={() => onPickProject(item.id)}>配置账号</Button>}>
+              <List.Item.Meta title={`${item.key} · ${item.name}`} description={assigned.length
+                ? <Space size={[4, 4]} wrap>{assigned.map(selection => {
+                  const account = selection.accountId ? accountById.get(selection.accountId) : undefined;
+                  return <Tag key={selection.provider}>{accountProviderName(selection.provider)} · {account?.enabled ? account.name : '原选择已不可用'}</Tag>;
+                })}</Space>
+                : '使用项目默认连接'} />
+            </List.Item>;
+          }}
+        /> : <>
+          <Typography.Paragraph type="secondary">{project.key} · {project.name} · 仅适用于你在此项目中的操作</Typography.Paragraph>
+          <div className="tf-account-selections">{ACCOUNT_PROVIDERS.map(item => {
+            const selectedId = selections.find(selection => selection.projectId === project.id && selection.provider === item.value)?.accountId || '';
+            const options = accounts.filter(account => account.provider === item.value).map(account => {
+              const sourceMatches = item.value !== 'jira' || !project.jira || account.baseUrl === project.jira.baseUrl;
+              return { value: account.id, label: `${account.name} · ${account.scope === 'PERSONAL' ? '个人' : '项目共享'}${!account.enabled ? ' · 已停用' : ''}${!sourceMatches ? ' · 与项目 Jira 实例不匹配' : ''}`, disabled: !account.enabled || !account.canUse || !sourceMatches };
+            });
+            if (selectedId && !options.some(option => option.value === selectedId)) options.push({ value: selectedId, label: '原选择已不可用，请重新选择', disabled: true });
+            return <Form.Item key={item.value} label={item.label} layout="vertical" extra={item.ai ? '个人使用偏好' : undefined}><Select aria-label={`${item.label} 当前使用账号`} value={selectedId} loading={loading} disabled={busy || loading} options={[{ value: '', label: item.ai ? '暂不选择 AI 账号' : '使用项目默认连接', disabled: false }, ...options]} onChange={value => changeSelection(item.value, value)} /></Form.Item>;
+          })}</div>
+        </>}
+      </Card>
+      {project && <Card className="tf-accounts-card" title="项目默认连接"><Descriptions bordered size="small" column={1} items={legacyConnectors.map(connector => ({ key: connector.provider, label: connector.name, children: <Flex vertical gap={4}><Space wrap size={[8, 8]}><StatusBadge variant={connector.status === 'CONNECTED' ? 'green' : connector.status === 'ERROR' ? 'block' : 'neutral'}>{connectorStatusLabel(connector.status)}</StatusBadge><Typography.Text type="secondary" className="tf-account-meta">{connector.hasCredential ? '已保存凭据' : '尚无凭据'}</Typography.Text></Space><Typography.Text className="tf-account-url">{connector.baseUrl || '—'}</Typography.Text></Flex> }))} /></Card>}
+    </div>
     <Drawer forceRender title={editing ? '编辑账号' : '绑定账号'} open={open} onClose={() => { if (!pending.current) closeForm(); }} closable={!busy} maskClosable={!busy} keyboard={!busy} size={640} className="tf-account-drawer" footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeForm}>取消</Button><Button type="primary" loading={busy} onClick={() => form.submit()}>保存账号</Button></Flex>}>
       <Form form={form} layout="vertical" disabled={busy} onFinish={save} onKeyDown={event => { if (isSubmitShortcut(event) && !busy) { event.preventDefault(); form.submit(); } }}>
         <Form.Item name="scope" label="账号归属" rules={[{ required: true }]}><Select disabled={busy || !!editing} options={[{ value: 'PERSONAL', label: '我的个人账号' }, { value: 'PROJECT', label: '当前项目共享账号', disabled: !canCreateShared }]} /></Form.Item>
         {selectedScope === 'PROJECT' && <Typography.Paragraph type="secondary">共享到 {project?.key} · {project?.name}，项目成员可以使用，凭据不会回显。</Typography.Paragraph>}
         <Form.Item name="provider" label="平台" rules={[{ required: true }]}><Select disabled={busy || !!editing} options={ACCOUNT_PROVIDERS} onChange={value => { const definition = ACCOUNT_PROVIDERS.find(item => item.value === value); form.setFieldsValue({ authMode: definition?.authMode, baseUrl: suggestedBase(value), username: '', token: '', organizationId: '' }); }} /></Form.Item>
         <Form.Item name="name" label="账号名称" htmlFor="external-account-name" rules={[{ required: true, whitespace: true, message: '请填写易识别的账号名称。' }, { max: 100, message: '账号名称不能超过 100 个字符。' }]}><Input id="external-account-name" maxLength={100} placeholder="例如：我的 Jira 工作账号" autoComplete="off" /></Form.Item>
-        <Form.Item name="baseUrl" label="服务地址" htmlFor="external-account-base-url" rules={[{ required: true, message: '请选择或填写服务地址。' }, { type: 'url', message: '请输入有效的服务地址。' }]}><Input id="external-account-base-url" placeholder="https://" autoComplete="off" /></Form.Item>
-        {aiProvider ? <><Form.Item name="authMode" hidden rules={[{ required: true }]}><Input /></Form.Item><Typography.Paragraph type="secondary">保存 API 凭据供后续执行器使用；当前不会调用模型或验证额度。</Typography.Paragraph></> : <Form.Item name="authMode" label="认证方式" rules={[{ required: true }]}><Select options={['BEARER', 'BASIC', 'PRIVATE_TOKEN'].map(value => ({ value, label: authModeLabel(value) }))} onChange={() => form.setFieldsValue({ username: '', token: '' })} /></Form.Item>}
+        <Form.Item name="baseUrl" label="服务地址" htmlFor="external-account-base-url" rules={[{ required: true, message: '请选择或填写服务地址。' }, { type: 'url', message: '请输入有效的服务地址。' }]}><Input id="external-account-base-url" placeholder="https://" autoComplete="off" readOnly={provider === 'github'} /></Form.Item>
+        {aiProvider ? <><Form.Item name="authMode" hidden rules={[{ required: true }]}><Input /></Form.Item><Typography.Paragraph type="secondary">保存 API 凭据供后续执行器使用；当前不会调用模型或验证额度。</Typography.Paragraph></> : <Form.Item name="authMode" label="认证方式" rules={[{ required: true }]}><Select disabled={busy || provider === 'github'} options={['BEARER', 'BASIC', 'PRIVATE_TOKEN'].map(value => ({ value, label: authModeLabel(value) }))} onChange={() => form.setFieldsValue({ username: '', token: '' })} /></Form.Item>}
         {authMode === 'BASIC' && <Form.Item name="username" label="认证用户名" htmlFor="external-account-username" rules={[{ required: credentialRequired, message: '请输入认证用户名。' }]} extra={editing && !credentialRequired ? '用户名不会回显，留空沿用已保存身份。' : undefined}><Input id="external-account-username" autoComplete="off" /></Form.Item>}
         <Form.Item name="token" label={authMode === 'BASIC' ? '密码或访问令牌' : '访问令牌'} htmlFor="external-account-token" rules={[{ required: credentialRequired, message: '请输入此账号的访问凭据。' }]} extra={editing?.hasCredential && !credentialRequired ? '已保存凭据不回显；同服务来源与认证方式时，留空可沿用。' : '仅提交到本平台服务端加密保存，不会存入浏览器本地缓存。'}><Input.Password id="external-account-token" autoComplete="new-password" /></Form.Item>
         {provider === 'yunxiao' && <Form.Item name="organizationId" label="云效组织 ID" htmlFor="external-account-organization" rules={[{ required: true, message: '请输入云效组织 ID。' }]}><Input id="external-account-organization" autoComplete="off" /></Form.Item>}

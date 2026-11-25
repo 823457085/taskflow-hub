@@ -1,0 +1,200 @@
+.tf-task-list-rail { min-width: 0; }
+
+.tf-task-list-rail .ant-table-thead > tr > th,
+.tf-task-list-rail .ant-table-tbody > tr > td {
+  padding: 11px 0;
+}
+
+.tf-task-list-rail .ant-table-thead > tr > th {
+  color: var(--tf-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tf-task-list-rail .ant-table-thead > tr > th:first-child,
+.tf-task-list-rail .ant-table-tbody > tr > td:first-child {
+  padding-inline: 12px;
+}
+
+.tf-task-list-rail .ant-table-thead > tr > th:last-child,
+.tf-task-list-rail .ant-table-tbody > tr > td:last-child {
+  padding-inline: 3px;
+}
+
+.tf-task-list-rail .tf-task-cell { gap: 4px; }
+
+.tf-task-table .tf-task-cell .tf-task-title.ant-btn {
+  max-width: 100%;
+  width: 100%;
+  min-width: 0;
+  border-width: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.tf-task-table .tf-task-cell .tf-task-title.ant-btn > span {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-task-rail-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--tf-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.tf-task-rail-meta .tf-task-key {
+  flex: 0 0 auto;
+  color: inherit;
+  font-size: inherit;
+}
+
+.tf-task-rail-assignee,
+.tf-task-rail-parent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tf-task-rail-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.tf-task-rail-status::before {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+}
+
+.tf-task-rail-status-blue { color: var(--tf-accent); }
+.tf-task-rail-status-green { color: var(--tf-success, #27864a); }
+.tf-task-batch-controls.tf-batch-bar {
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.tf-kanban-workbench {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.tf-kanban-workbench .tf-kanban-toolbar {
+  flex: 0 0 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.tf-kanban-workbench .tf-kanban-toolbar > * { flex: 0 0 auto; }
+
+.tf-kanban-workbench .tf-kanban-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.tf-kanban-workbench :is(.tf-kanban-lanes, .tf-kanban-board) { min-width: 760px; }
+
+.tf-kanban-workbench .tf-kanban-board {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  overflow: visible;
+}
+
+.tf-kanban-workbench .tf-kanban-lanes .tf-kanban-board { min-width: 0; }
+
+.tf-kanban-workbench .tf-kanban-col {
+  min-width: 0;
+  min-height: 160px;
+  gap: 7px;
+  padding: 8px;
+}
+
+.tf-kanban-workbench .tf-kanban-empty {
+  min-height: 74px;
+  padding: 8px;
+}
+
+.tf-kanban-workbench .tf-kanban-card {
+  min-width: 0;
+  gap: 5px;
+  padding: 8px 9px;
+  box-shadow: none;
+}
+
+.tf-kanban-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--tf-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tf-kanban-card-meta .tf-task-key { flex: 0 0 auto; }
+.tf-kanban-card-priority { margin-inline-start: auto; }
+.tf-kanban-workbench .tf-kanban-count { white-space: nowrap; }
+
+.tf-kanban-workbench .tf-kanban-card-title.ant-btn {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--tf-text);
+  font-weight: 600;
+}
+
+.tf-kanban-workbench .tf-kanban-card-title.ant-btn:hover { color: var(--tf-accent); }
+
+.tf-kanban-workbench .tf-kanban-card-title.ant-btn > span {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tf-kanban-workbench .tf-kanban-card-footer {
+  padding: 0;
+  border: 0;
+  white-space: nowrap;
+}
+
+.tf-kanban-workbench .tf-kanban-updated { flex: 0 0 auto; font-size: 11px; }
+
+.tf-kanban-workbench .tf-kanban-swimlane-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-task-list-rail .ant-table-thead > tr > th { border-bottom-color: var(--tf-border); background: var(--tf-raised); }
+.tf-task-list-rail .ant-table-tbody > tr.tf-task-preview-active > td { background: var(--tf-accent-soft); }
+.tf-task-list-rail .ant-table-tbody > tr.tf-task-preview-active .tf-task-title { color: var(--tf-accent); }
+@media (max-width: 760px) {
+  .tf-task-list-rail .ant-table-tbody > tr > td { padding-block: 7px; }
+}

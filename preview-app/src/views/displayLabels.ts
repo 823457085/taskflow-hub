@@ -34,6 +34,7 @@ const ASSET_KIND_MAP: Record<AssetKind, string> = {
 const REVIEW_STATUS_MAP: Record<string, string> = {
   PENDING: '待提交报告',
   AWAITING_CONFIGURATION: '待配置执行器',
+  AWAITING_CLOUD_AI: '待云端 AI 执行',
   AWAITING_REVIEW: '待人工评审',
   AWAITING_REPORT: '待提交报告',
   REPORT_SUBMITTED: '待审批',
@@ -63,9 +64,9 @@ const REPORT_SOURCE_MAP: Record<string, string> = {
 };
 
 const SEVERITY_MAP: Record<Finding['severity'], string> = {
-  CRITICAL: '阻断问题',
-  WARN: '风险提醒',
-  INFO: '改进建议',
+  CRITICAL: 'P0 阻断问题',
+  WARN: 'P1 需跟进',
+  INFO: 'P2 改进建议',
 };
 
 const GATE_STATUS_MAP: Record<string, string> = {
@@ -292,8 +293,27 @@ export const reviewStatusLabel = (status?: string | null): string =>
 export const decisionLabel = (decision?: string | null): string =>
   decision ? DECISION_MAP[decision] || decision : '—';
 
-export const executionModeLabel = (mode?: string | null): string =>
-  mode ? EXECUTION_MODE_MAP[mode as ExecutionMode] || mode : '—';
+export const executionModeLabel = (mode?: string | null, cloudConfigured = false): string => {
+  if (!mode) return '—';
+  if (mode === 'CLOUD_AI' && cloudConfigured) return '云端 AI 自动评审';
+  return EXECUTION_MODE_MAP[mode as ExecutionMode] || mode;
+};
+
+export const imChannelLabel = (channel?: string | null): string => ({
+  feishu: '飞书机器人',
+  dingtalk: '钉钉机器人',
+  wecom: '企业微信机器人',
+  generic: '通用 Webhook',
+}[channel || ''] || channel || '—');
+
+export const webhookProviderLabel = (provider?: string | null): string => ({
+  gitlab: 'GitLab Webhook',
+  confluence: 'Confluence Webhook',
+  generic: '通用文档 / 流水线 Webhook',
+}[provider || ''] || provider || '—');
+
+export const pluginStatusLabel = (status?: string | null): string =>
+  status === 'EXECUTABLE_DECLARATIVE' ? '可执行规则引擎' : '快照与 AI 注入生效';
 
 export const reportSourceLabel = (source?: string | null): string =>
   source ? REPORT_SOURCE_MAP[source] || source : '—';

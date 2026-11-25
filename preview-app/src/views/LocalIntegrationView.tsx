@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { App, Alert, Button, Card, Collapse, Drawer, Flex, Form, Grid, Input, Segmented, Select, Space, Steps, Tag, Typography } from 'antd';
-import { Activity, ArrowLeft, ArrowRight, Check, Copy, Cpu, ExternalLink, FileCode2, FolderGit2, FolderOpen, LayoutDashboard, MousePointer2, RefreshCw, ShieldCheck, Sparkles, Terminal, Trash2, Zap } from 'lucide-react';
+import { App, Alert, Button, Card, Drawer, Flex, Form, Grid, Input, Segmented, Select, Space, Steps, Tag, Typography } from 'antd';
+import { Activity, ArrowLeft, ArrowRight, Check, Copy, Cpu, ExternalLink, FolderGit2, FolderOpen, LayoutDashboard, MousePointer2, RefreshCw, ShieldCheck, Terminal, Trash2, Zap } from 'lucide-react';
 import { api, ApiError, HostBridgeStatus, hubApiUrl, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
 import { LocalDeviceList, LocalDevicePairing } from './LocalDevicePairing';
 import { TeamAgentsCard } from './TeamAgents';
@@ -277,237 +277,172 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   </div>;
 
   const bridgeConnected = hostBridge?.supported !== false && hostBridge?.connected === true;
+  const bridgeOccupied = hostBridge?.status === 'OTHER_USER';
   const bridgeStatusBadge = bridgeConnected
     ? <StatusBadge variant="green" pulse>已接通 · 有效期至 {timeText(hostBridge?.device?.expiresAt)}</StatusBadge>
-    : hostBridge?.status === 'EXPIRED' || hostBridge?.status === 'REVOKED'
-      ? <StatusBadge variant="warn">授权已过期 · 待续期</StatusBadge>
-      : <StatusBadge variant="blue">MCP 已就绪 · 待一键授权</StatusBadge>;
+    : bridgeOccupied
+      ? <StatusBadge variant="warn">已被其他账号占用</StatusBadge>
+      : hostBridge?.status === 'EXPIRED' || hostBridge?.status === 'REVOKED'
+        ? <StatusBadge variant="warn">授权已过期 · 待续期</StatusBadge>
+        : <StatusBadge variant="neutral">{loadingBridge ? '正在读取授权状态' : '待授权'}</StatusBadge>;
 
   const authorizedCount = hostBridge?.device?.projectIds?.length || 0;
-  const readyEngineCount = capabilities?.engines ? capabilities.engines.filter(e => e.available).length : 4;
 
   return <div className="tf-local-integration">
-    <div className="tf-local-hero-deck">
-      {serverMode && (
-        <Card
-          className="tf-local-bridge-card"
-          title={<div className="tf-local-card-title-row">
-            <span className="tf-card-icon-badge"><Zap size={16} /></span>
-            <span>我的本机 Bridge（服务器派发、本机执行）</span>
-            {capabilities?.devices?.some(device => device.online)
-              ? <StatusBadge variant="green" pulse>在线 {capabilities.devices.filter(device => device.online).length} 台</StatusBadge>
-              : <StatusBadge variant="blue">未在线</StatusBadge>}
-          </div>}
-          extra={<Button size="small" icon={<RefreshCw size={13} />} loading={loadingBridge} onClick={() => void loadHostState(false)}>刷新状态</Button>}
-        >
-          <Flex vertical gap={12}>
-            <Typography.Text type="secondary">服务器只保存任务、派发与结果；AI 在你的电脑上运行，代码仓库和 AI 账号不离开本机。worker 只执行派发给该设备的任务，仓库路径以本机配置为准，开发类任务需在本机弹窗确认。</Typography.Text>
-            {(capabilities?.devices || []).map(device => (
-              <Flex key={device.id} justify="space-between" align="center" gap={8} wrap>
-                <Space size={8}><Typography.Text strong>{device.deviceName}</Typography.Text><Tag>{device.tool}</Tag><Tag>{device.projectIds.length} 个项目</Tag></Space>
-                <Typography.Text type={device.online ? 'success' : 'secondary'}>{device.online ? '在线' : device.lastSeenAt ? `最近在线 ${timeText(device.lastSeenAt)}` : '已配对，未启动 worker'} · 有效期至 {timeText(device.expiresAt)}</Typography.Text>
-              </Flex>
-            ))}
-            <Typography.Text>1. 在你的电脑终端运行一键安装（需要 Node.js 24+）。脚本会下载 Bridge 和工作台到 ~/.taskflow，自签名证书时提示核对指纹，然后显示配对码，在本页「设备授权」中确认并勾选项目。安装完成后两者都会在登录后自动运行，并自动更新：</Typography.Text>
-            {commandBlock('bridge-install', bridgeInstallCommand(location.origin), '一键安装')}
-            <Typography.Text>2. 装好后点顶栏「我的工作台」即可在网页里使用工作台，AI 与 git 在你电脑上执行。</Typography.Text>
-            <Typography.Text>3. 要接收开发任务时，编辑 ~/.taskflow/state/worker.json，把「项目ID」映射到本机代码仓库绝对路径并把 allowDevelop 设为 true，然后重启 Bridge：</Typography.Text>
-            {commandBlock('bridge-service', '~/.taskflow/bin/taskflow-bridge service --action restart', '重启 Bridge')}
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>只装 Bridge 不装工作台：在命令前加 TASKFLOW_SKIP_WORKBENCH=1。查看状态用 service --action status 或 workbench --action status；立即检查更新用 update；关闭自动更新在 worker.json 加 "autoUpdate": false。在「我的设备」中开启「允许团队派发」后，项目负责人也能把任务派到这台电脑。</Typography.Text>
-          </Flex>
-        </Card>
-      )}
-      {hostBridge?.supported !== false && !serverMode && (
-        <Card
-          className="tf-local-bridge-card"
-          title={
-            <div className="tf-local-card-title-row">
-              <span className="tf-card-icon-badge"><Zap size={16} /></span>
-              <span>本机 AI 一键授权接通</span>
-              {bridgeStatusBadge}
+    {!serverMode && !!capabilities?.engines.length && (
+      <Card size="small" title={<Space size={8}><Cpu size={16} />本机 CLI 与默认模型</Space>}>
+        <div className="tf-engine-pill-grid">
+          {capabilities.engines.map(engine => (
+            <div key={engine.id} className={`tf-engine-pill${engine.available ? ' is-ready' : ' is-missing'}`}>
+              <i aria-hidden="true" />
+              <strong title={engine.label}>{engine.label}</strong>
+              <small>{engine.available ? '就绪' : '未检测到'}</small>
+              <code title={engine.defaultModel || undefined}>
+                {engine.defaultModel || (engine.available ? '使用 CLI 默认模型' : '—')}
+              </code>
             </div>
-          }
-          extra={<Button size="small" icon={<RefreshCw size={13} />} loading={loadingBridge} onClick={() => void loadHostState(false)}>刷新状态</Button>}
-        >
-          <Flex vertical gap={16}>
-            {bridgeConnected ? (
-              <Alert
-                type="success"
-                showIcon
-                title={`当前本机桥接已接通（${hostBridge?.device?.deviceName || '工作台与本地 AI'}），已授权 ${authorizedCount} 个项目`}
-                description="你的工作台（Codex 与 Gemini / Antigravity 引擎）、Codex CLI、Claude Code、Cursor 现可直接读取所选项目的任务与评审上下文，无需再运行临时配对终端。"
-              />
-            ) : (
-              <Alert
-                type="info"
-                showIcon
-                title="无需临时终端端口或配对码：核对下方项目后点击「一键授权接通本机 AI」即可生效"
-                description="本机的 Codex、Gemini / Antigravity、Claude Code、Cursor 已完成 taskflow MCP 配置。点击下方按钮将直接签发受限本机设备会话（7 天有效），所有本地 AI 工具立即可读。"
-              />
-            )}
+          ))}
+        </div>
+      </Card>
+    )}
+    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} teamDispatch={serverMode} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
+    {serverMode && (
+      <Card
+        className="tf-local-bridge-card"
+        title={<div className="tf-local-card-title-row">
+          <span>Bridge 设备</span>
+          {capabilities?.devices?.some(device => device.online)
+            ? <StatusBadge variant="green" pulse>在线 {capabilities.devices.filter(device => device.online).length} 台</StatusBadge>
+            : <StatusBadge variant="blue">未在线</StatusBadge>}
+        </div>}
+        extra={<Space size={8} wrap>
+          <Button size="small" icon={<LayoutDashboard size={14} />} onClick={() => openWorkbench()}>打开工作台</Button>
+          <Button size="small" icon={<RefreshCw size={13} />} loading={loadingBridge} onClick={() => void loadHostState(false)}>刷新状态</Button>
+        </Space>}
+      >
+        <Flex vertical gap={12}>
+          <Typography.Text type="secondary">开发任务由已配对设备执行，启动时需在本机确认。</Typography.Text>
+          {(capabilities?.devices || []).map(device => (
+            <Flex key={device.id} justify="space-between" align="center" gap={8} wrap>
+              <Space size={[8, 6]} wrap><Typography.Text strong>{device.deviceName}</Typography.Text><Tag>{device.tool}</Tag><Tag>{device.projectIds.length} 个项目</Tag></Space>
+              <Typography.Text type={device.online ? 'success' : 'secondary'}>{device.online ? '在线' : device.lastSeenAt ? `最近在线 ${timeText(device.lastSeenAt)}` : '已配对，未启动 worker'} · 有效期至 {timeText(device.expiresAt)}</Typography.Text>
+            </Flex>
+          ))}
+          <Typography.Text>在本机终端安装 Bridge（Node.js 24+），然后用上方「设备授权」核对设备和可访问项目。</Typography.Text>
+          {commandBlock('bridge-install', bridgeInstallCommand(location.origin), '一键安装')}
+          <Typography.Text>需接收开发任务时，在 ~/.taskflow/state/worker.json 中设置仓库路径和 allowDevelop，再重启 Bridge。</Typography.Text>
+          {commandBlock('bridge-service', '~/.taskflow/bin/taskflow-bridge service --action restart', '重启 Bridge')}
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>只装 Bridge 不装工作台：在命令前加 TASKFLOW_SKIP_WORKBENCH=1。查看状态用 service --action status 或 workbench --action status；立即检查更新用 update；关闭自动更新在 worker.json 加 "autoUpdate": false。在「我的设备」中开启「允许团队派发」后，项目负责人也能把任务派到这台电脑。</Typography.Text>
+        </Flex>
+      </Card>
+    )}
+    {hostBridge?.supported !== false && !serverMode && (
+      <Card
+        className="tf-local-bridge-card"
+        title={
+          <div className="tf-local-card-title-row">
+            <span className="tf-card-icon-badge"><Zap size={16} /></span>
+            <span>本机 Bridge 授权</span>
+            {bridgeStatusBadge}
+          </div>
+        }
+        extra={<Button size="small" icon={<RefreshCw size={13} />} loading={loadingBridge} onClick={() => void loadHostState(false)}>刷新状态</Button>}
+      >
+        <Flex vertical gap={16}>
+          {bridgeConnected && <Typography.Text type="secondary">{hostBridge?.device?.deviceName} · 已授权 {authorizedCount} 个项目</Typography.Text>}
+          {bridgeOccupied && (
+            <Alert
+              type="warning"
+              showIcon
+              title="本机 Bridge 当前由其他账号的有效会话占用"
+              description="请先使用原授权账号登录并在「本地 AI 接入」中注销原设备会话，再回到当前账号点击「授权本机设备」以启用 5288 本地工作台会话同步。"
+            />
+          )}
 
-            {capabilities?.engines && (
-              <div className="tf-engine-readiness">
-                <span className="tf-engine-readiness-label">本机直连执行引擎检测</span>
-                <div className="tf-engine-pill-grid">
-                  {capabilities.engines.map(eng => (
-                    <span key={eng.id} className={`tf-engine-pill${eng.available ? ' is-ready' : ' is-missing'}`}>
-                      <i aria-hidden="true" />
-                      <strong>{eng.label}</strong>
-                      <small>{eng.available ? '可一键调用' : '未检测到'}</small>
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <Form
-              form={bridgeForm}
-              layout="vertical"
-              className="tf-local-bridge-form"
-              disabled={authorizingBridge || loadingBridge}
-              initialValues={{ deviceName: '工作台与本地 AI', projectIds: [] }}
-              onFinish={values => void authorizeHostBridge(values)}
-            >
-              <div className="tf-local-bridge-fields">
-                <Form.Item name="deviceName" label="本机设备标识" rules={[{ required: true, max: 80, message: '请输入设备名称' }]}>
-                  <Input placeholder="工作台与本地 AI" autoComplete="off" />
-                </Form.Item>
-                <Form.Item
-                  name="projectIds"
-                  label={
-                    <Flex justify="space-between" align="center" gap={8} style={{ width: '100%' }}>
-                      <span>允许本机 AI 访问的项目</span>
-                      {projects.length > 0 && (
-                        <Space size={4}>
+          <Form
+            form={bridgeForm}
+            layout="vertical"
+            labelWrap
+            className="tf-local-bridge-form"
+            disabled={authorizingBridge || loadingBridge}
+            initialValues={{ deviceName: '工作台与本地 AI', projectIds: [] }}
+            onFinish={values => void authorizeHostBridge(values)}
+          >
+            <div className="tf-local-bridge-fields">
+              <Form.Item name="deviceName" label="本机设备标识" rules={[{ required: true, max: 80, message: '请输入设备名称' }]}>
+                <Input placeholder="工作台与本地 AI" autoComplete="off" />
+              </Form.Item>
+              <Form.Item
+                name="projectIds"
+                label={
+                  <Flex justify="space-between" align="center" gap={8} wrap style={{ width: '100%' }}>
+                    <span>允许本机 AI 访问的项目</span>
+                    {projects.length > 0 && (
+                      <Space size={6} wrap>
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: 0, height: 'auto' }}
+                          disabled={authorizingBridge || loadingBridge || (selectedBridgeProjects?.length || 0) === projects.length}
+                          onClick={() => bridgeForm.setFieldValue('projectIds', projects.map(project => project.id))}
+                        >
+                          全选全部 ({projects.length})
+                        </Button>
+                        {!!selectedBridgeProjects?.length && (
                           <Button
                             type="link"
                             size="small"
                             style={{ padding: 0, height: 'auto' }}
-                            disabled={authorizingBridge || loadingBridge || (selectedBridgeProjects?.length || 0) === projects.length}
-                            onClick={() => bridgeForm.setFieldValue('projectIds', projects.map(project => project.id))}
+                            disabled={authorizingBridge || loadingBridge}
+                            onClick={() => bridgeForm.setFieldValue('projectIds', [])}
                           >
-                            全选全部 ({projects.length})
+                            清空
                           </Button>
-                          {!!selectedBridgeProjects?.length && (
-                            <Button
-                              type="link"
-                              size="small"
-                              style={{ padding: 0, height: 'auto' }}
-                              disabled={authorizingBridge || loadingBridge}
-                              onClick={() => bridgeForm.setFieldValue('projectIds', [])}
-                            >
-                              清空
-                            </Button>
-                          )}
-                        </Space>
-                      )}
-                    </Flex>
-                  }
-                  rules={[{ type: 'array', required: true, min: 1, message: '请至少选择一个允许访问的项目' }]}
-                >
-                  <Select
-                    mode="multiple"
-                    maxTagCount="responsive"
-                    placeholder="选择允许访问的项目"
-                    loading={loadingBridge}
-                    showSearch={{ optionFilterProp: 'label' }}
-                    options={projects.map(project => ({ value: project.id, label: `${project.key} · ${project.name}` }))}
-                  />
-                </Form.Item>
-              </div>
-              <Space wrap size={8} className="tf-local-bridge-actions">
-                <Button type="primary" htmlType="submit" icon={<ShieldCheck size={15} />} loading={authorizingBridge} disabled={!projects.length}>
-                  {bridgeConnected ? '更新授权项目并续期' : '一键授权接通本机 AI'}
-                </Button>
-                <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心处理任务</Button>
-                <Button onClick={() => openWorkbench()} icon={<ExternalLink size={13} />}>打开工作台</Button>
-              </Space>
-            </Form>
+                        )}
+                      </Space>
+                    )}
+                  </Flex>
+                }
+                rules={[{ type: 'array', required: true, min: 1, message: '请至少选择一个允许访问的项目' }]}
+              >
+                <Select
+                  mode="multiple"
+                  maxTagCount="responsive"
+                  placeholder="选择允许访问的项目"
+                  loading={loadingBridge}
+                  showSearch={{ optionFilterProp: 'label' }}
+                  options={projects.map(project => ({ value: project.id, label: `${project.key} · ${project.name}` }))}
+                />
+              </Form.Item>
+            </div>
+            <Space wrap size={8} className="tf-local-bridge-actions">
+              <Button type="primary" htmlType="submit" icon={<ShieldCheck size={15} />} loading={authorizingBridge} disabled={!projects.length}>
+                {bridgeConnected ? '更新授权项目并续期' : '授权本机设备'}
+              </Button>
+              <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心</Button>
+              <Button onClick={() => openWorkbench()} icon={<ExternalLink size={13} />}>打开工作台</Button>
+            </Space>
+          </Form>
 
-            {bridgeConnected && (
-              <div className="tf-local-doctor-strip">
-                <Typography.Text type="secondary">终端快速自检（验证 MCP 握手与真实任务读取）</Typography.Text>
-                {commandBlock('quick-doctor', 'taskflow-hub doctor', '本机自检')}
-              </div>
-            )}
-          </Flex>
-        </Card>
-      )}
-
-      <div className="tf-local-side-stack">
-        <div className="tf-local-kpi-grid" aria-label="本地协同遥测概览">
-          <div className={`tf-local-kpi-tile${bridgeConnected ? ' is-connected' : ''}`}>
-            <span>桥接会话</span>
-            <strong>{bridgeConnected ? '已在线' : '待授权'}</strong>
-            <small>{bridgeConnected ? '7 天受限设备令牌有效' : '点击左侧一键签发会话'}</small>
-          </div>
-          <div className="tf-local-kpi-tile">
-            <span>已授权项目</span>
-            <strong>{authorizedCount}</strong>
-            <small>可见项目共 {projects.length} 个</small>
-          </div>
-          <div className="tf-local-kpi-tile">
-            <span>已绑定仓库</span>
-            <strong>{workspaces.length}</strong>
-            <small>扫描发现 {repositories.length} 个本地库</small>
-          </div>
-          <div className="tf-local-kpi-tile">
-            <span>就绪 AI 引擎</span>
-            <strong>{readyEngineCount}</strong>
-            <small>Codex / Gemini / Cursor / Claude</small>
-          </div>
-        </div>
-
-        <Card
-          className="tf-local-workflow-card"
-          title={
-            <div className="tf-local-card-title-row">
-              <span className="tf-card-icon-badge"><Sparkles size={16} /></span>
-              <span>全流程免复制自动化协作</span>
+          {bridgeConnected && (
+            <div className="tf-local-doctor-strip">
+              <Typography.Text type="secondary">终端快速自检（验证 MCP 握手与真实任务读取）</Typography.Text>
+              {commandBlock('quick-doctor', 'taskflow-hub doctor', '本机自检')}
             </div>
-          }
-        >
-          <div className="tf-local-workflow-steps">
-            <div className="tf-workflow-step-item">
-              <em>01</em>
-              <div>
-                <strong>任务详情页直连本地引擎</strong>
-                <p>在任意任务点击 <span className="tf-inline-pill">本地 AI 一键处理</span>，直接调度本机 <strong>Codex</strong>、<strong>Gemini / Antigravity</strong>、<strong>Cursor Agent</strong> 或 <strong>Claude Code</strong>，告别手工复制粘贴。</p>
-              </div>
-            </div>
-            <div className="tf-workflow-step-item">
-              <em>02</em>
-              <div>
-                <strong>自动提取代码改动与生成评审草稿</strong>
-                <p>绑定本地业务 Git 仓库后，支持一键读取工作树 Diff 登记为 <code>CODE</code> 材料，并基于冻结输入自动生成结构化评审草稿。</p>
-              </div>
-            </div>
-            <div className="tf-workflow-step-item">
-              <em>03</em>
-              <div>
-                <strong>伴随心跳与提交同步</strong>
-                <p>运行 <code>taskflow-hub start --task &lt;任务号&gt; --tool custom</code> 可在编码期间自动同步心跳与 Git 新提交进度。</p>
-              </div>
-            </div>
-          </div>
-          <Space wrap size={8} className="tf-local-workflow-actions">
-            <Button type="primary" onClick={() => navigateWorkspace('tasks')}>进入任务中心体验全流程</Button>
-            <Button onClick={() => openWorkbench()} icon={<LayoutDashboard size={14} />}>打开工作台</Button>
-          </Space>
-        </Card>
-      </div>
-    </div>
+          )}
+        </Flex>
+      </Card>
+    )}
 
     <Card
       className="tf-local-doctor-card"
       title={
         <div className="tf-local-card-title-row">
           <span className="tf-card-icon-badge"><Activity size={16} /></span>
-          <span>本机 AI 与 MCP 全链路在线体检 (Doctor)</span>
+          <span>本机诊断</span>
           {doctorResult && (
             <StatusBadge
-              variant={doctorResult.overall === 'HEALTHY' ? 'green' : doctorResult.overall === 'WARN' ? 'warn' : 'warn'}
+              variant={doctorResult.overall === 'HEALTHY' ? 'green' : 'warn'}
             >
               评分 {doctorResult.score} / 100 · {doctorResult.durationMs}ms
             </StatusBadge>
@@ -533,14 +468,14 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
             loading={runningDoctor}
             onClick={() => void runOnlineDoctor()}
           >
-            {doctorResult ? '重新体检' : '一键运行全面体检'}
+            {doctorResult ? '重新诊断' : '运行诊断'}
           </Button>
         </Space>
       }
     >
       {!doctorResult ? (
         <Typography.Text type="secondary">
-          一键实时检测 SQLite 并发日志模式、本地 AI 私有运行沙盒目录权限（0700 隔离）、Git 工具链、CLI 编程引擎可达性、MCP 受限设备会话有效期及业务仓库规范文件，支持导出零密钥脱敏诊断报告。
+          检查本机工具、设备会话、仓库配置与文件权限。
         </Typography.Text>
       ) : (
         <div
@@ -596,7 +531,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       title={
         <div className="tf-local-card-title-row">
           <span className="tf-card-icon-badge"><FolderGit2 size={16} /></span>
-          <span>项目本地代码目录绑定（免手输路径）</span>
+          <span>项目仓库绑定</span>
         </div>
       }
       extra={
@@ -608,7 +543,6 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       }
     >
       <Flex vertical gap={16}>
-        <Typography.Text type="secondary">将平台项目与本机真实业务 Git 仓库绑定后，任务详情支持「一键启动本机 AI 执行」「一键提取 Git 改动为代码材料」与「Finder / Cursor / 终端一键打开」。</Typography.Text>
         {repositories.length > 0 && (
           <div className="tf-repo-quick-picker">
             <Typography.Text className="tf-field-caption">从本机已扫描的 Git 仓库快速填入路径</Typography.Text>
@@ -676,13 +610,13 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                   <div key={item.projectId} className="tf-bound-workspace-row">
                     <div className="tf-bound-workspace-meta">
                       <StatusBadge variant="blue">{proj ? `${proj.key} · ${proj.name}` : item.projectId}</StatusBadge>
-                      <code className="tf-bound-repo-path">{item.repoPath}</code>
+                      <code className="tf-bound-repo-path" title={item.repoPath}>{item.repoPath}</code>
                       <span className="tf-bound-target-pill">{targetLabel}</span>
                     </div>
-                    <Space size={4} className="tf-bound-workspace-actions">
-                      <Button size="small" type="text" icon={<FolderOpen size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'finder', repoPath: item.repoPath }).then(() => message.success('已在 Finder 中打开文件夹。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Finder 打开</Button>
-                      <Button size="small" type="text" onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'cursor', repoPath: item.repoPath }).then(() => message.success('已在 Cursor 中打开。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>在 Cursor 打开</Button>
-                      <Button size="small" type="text" icon={<Terminal size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'terminal', repoPath: item.repoPath }).then(() => message.success('已在终端中打开仓库目录。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>打开终端</Button>
+                    <Space size={8} wrap className="tf-bound-workspace-actions">
+                      <Button size="small" type="text" icon={<FolderOpen size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'finder', repoPath: item.repoPath }).then(() => message.success('已在 Finder 中打开文件夹。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Finder</Button>
+                      <Button size="small" type="text" onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'cursor', repoPath: item.repoPath }).then(() => message.success('已在 Cursor 中打开。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Cursor</Button>
+                      <Button size="small" type="text" icon={<Terminal size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'terminal', repoPath: item.repoPath }).then(() => message.success('已在终端中打开仓库目录。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>终端</Button>
                       <Button size="small" type="text" onClick={() => workspaceForm.setFieldsValue({ projectId: item.projectId, repoPath: item.repoPath, defaultTarget: (item.defaultTarget as LocalTaskTarget) || 'workbench' })}>编辑</Button>
                       <Button size="small" type="text" danger icon={<Trash2 size={13} />} onClick={() => void removeProjectWorkspace(item.projectId)}>解除</Button>
                     </Space>
@@ -699,9 +633,8 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       <div className="tf-local-section-heading">
         <div>
           <Typography.Title id="local-clients-heading" level={2}>按项目安装独立 CLI / IDE 配置</Typography.Title>
-          <Typography.Text type="secondary">本机全局配置已就绪；若需写入单个业务仓库内的项目级 MCP 配置可使用下方引导。</Typography.Text>
+          <Typography.Text type="secondary">在指定代码目录配置 MCP。</Typography.Text>
         </div>
-        <Tag className="tf-local-protocol">标准 MCP 协议</Tag>
       </div>
       <div className="tf-local-client-grid">
         {CLIENTS.map(item => (
@@ -711,13 +644,12 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                 <span className="tf-local-client-icon"><item.icon size={19} strokeWidth={1.85} /></span>
                 <div>
                   <Typography.Title level={3}>{item.name}</Typography.Title>
-                  <Typography.Text type="secondary" className="tf-local-client-type">本地编程工具</Typography.Text>
                 </div>
               </div>
               <code className="tf-client-config-chip">{item.file}</code>
             </div>
             <Typography.Paragraph type="secondary" className="tf-local-client-description">{item.description}</Typography.Paragraph>
-            <Button className="tf-local-client-action" icon={<ArrowRight size={14} />} iconPlacement="end" onClick={() => startGuide(item.key)}>项目级配置引导</Button>
+            <Button className="tf-local-client-action" icon={<ArrowRight size={14} />} iconPlacement="end" onClick={() => startGuide(item.key)}>配置项目</Button>
           </Card>
         ))}
       </div>
@@ -725,18 +657,21 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
 
     <CustomClientAdapters userId={user.id} onConnect={startCustomGuide} />
 
-    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} teamDispatch={serverMode} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
-
     {serverMode && <TeamAgentsCard key={`team-${user.id}`} projects={projects} onUnauthorized={onUnauthorized} />}
 
-    <Collapse className="tf-local-help" items={[
-      { key: 'capabilities', label: <Space size={8}><FileCode2 size={15} /><span>接入后可以调用哪些 MCP 能力</span></Space>, children: <div className="tf-local-capabilities">
-        <div className="tf-capability-group"><Typography.Text strong>只读检索工具（{READ_TOOLS.length} 项）</Typography.Text><Typography.Paragraph type="secondary">查询任务列表、上下文、绑定仓库路径、材料版本、评审记录、冻结输入快照与团队知识库。</Typography.Paragraph><Space wrap size={[8, 8]}>{READ_TOOLS.map(tool => <Tag key={tool} className="tf-mcp-tool-tag"><code>{tool}</code> · {mcpToolLabel(tool)}</Tag>)}</Space></div>
-        <div className="tf-capability-group"><Typography.Text strong>受控回传工具（4 项）</Typography.Text><Typography.Paragraph type="secondary">在项目成员权限内认领任务、上报开发进度、记录伴随心跳或提交指定评审报告。</Typography.Paragraph><Space wrap size={[8, 8]}>{WRITE_TOOLS.map(tool => <Tag key={tool} className="tf-mcp-tool-tag is-write"><code>{tool}</code> · {mcpToolLabel(tool)}</Tag>)}</Space></div>
-        <div className="tf-local-capabilities-footer"><Typography.Text type="secondary">云端 AI 托管执行尚未接入，当前均由本机 AI 工具执行并按权限回传。</Typography.Text><Button type="link" icon={<ArrowRight size={14} />} iconPlacement="end" onClick={() => navigateWorkspace('tasks')}>前往任务中心</Button></div>
-      </div> },
-      { key: 'permissions', label: <Space size={8}><ShieldCheck size={15} /><span>设备权限边界与安全说明</span></Space>, children: <Typography.Paragraph type="secondary" style={{ margin: 0 }}>设备仅可访问明确批准的项目，支持任务读取、认领、进度、心跳与报告提交。成员管理、平台配置、业务审批和发布权限不会授予本地设备。一键授权与终端配对同样遵循浏览器登录态与同源校验，可随时在「我的设备」撤销。</Typography.Paragraph> },
-    ]} />
+    <Card size="small" title="设备访问权限">
+      <div className="tf-local-capabilities">
+        <div className="tf-capability-group">
+          <Typography.Text strong>读取</Typography.Text>
+          <Typography.Text type="secondary">{READ_TOOLS.map(mcpToolLabel).join('、')}</Typography.Text>
+        </div>
+        <div className="tf-capability-group">
+          <Typography.Text strong>回传</Typography.Text>
+          <Typography.Text type="secondary">{WRITE_TOOLS.map(mcpToolLabel).join('、')}</Typography.Text>
+        </div>
+      </div>
+      <Typography.Paragraph type="secondary" style={{ margin: '12px 0 0' }}>设备只能访问已授权项目。审批、发布及项目配置仍由平台成员操作。可在「我的设备」撤销授权。</Typography.Paragraph>
+    </Card>
 
     <Drawer
       title={handoffPort !== undefined ? '确认本地设备接入' : '接入本地编程工具'}
@@ -782,7 +717,9 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
             <div className="tf-local-guide-card"><Typography.Text strong>安装项目配置</Typography.Text>{installCommand ? <div className="tf-local-command"><pre><code>{installCommand}</code></pre><Button size="small" icon={copied === 'mcp-install' ? <Check size={14} /> : <Copy size={14} />} aria-label="复制 MCP 安装命令" onClick={() => void pathForm.validateFields().then(() => copy('mcp-install', installCommand)).catch(() => {})}>{copied === 'mcp-install' ? '已复制' : '复制'}</Button></div> : <Button disabled icon={<Copy size={14} />}>填写目录后复制安装命令</Button>}</div>
           </Form>
           <div className="tf-local-guide-card"><Typography.Text strong>检查连接状态</Typography.Text>{doctorCommand ? commandBlock('doctor', doctorCommand, '检查本机连接') : <Button disabled icon={<Copy size={14} />}>填写路径后生成检查命令</Button>}<Typography.Text type="secondary">运行后在终端查看诊断结果，再重载 {activeClient.name} 并实际调用 <code>task_list</code>。配置已写入不代表客户端已加载。</Typography.Text></div>
-          <Collapse size="small" items={[{ key: 'advanced', label: '配置详情与备用终端登录', children: <div className="tf-local-guide-block"><Typography.Text type="secondary">项目内配置文件：<Typography.Text code>{activeClient.file}</Typography.Text></Typography.Text><Typography.Text type="secondary">合并节点：<Typography.Text code>{activeClient.node}</Typography.Text></Typography.Text>{customAdapter && <Typography.Paragraph type="secondary">当前 Delivery Workspace 的原生自定义插件尚不支持注册 MCP。可直接使用工作台内置的 Codex 或 Gemini / Antigravity 引擎全局 MCP 配置。</Typography.Paragraph>}<Typography.Paragraph type="secondary">已有平台成员可使用备用登录，密码在终端隐藏输入。</Typography.Paragraph>{commandBlock('backup-login', backupLogin, '备用登录')}{customAdapter ? absoluteProjectPath(adapterPath) && commandBlock('export-mcp', `node local-bridge/rd.mjs export-mcp --adapter ${shellQuote(adapterPath)}`, '导出 MCP 配置') : <Typography.Text type="secondary">手动合并配置可运行 <code>node local-bridge/mcp.mjs --print-config</code>。</Typography.Text>}</div> }]} />
+          <div className="tf-local-guide-block">
+            <Typography.Text strong>配置详情与备用终端登录</Typography.Text><Typography.Text type="secondary">项目内配置文件：<Typography.Text code>{activeClient.file}</Typography.Text></Typography.Text><Typography.Text type="secondary">合并节点：<Typography.Text code>{activeClient.node}</Typography.Text></Typography.Text>{customAdapter && <Typography.Paragraph type="secondary">当前 Delivery Workspace 的原生自定义插件尚不支持注册 MCP。可直接使用工作台内置的 Codex 或 Gemini / Antigravity 引擎全局 MCP 配置。</Typography.Paragraph>}<Typography.Paragraph type="secondary">已有平台成员可使用备用登录，密码在终端隐藏输入。</Typography.Paragraph>{commandBlock('backup-login', backupLogin, '备用登录')}{customAdapter ? absoluteProjectPath(adapterPath) && commandBlock('export-mcp', `node local-bridge/rd.mjs export-mcp --adapter ${shellQuote(adapterPath)}`, '导出 MCP 配置') : <Typography.Text type="secondary">手动合并配置可运行 <code>node local-bridge/mcp.mjs --print-config</code>。</Typography.Text>}
+          </div>
         </div>}
       </div>
     </Drawer>

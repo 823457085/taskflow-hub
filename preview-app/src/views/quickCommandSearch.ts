@@ -1,5 +1,5 @@
 import type { Project, WorkTask } from './workspaceApi.ts';
-import type { WorkspaceSection } from './workspaceNavigation.ts';
+import { SECTION_LABELS, type WorkspaceSection } from './workspaceNavigation.ts';
 import { taskStatusLabel, taskTypeLabel } from './displayLabels.ts';
 
 export type QuickCommandKind = 'action' | 'task' | 'project' | 'section';
@@ -21,17 +21,20 @@ export interface QuickCommandItem {
 const SECTION_DESCRIPTIONS: { section: WorkspaceSection; title: string; subtitle: string; keywords: string }[] = [
   { section: 'overview', title: '工作台', subtitle: '待办、待审门禁与全流程交付概览', keywords: 'overview home 工作台 首页 待办' },
   { section: 'projects', title: '项目空间', subtitle: '按现有项目组织工作范围与协作', keywords: 'projects 项目 目录' },
-  { section: 'tasks', title: '任务中心', subtitle: '查看、筛选并推进当前项目任务', keywords: 'tasks jira 任务 列表' },
+  { section: 'tasks', title: '需求中心', subtitle: '接入 Jira 需求，评审 PRD、设计稿和原型', keywords: 'tasks jira prd review 任务中心 需求评审 列表' },
+  { section: 'tech-review', title: '技术方案评审', subtitle: '按需求评审技术方案文档', keywords: 'tech review 技术方案 方案评审' },
+  { section: 'test-review', title: '用例评审', subtitle: '按需求评审测试用例文件或文档', keywords: 'test case review 测试 用例评审 xlsx' },
+  { section: 'code-review', title: '代码评审', subtitle: '按需求评审合并请求的代码差异', keywords: 'code mr pr review 代码审查' },
   { section: 'todos', title: '团队待办', subtitle: '个人待办与项目共享待办', keywords: 'todos todo 待办 团队 个人' },
   { section: 'reports', title: '工作报告', subtitle: '按天汇总个人与团队的完成、进行中和卡住事项', keywords: 'reports report daily 日报 周报 汇报 报告' },
   { section: 'sessions', title: 'Agent 记录', subtitle: '本机 Agent 会话同步、共享与讨论', keywords: 'agent sessions codex cursor 会话 执行记录 delivery' },
   { section: 'deployments', title: '部署记录', subtitle: '各环境部署历史，云效与 Jenkins 同步或手动登记', keywords: 'deploy deployments release 部署 发布 上线 云效 jenkins 运维' },
   { section: 'knowledge', title: '知识库', subtitle: '项目共享的排障手册、系统说明与规范', keywords: 'knowledge wiki docs 知识库 文档 手册 sop 系统目录' },
   { section: 'skills', title: '团队 Skill', subtitle: '统一维护并下发到成员本机的 AI Skill', keywords: 'skills skill plugin 插件 技能 下发 codex cursor' },
-  { section: 'reviews', title: '评审中心', subtitle: '集中跟踪需求、方案、代码、测试与上线审核', keywords: 'reviews 评审 门禁 批准 审核' },
+  { section: 'reviews', title: SECTION_LABELS.reviews, subtitle: '查看项目评审待办和历史记录', keywords: 'reviews 评审中心 待办 待审批 历史 门禁 批准 审核' },
   { section: 'assets', title: '材料中心', subtitle: '统一查找需求、方案、代码改动与测试材料', keywords: 'assets 材料 文档 代码 版本' },
   { section: 'local', title: '本地 AI 接入', subtitle: '连接 Codex / Gemini / Cursor / Claude 与代码库', keywords: 'local ai mcp 本地 仓库 终端' },
-  { section: 'connections', title: '平台连接', subtitle: '读取 Jira / Confluence / GitLab / 云效 / Jenkins', keywords: 'connections jira confluence gitlab jenkins yunxiao 连接' },
+  { section: 'connections', title: '平台连接', subtitle: '读取 Jira / Confluence / GitLab / GitHub / 云效 / Jenkins', keywords: 'connections jira confluence gitlab github jenkins yunxiao 连接' },
   { section: 'accounts', title: '账号管理', subtitle: '管理个人与项目共享凭据身份', keywords: 'accounts 账号 凭据' },
   { section: 'members', title: '成员与权限', subtitle: '查看或管理项目成员、角色分工与合规审计记录', keywords: 'members audit 成员 角色 权限 审计 合规 日志' },
 ];

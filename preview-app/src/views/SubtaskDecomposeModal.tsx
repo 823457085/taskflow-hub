@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { Alert, App as AntApp, Button, Checkbox, Flex, Input, Modal, Select, Space, Tag, Typography } from 'antd';
 import { Plus, Sparkles, Square, Trash2 } from 'lucide-react';
-import { api, ApiError, isLocalTaskKey, type Asset, type LocalAiEngineId, type LocalAiRun, type LocalAutomationCapabilities, type User, type WorkTask } from './workspaceApi';
+import { api, ApiError, isLocalTaskKey, type Asset, type LocalAiRun, type LocalAutomationCapabilities, type User, type WorkTask } from './workspaceApi';
 import { TASK_TYPE_OPTIONS } from './displayLabels';
-import { readStoredChoice } from './uiPreferences';
+import { AiRunIdentity, availableAiEngine, LocalAiExecutionFields, readAiEngine, useAiModelSelection } from './LocalAiExecutionFields';
 import {
   allocateNextJiraKeys,
   buildStandardDeliverySubtasks,
@@ -25,7 +25,6 @@ interface DraftSubtaskRow {
   created?: boolean;
 }
 
-const ENGINE_IDS: readonly LocalAiEngineId[] = ['codex', 'antigravity', 'cursor', 'claude'];
 const VALID_JIRA_KEY_RE = /^[A-Z][A-Z0-9]*-[1-9]\d*$/;
 
 const SOURCE_LABELS: Record<DraftSubtaskRow['source'], string> = {
@@ -51,6 +50,10 @@ export const SubtaskDecomposeModal: React.FC<{
   const { message } = AntApp.useApp();
   const [rows, setRows] = useState<DraftSubtaskRow[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
+  const [engine, setEngine] = useState(readAiEngine);
+  const executionRunner = capabilities?.deployment === 'server' ? 'bridge' : 'local';
+  const model = useAiModelSelection(capabilities, engine, executionRunner);
   const [aiRun, setAiRun] = useState<LocalAiRun | null>(null);
   const [startingAi, setStartingAi] = useState(false);
   const [aiRationale, setAiRationale] = useState('');
@@ -87,6 +90,17 @@ export const SubtaskDecomposeModal: React.FC<{
   }, [open, parentTask.id]);
 
   useEffect(() => {
+    if (!open) return;
+    let current = true;
+    void api<LocalAutomationCapabilities>('local-automation/capabilities').then(result => {
+      if (!current) return;
+      setCapabilities(result);
+      setEngine(preferred => availableAiEngine(result, preferred));
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [open]);
+
+  useEffect(() => {
     if (!open || !aiRun || aiRun.status !== 'RUNNING') return;
     const timer = window.setInterval(() => {
       if (document.visibilityState !== 'visible') return;
@@ -120,20 +134,14 @@ export const SubtaskDecomposeModal: React.FC<{
   }, [open, aiRun?.id, aiRun?.status]);
 
   const startAiSubtaskDraft = async () => {
-    if (startingAi || aiRun?.status === 'RUNNING' || submitting) return;
+    if (startingAi || aiRun?.status === 'RUNNING' || submitting || model.invalid) return;
     setStartingAi(true);
     try {
-      let engine = readStoredChoice('taskflow.ai.engine', ENGINE_IDS, 'codex');
-      try {
-        const caps = await api<LocalAutomationCapabilities>('local-automation/capabilities');
-        if (!caps.engines.some(e => e.id === engine && e.available)) {
-          engine = caps.engines.find(e => e.available)?.id || engine;
-        }
-      } catch { /* fallback */ }
       const res = await api<{ run: LocalAiRun }>(`tasks/${encodeURIComponent(parentTask.id)}/ai-runs`, {
         mode: 'read',
         actionType: 'SUBTASK_DRAFT',
         engine,
+        ...(model.model ? { model: model.model } : {}),
       });
       setAiRun(res.run);
       void message.info('正在调用本机 AI 阅读 PRD 与技术方案生成子任务草案…');
@@ -291,6 +299,8 @@ export const SubtaskDecomposeModal: React.FC<{
           showIcon
           title="支持从最新 PRD / 技术方案自动提取实施条目（自动跳过「背景」「非目标」等非交付段落），仅在本地工作台建立父子研发跟踪，不会向外部 Jira 写回事项。"
         />
+        <LocalAiExecutionFields size="small" capabilities={capabilities} engine={engine} onEngineChange={setEngine}
+          model={model} runner={executionRunner} disabled={startingAi || aiRun?.status === 'RUNNING' || submitting} />
         <Flex justify="space-between" align="center" wrap gap={8}>
           <Space size={8} wrap>
             {aiRun?.status === 'RUNNING' ? (
@@ -298,7 +308,7 @@ export const SubtaskDecomposeModal: React.FC<{
                 停止 AI 拆解
               </Button>
             ) : (
-              <Button size="small" type="primary" ghost icon={<Sparkles size={13} />} loading={startingAi} disabled={submitting} onClick={() => void startAiSubtaskDraft()}>
+              <Button size="small" type="primary" ghost icon={<Sparkles size={13} />} loading={startingAi} disabled={submitting || model.invalid} onClick={() => void startAiSubtaskDraft()}>
                 AI 智能拆解 PRD/方案
               </Button>
             )}
@@ -316,6 +326,7 @@ export const SubtaskDecomposeModal: React.FC<{
             已选 {activeRows.length} / {rows.length} 项
           </Typography.Text>
         </Flex>
+        {aiRun && <AiRunIdentity run={aiRun} />}
         {aiRationale && <Alert type="success" showIcon title={aiRationale} />}
 
         <div style={{ display: 'grid', gap: 8, maxHeight: 380, overflowY: 'auto', paddingRight: 2 }}>

@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Input, List, Radio, Segmented, Select, Space, Tag, Typography } from 'antd';
+import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Input, List, Pagination, Radio, Segmented, Select, Space, Spin, Tag, Typography } from 'antd';
 import { ArrowRight, ClipboardPaste, ExternalLink, Link2, Search } from 'lucide-react';
 import { jiraReferenceMatchesSource, parseJiraReference } from '../../../platform-server/jira-reference.mjs';
 import { AccountUsageSelector } from './AccountUsageSelector';
 import { clearSearchOnEscape } from './uiPreferences';
-import { api, ApiError, Project, User, WorkTask } from './workspaceApi';
+import { api, ApiError, isChildTask, Project, User, WorkTask } from './workspaceApi';
 import './JiraTaskIntake.css';
 
 export interface JiraIntakeIssue {
@@ -17,10 +17,11 @@ export interface JiraIntakeIssue {
 }
 interface UsedAccount { id: string; name: string; scope: string }
 interface LookupResult { project: Project; issue: JiraIntakeIssue; existingTask: WorkTask | null; usedAccount?: UsedAccount | null }
-interface SearchResult { project: Project; items: JiraIntakeIssue[]; total: number; usedAccount?: UsedAccount | null }
+interface SearchResult { project: Project; items: JiraIntakeIssue[]; total: number; page?: number; pageSize?: number; usedAccount?: UsedAccount | null }
 interface IntakeDraft { reference?: string; projectId?: string; query?: string }
 interface Preview extends LookupResult { reference: string; generation: number }
 type Operation = 'lookup' | 'search' | 'import';
+const MAIN_TASK_REQUIRED = '请接入 Jira 主事项，子任务会自动关联。';
 
 export interface JiraTaskIntakeProps {
   open: boolean;
@@ -28,17 +29,19 @@ export interface JiraTaskIntakeProps {
   projects: Project[];
   existingTasks?: WorkTask[];
   initialProjectId?: string;
+  requirementOnly?: boolean;
   onClose: () => void;
-  onManual: () => void;
+  onManual?: () => void;
   onImported: (task: WorkTask, projectId: string) => Promise<void>;
   onUnauthorized: () => void;
   onForbidden?: () => void;
 }
 
-export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, projects, existingTasks = [], initialProjectId, onClose, onManual, onImported, onUnauthorized, onForbidden }) => {
+export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, projects, existingTasks = [], initialProjectId, requirementOnly = false, onClose, onManual, onImported, onUnauthorized, onForbidden }) => {
   const { message } = App.useApp();
   const [form] = Form.useForm<IntakeDraft>();
-  const [mode, setMode] = useState<'link' | 'select'>('link');
+  const initialMode = requirementOnly ? 'select' : 'link';
+  const [mode, setMode] = useState<'link' | 'select'>(initialMode);
   const currentMode = useRef(mode);
   currentMode.current = mode;
   const [operation, setOperation] = useState<Operation | null>(null);
@@ -74,6 +77,17 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
   })();
   const selectedAccountId = resolvedAccount?.projectId === accountProject?.id && resolvedAccount?.userId === user.id ? resolvedAccount.id : undefined;
   const accountUnknown = !!accountProject && selectedAccountId === undefined;
+  const existingByProjectKey = new Map(existingTasks.map(task => [`${task.projectId}:${task.jiraKey.toUpperCase()}`, task]));
+  const findLocalTask = (key: string, projectId: string) => existingByProjectKey.get(`${projectId}:${key.toUpperCase()}`);
+  const isMainIssue = (issue: JiraIntakeIssue, project: Project, localTask?: WorkTask | null) => {
+    if (issue.issueType?.subtask) return false;
+    const currentTask = findLocalTask(issue.key, project.id);
+    if (localTask && isChildTask(localTask) || currentTask && isChildTask(currentTask)) return false;
+    if (localTask || currentTask) return true;
+    if (!issue.parentKey || !project.jira?.baseUrl) return true;
+    const parentSource = findLocalTask(issue.parentKey, project.id)?.externalRef;
+    return !(parentSource?.provider === 'jira' && parentSource.url?.startsWith(`${project.jira.baseUrl}/browse/`));
+  };
 
   const invalidate = () => {
     sequence.current += 1; pending.current = null; setOperation(null);
@@ -84,11 +98,11 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
     return () => { alive.current = false; sequence.current += 1; pending.current = null; };
   }, []);
   useEffect(() => {
-    invalidate(); autoSearchedKey.current = ''; setAccountSwitching(false); setMode('link'); form.resetFields();
+    invalidate(); autoSearchedKey.current = ''; setAccountSwitching(false); setMode(initialMode); form.resetFields();
     form.setFieldsValue({ projectId: preferredProject });
-  }, [open, scope]);
+  }, [open, scope, initialMode]);
   const close = () => { if (pending.current === 'import') return; invalidate(); form.resetFields(); onClose(); };
-  const manual = () => { if (pending.current === 'import') return; invalidate(); form.resetFields(); onManual(); };
+  const manual = () => { if (pending.current === 'import' || !onManual) return; invalidate(); form.resetFields(); onManual(); };
   const showError = (error: unknown) => {
     void message.error(error instanceof Error ? error.message : '请求失败。');
     if (error instanceof ApiError && [401, 403].includes(error.status)) {
@@ -112,22 +126,29 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
       const result = await api<LookupResult>('jira/tasks/lookup', { reference, ...(projectId ? { projectId } : {}), ...(accountId !== undefined ? { accountId } : {}) });
       if (!request.isCurrent()) return;
       if (!result?.project?.id || !result?.issue || typeof result.issue.key !== 'string' || typeof result.issue.title !== 'string' || !projects.some(project => project.id === result.project.id)) throw new Error('平台响应格式不正确。');
+      if (!isMainIssue(result.issue, result.project, result.existingTask)) throw new Error(MAIN_TASK_REQUIRED);
       setPreview({ ...result, reference, generation: request.generation }); setSelectedKey(result.issue.key);
     } catch (error) { if (request.isCurrent()) { setSelectedKey(''); showError(error); } }
     finally { request.finish(); }
   };
-  const read = async (values: IntakeDraft) => {
+  const read = async (values: IntakeDraft, page = 1) => {
     if (currentMode.current !== mode || accountSwitching || accountUnknown) return;
     const current = form.getFieldsValue();
     if (mode === 'link' ? current.reference !== values.reference : current.projectId !== values.projectId || current.query !== values.query) return;
-    if (mode === 'link') { await lookup(values.reference!.trim()); return; }
+    if (mode === 'link') { await lookup(values.reference!.trim(), accountProject?.id); return; }
     const request = begin('search');
     if (!request) return;
-    setPreview(null); setSearchResult(null); setSelectedKey('');
+    setPreview(null); setSelectedKey('');
     try {
-      const result = await api<SearchResult>('jira/tasks/search', { projectId: values.projectId, ...(selectedAccountId !== undefined ? { accountId: selectedAccountId } : {}), ...(values.query?.trim() ? { query: values.query.trim() } : {}) });
+      const result = await api<SearchResult>('jira/tasks/search', {
+        projectId: values.projectId,
+        ...(selectedAccountId !== undefined ? { accountId: selectedAccountId } : {}),
+        ...(values.query?.trim() ? { query: values.query.trim() } : {}),
+        requireMainTask: true, page,
+      });
       if (!request.isCurrent()) return;
-      if (!result?.project?.id || !Array.isArray(result.items) || !projects.some(project => project.id === result.project.id)) throw new Error('平台响应格式不正确。');
+      if (!result?.project?.id || !Array.isArray(result.items) || !projects.some(project => project.id === result.project.id)
+        || result.page !== page || !result.pageSize) throw new Error('平台响应格式不正确。');
       setSearchResult(result);
     } catch (error) { if (request.isCurrent()) showError(error); }
     finally { request.finish(); }
@@ -146,11 +167,13 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
     try {
       const result = await api<{ task: WorkTask; project: Project; existing: boolean; imported: boolean }>('jira/tasks/import', {
         reference: reference.trim(),
+        requireMainTask: true,
         ...(targetProjectId ? { projectId: targetProjectId } : {}),
         ...(accountId !== undefined ? { accountId } : {}),
       });
       if (!request.isCurrent()) return;
       if (!result?.task?.id || !projects.some(project => project.id === result.task.projectId)) throw new Error('平台响应格式不正确。');
+      if (isChildTask(result.task)) throw new Error(MAIN_TASK_REQUIRED);
       void message.success(result.imported ? 'Jira 任务已一步接入。' : '该事项已接入，已为你打开。');
       await continueToTask(result.task, result.task.projectId);
     } catch (error) {
@@ -169,13 +192,18 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
 
   const confirm = async () => {
     if (!preview || pending.current || preview.generation !== sequence.current || !alive.current || !openRef.current || currentScope.current !== scope || currentMode.current !== mode || renderedRoute !== location.hash) return;
-    if (preview.existingTask) { await continueToTask(preview.existingTask, preview.project.id); return; }
+    if (!isMainIssue(preview.issue, preview.project, preview.existingTask)) { invalidate(); showError(new Error(MAIN_TASK_REQUIRED)); return; }
+    if (preview.existingTask && !requirementOnly) { await continueToTask(preview.existingTask, preview.project.id); return; }
     const request = begin('import');
     if (!request) return;
     try {
-      const result = await api<{ task: WorkTask; project: Project; existing: boolean; imported: boolean }>('jira/tasks/import', { reference: preview.reference, projectId: preview.project.id, accountId: preview.usedAccount?.id || null });
+      const result = await api<{ task: WorkTask; project: Project; existing: boolean; imported: boolean }>('jira/tasks/import', {
+        reference: preview.reference, projectId: preview.project.id, accountId: preview.usedAccount?.id || null,
+        requireMainTask: true,
+      });
       if (!request.isCurrent()) return;
       if (!result?.task?.id || result.task.projectId !== preview.project.id) throw new Error('平台响应格式不正确。');
+      if (isChildTask(result.task)) throw new Error(MAIN_TASK_REQUIRED);
       void message.success(result.imported ? 'Jira 任务已接入。' : '该事项已接入，使用已有任务。');
       await continueToTask(result.task, result.task.projectId);
     } catch (error) { if (request.isCurrent()) { setPreview(null); setSelectedKey(''); showError(error); } }
@@ -213,26 +241,38 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
     }
   };
 
-  const existingByProjectKey = new Map(existingTasks.map(task => [`${task.projectId}:${task.jiraKey.toUpperCase()}`, task]));
-  const importedSearchItems = searchResult ? searchResult.items.filter(issue => existingByProjectKey.has(`${searchResult.project.id}:${issue.key.toUpperCase()}`)) : [];
-  const filteredSearchItems = searchResult ? searchResult.items.filter(issue => {
-    const isImported = existingByProjectKey.has(`${searchResult.project.id}:${issue.key.toUpperCase()}`);
+  const mainSearchItems = searchResult ? searchResult.items.filter(issue => isMainIssue(issue, searchResult.project)) : [];
+  const importedSearchCount = searchResult ? mainSearchItems.filter(issue => findLocalTask(issue.key, searchResult.project.id)).length : 0;
+  const filteredSearchItems = searchResult ? mainSearchItems.filter(issue => {
+    const isImported = !!findLocalTask(issue.key, searchResult.project.id);
     if (resultFilter === 'unimported') return !isImported;
     if (resultFilter === 'imported') return isImported;
     return true;
   }) : [];
+  const searchPagination = searchResult?.pageSize && searchResult.total > searchResult.pageSize ? (
+    <Pagination size="small" simple showSizeChanger={false} disabled={!!operation}
+      current={searchResult.page} pageSize={searchResult.pageSize} total={Math.min(searchResult.total, searchResult.pageSize * 10_000)}
+      onChange={page => void read(form.getFieldsValue(), page)} />
+  ) : null;
 
-  return <Drawer title="接入 Jira 任务" open={open} onClose={close} size={640} forceRender closable={!importing} maskClosable={!importing} keyboard={!importing} className="tf-jira-intake" footer={<Flex justify="space-between" gap={12} wrap>
-    <Button type="text" disabled={importing} onClick={manual}>手动登记</Button>
+  return <Drawer title={requirementOnly ? '接入 Jira 需求' : '接入 Jira 任务'} open={open} onClose={close} size={640} forceRender closable={!importing} maskClosable={!importing} keyboard={!importing} className={requirementOnly ? 'tf-jira-intake tf-jira-intake--requirements' : 'tf-jira-intake'} footer={<Flex justify={requirementOnly ? 'end' : 'space-between'} gap={12} wrap>
+    {!requirementOnly && onManual && <Button type="text" disabled={importing} onClick={manual}>手动登记</Button>}
     <Space size={8}><Button disabled={importing} onClick={close}>取消</Button>{preview && <Button type="primary" icon={<ArrowRight size={15} />} iconPlacement="end" loading={importing} disabled={!!operation && !importing} onClick={() => void confirm()}>{preview.existingTask ? '打开已有任务' : '确认接入'}</Button>}</Space>
   </Flex>}>
     <div className="tf-jira-intake-content">
-      <div><Typography.Paragraph className="tf-jira-intake-lead">读取 Jira 事项，自动带出标题、项目和类型。</Typography.Paragraph><Typography.Text type="secondary">读取后确认接入本地工作台，不会创建或修改外部 Jira 事项。</Typography.Text></div>
-      <Segmented block aria-label="选择 Jira 接入方式" value={mode} disabled={importing || accountSwitching} options={[{ value: 'link', label: '粘贴链接或任务号' }, { value: 'select', label: '选择 Jira 事项' }]} onChange={value => { invalidate(); autoSearchedKey.current = ''; form.resetFields(); form.setFieldsValue({ projectId: preferredProject }); setMode(value as 'link' | 'select'); }} />
-      <Form form={form} layout="vertical" disabled={importing || accountSwitching || !jiraProjects.length} preserve={false} onFinish={values => void read(values)} onValuesChange={() => { if (pending.current !== 'import') invalidate(); }}>
-        {mode === 'link' ? <Form.Item name="reference" label="Jira 链接或任务号" htmlFor="jira-intake-reference" rules={[{ required: true, whitespace: true, message: '请粘贴 Jira 链接或输入任务号。' }, { validator: (_, value) => { try { parseJiraReference(value); return Promise.resolve(); } catch (error) { return Promise.reject(error instanceof Error ? error : new Error('请输入有效的 Jira 链接或任务号。')); } } }]} extra="自动识别你有权限且已接入的 Jira 项目，可直接一步接入打开，也可先读取预览。"><Input id="jira-intake-reference" prefix={<Link2 size={16} />} placeholder="https://jira.example.com/browse/SAMPLE-562 或 SAMPLE-562" autoComplete="off" maxLength={2048} allowClear /></Form.Item> : <>
+      {!requirementOnly && <div><Typography.Paragraph className="tf-jira-intake-lead">接入 Jira 主事项，自动关联子任务。</Typography.Paragraph><Typography.Text type="secondary">读取后确认接入本地工作台，不会创建或修改外部 Jira 事项。</Typography.Text></div>}
+      <Segmented<'link' | 'select'> block aria-label="选择 Jira 接入方式" value={mode} disabled={importing || accountSwitching}
+        options={requirementOnly ? [{ value: 'select', label: '从 Jira 选择' }, { value: 'link', label: '粘贴链接或任务号' }]
+          : [{ value: 'link', label: '粘贴链接或任务号' }, { value: 'select', label: '从 Jira 选择' }]}
+        onChange={value => {
+          invalidate(); autoSearchedKey.current = ''; form.resetFields();
+          form.setFieldsValue({ projectId: preferredProject }); setMode(value);
+        }}
+      />
+      <Form form={form} layout="vertical" disabled={importing || accountSwitching || !jiraProjects.length} preserve={false} onFinish={values => requirementOnly && values.reference ? void directImport(values.reference, accountProject?.id, selectedAccountId) : void read(values)} onValuesChange={() => { if (pending.current !== 'import') invalidate(); }}>
+        {mode === 'link' ? <Form.Item name="reference" label="Jira 主事项链接或任务号" htmlFor="jira-intake-reference" rules={[{ required: true, whitespace: true, message: '请粘贴 Jira 主事项链接或输入任务号。' }, { validator: (_, value) => { try { parseJiraReference(value); return Promise.resolve(); } catch (error) { return Promise.reject(error instanceof Error ? error : new Error('请输入有效的 Jira 链接或任务号。')); } } }]} extra={requirementOnly ? '子任务会自动关联。' : '可直接接入，也可先读取预览。'}><Input id="jira-intake-reference" prefix={<Link2 size={16} />} placeholder="粘贴 Jira 主事项链接或输入任务号" autoComplete="off" maxLength={2048} allowClear /></Form.Item> : <>
           <Form.Item name="projectId" label="Jira 项目" rules={[{ required: true, message: '请选择已接入的 Jira 项目。' }]}><Select placeholder="选择项目" showSearch={{ optionFilterProp: 'label' }} options={jiraProjects.map(project => ({ value: project.id, label: `${project.key} · ${project.name}` }))} /></Form.Item>
-          <Form.Item name="query" label="搜索事项（可选）" htmlFor="jira-intake-query" rules={[{ max: 100, message: '搜索内容不能超过 100 个字符。' }]}><Input id="jira-intake-query" prefix={<Search size={16} />} placeholder="任务号或标题；留空读取项目事项（按 Esc 清空）" autoComplete="off" maxLength={100} allowClear onKeyDown={clearSearchOnEscape(queryValue || '', () => form.setFieldValue('query', ''))} /></Form.Item>
+          <Form.Item name="query" label="搜索事项（可选）" htmlFor="jira-intake-query" rules={[{ max: 100, message: '搜索内容不能超过 100 个字符。' }]}><Input id="jira-intake-query" prefix={<Search size={16} />} placeholder={requirementOnly ? '按 Jira 编号或标题搜索' : '任务号或标题；留空读取项目事项（按 Esc 清空）'} autoComplete="off" maxLength={100} allowClear onKeyDown={clearSearchOnEscape(queryValue || '', () => { form.setFieldValue('query', ''); invalidate(); })} /></Form.Item>
         </>}
         <Space size={8} wrap>
           {mode === 'link' && (
@@ -249,42 +289,76 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
                   }).catch(() => {});
                 }}
               >
-                直接接入并打开
+                {requirementOnly ? '接入需求' : '直接接入并打开'}
               </Button>
-              <Button
+              {!requirementOnly && <Button
                 icon={<ClipboardPaste size={15} />}
                 disabled={!!operation || accountSwitching || !jiraProjects.length}
                 onClick={() => void pasteFromClipboard()}
               >
                 读取剪贴板
-              </Button>
+              </Button>}
             </>
           )}
-          <Button htmlType="submit" type={mode === 'link' || preview ? 'default' : 'primary'} icon={<Search size={16} />} loading={operation === 'lookup' || operation === 'search'} disabled={importing || accountSwitching || accountUnknown || !jiraProjects.length}>{mode === 'link' ? '读取预览' : '刷新事项列表'}</Button>
+          {(!requirementOnly || mode === 'select') && <Button htmlType="submit" type={mode === 'link' || preview ? 'default' : 'primary'} icon={<Search size={16} />} loading={operation === 'lookup' || operation === 'search'} disabled={importing || accountSwitching || accountUnknown || !jiraProjects.length}>{mode === 'link' ? '读取预览' : requirementOnly ? '搜索 Jira' : '刷新事项列表'}</Button>}
         </Space>
       </Form>
       {accountProject && <AccountUsageSelector userId={user.id} projectId={accountProject.id} provider="jira" disabled={!!operation || accountSwitching} onChanging={() => { invalidate(); autoSearchedKey.current = ''; setAccountSwitching(true); }} onChanged={() => { invalidate(); autoSearchedKey.current = ''; setAccountSwitching(false); }} onResolved={id => setResolvedAccount(id === undefined ? undefined : { projectId: accountProject.id, userId: user.id, id })} onUnauthorized={onUnauthorized} onForbidden={() => { invalidate(); setAccountSwitching(false); form.resetFields(); onForbidden?.(); }} />}
-      {!jiraProjects.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚无可接入的 Jira 项目，请联系管理员接入项目，或使用手动登记。" />}
-      {searchResult && <section className="tf-jira-intake-results" aria-label="Jira 事项读取结果">
+      {!jiraProjects.length && <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={onManual && !requirementOnly ? '尚无可接入的 Jira 项目，请联系管理员接入项目，或使用手动登记。' : '尚无可接入的 Jira 项目。'} />}
+      {!searchResult && operation === 'search' && <Spin />}
+      {requirementOnly && searchResult && <section className="tf-jira-intake-results" aria-label="Jira 主事项">
+        <Typography.Text type="secondary">本页 {mainSearchItems.length} 项 Jira 主事项</Typography.Text>
+        <List
+          rowKey="key"
+          loading={operation === 'search'}
+          dataSource={mainSearchItems}
+          locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本页暂无可接入的 Jira 主事项。" /> }}
+          renderItem={issue => {
+            const local = findLocalTask(issue.key, searchResult.project.id);
+            return <List.Item actions={[
+              <Button key="open" type="link" size="small" disabled={!!operation}
+                aria-label={(local ? '打开 ' : '接入 ') + issue.key}
+                onClick={() => {
+                  if (local) void continueToTask(local, searchResult.project.id);
+                  else void directImport(issue.key, searchResult.project.id, searchResult.usedAccount?.id ?? null);
+                }}>
+                {local ? '打开' : '接入'}
+              </Button>,
+            ]}>
+              <div className="tf-jira-intake-option">
+                <span className="tf-jira-intake-option-heading">
+                  <Typography.Text code>{issue.key}</Typography.Text>
+                  <Typography.Text type="secondary">{issue.type}</Typography.Text>
+                  {issue.status && <Typography.Text type="secondary">{issue.status}</Typography.Text>}
+                  {local && <Tag color="blue">已接入</Tag>}
+                </span>
+                <span className="tf-jira-intake-option-title" title={issue.title}>{issue.title}</span>
+              </div>
+            </List.Item>;
+          }}
+        />
+        {searchPagination}
+      </section>}
+      {searchResult && !requirementOnly && <section className="tf-jira-intake-results" aria-label="Jira 主事项读取结果">
         <Flex justify="space-between" align="center" gap={8} wrap style={{ marginBottom: 8 }}>
-          <Typography.Text type="secondary">已读取 {searchResult.items.length} 项{searchResult.total > searchResult.items.length ? `，共 ${searchResult.total} 项，可搜索缩小范围` : ''}</Typography.Text>
-          {searchResult.items.length > 0 && importedSearchItems.length > 0 && (
+          <Typography.Text type="secondary">本页 {mainSearchItems.length} 项 Jira 主事项</Typography.Text>
+          {(importedSearchCount > 0 || resultFilter !== 'all') && (
             <Segmented<'all' | 'unimported' | 'imported'>
               size="small"
               aria-label="筛选是否已接入"
               value={resultFilter}
               onChange={setResultFilter}
               options={[
-                { value: 'all', label: `全部 (${searchResult.items.length})` },
-                { value: 'unimported', label: `未接入 (${searchResult.items.length - importedSearchItems.length})` },
-                { value: 'imported', label: `已在工作台 (${importedSearchItems.length})` },
+                { value: 'all', label: `全部 (${mainSearchItems.length})` },
+                { value: 'unimported', label: `未接入 (${mainSearchItems.length - importedSearchCount})` },
+                { value: 'imported', label: `已在工作台 (${importedSearchCount})` },
               ]}
             />
           )}
         </Flex>
-        <Radio.Group value={selectedKey || undefined} disabled={!!operation} onChange={event => { const issue = searchResult.items.find(item => item.key === event.target.value); if (issue) { setSelectedKey(issue.key); void lookup(issue.key, searchResult.project.id, searchResult.usedAccount?.id || null); } }}>
-          <List dataSource={filteredSearchItems} rowKey="key" pagination={{ pageSize: 8, hideOnSinglePage: true, showSizeChanger: false, size: 'small', disabled: !!operation }} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有符合筛选条件的 Jira 事项。" /> }} renderItem={issue => {
-            const localTask = existingByProjectKey.get(`${searchResult.project.id}:${issue.key.toUpperCase()}`);
+        <Radio.Group value={selectedKey || undefined} disabled={!!operation} onChange={event => { const issue = filteredSearchItems.find(item => item.key === event.target.value); if (issue) { setSelectedKey(issue.key); void lookup(issue.key, searchResult.project.id, searchResult.usedAccount?.id || null); } }}>
+          <List dataSource={filteredSearchItems} rowKey="key" loading={operation === 'search'} locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本页没有符合筛选条件的 Jira 主事项。" /> }} renderItem={issue => {
+            const localTask = findLocalTask(issue.key, searchResult.project.id);
             return (
               <List.Item
                 actions={[
@@ -322,6 +396,7 @@ export const JiraTaskIntake: React.FC<JiraTaskIntakeProps> = ({ open, user, proj
             );
           }} />
         </Radio.Group>
+        {searchPagination}
       </section>}
       {preview && <Card size="small" className="tf-jira-intake-preview" title={<Typography.Text code>{preview.issue.key}</Typography.Text>} extra={<Tag color={preview.existingTask ? 'blue' : 'default'}>{preview.existingTask ? '本地已有记录' : '待确认接入'}</Tag>}>
         <Typography.Title level={3}>{preview.issue.title}</Typography.Title>

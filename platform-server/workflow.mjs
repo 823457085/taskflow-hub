@@ -45,7 +45,16 @@ function normalizeReportMeta(raw, findings = []) {
   if (findings.length && !out.riskLevel && findings.some(f => f.severity === 'CRITICAL')) out.riskLevel = 'high';
   return Object.keys(out).length ? out : null;
 }
-export function createWorkflow(db, audit, transaction) {
+export const jiraLinkStage = (task, stage) => stage === 'TASK_BREAKDOWN' && task.externalRef?.provider === 'jira';
+export const isSubtask = task => !!task.parentId || task.externalRef?.issueType?.subtask === true;
+export const reviewRequired = (task, stage) => !isSubtask(task) && !jiraLinkStage(task, stage);
+export function requireReviewableTask(task, stage) {
+  if (isSubtask(task)) fail(409, 'SUBTASK_REVIEW_NOT_REQUIRED', '子任务评审统一由主任务处理');
+  if (jiraLinkStage(task, stage)) fail(409, 'JIRA_LINK_REVIEW_NOT_REQUIRED', 'Jira 子任务关联由同步更新，无需发起拆分评审');
+}
+
+export function createWorkflow(db, audit, transaction, options = {}) {
+  const cloudExecutorFor = projectId => options.getCloudExecutor?.(projectId) || null;
   const assetsFor = taskId => db.prepare('SELECT * FROM assets WHERE task_id=? ORDER BY rowid DESC').all(taskId).map(assetRow);
   const reportFor = jobId => {
     const row = db.prepare('SELECT * FROM reports WHERE job_id=?').get(jobId);
@@ -140,13 +149,14 @@ export function createWorkflow(db, audit, transaction) {
     if (decision?.decision === 'REQUEST_CHANGES') { status = 'CHANGES_REQUESTED'; reason = decision.reason; }
     else if (decision?.decision === 'APPROVE') { status = 'PASS'; reason = decision.reason; }
     else if (findingsFor(row.id).some(f => f.severity === 'CRITICAL' && !f.waiver)) { status = 'BLOCKED'; reason = '存在未豁免的 CRITICAL 问题'; }
-    else if (row.execution_mode === 'CLOUD_AI') reason = '云端 AI 执行器尚未配置';
+    else if (row.execution_mode === 'CLOUD_AI') reason = cloudExecutorFor(task.projectId) ? '等待云端 AI 自动评审执行' : '云端 AI 执行器尚未配置';
     if (stage === 'RELEASE' && upstream?.some(item => item.status !== 'PASS')) { status = 'BLOCKED'; reason = '前四项门禁尚未全部通过'; }
     const out = { stage, status, jobId: row.id, reason };
     if (cacheKey) memo.gate.set(cacheKey, out);
     return out;
   }
   const gates = (task, externalMemo) => {
+    if (isSubtask(task)) return { overall: 'NOT_REQUIRED', gates: [] };
     if (externalMemo?.gates.has(task.id)) return externalMemo.gates.get(task.id);
     const memo = externalMemo || createMemo();
     const result = STAGES.slice(0, 4).map(stage => gate(task, stage, undefined, memo));
@@ -171,19 +181,23 @@ export function createWorkflow(db, audit, transaction) {
     const snapshot = JSON.parse(row.snapshot);
     const report = reportFor(row.id);
     const soloMode = !hasOtherApprover(task.projectId, APPROVAL_ROLES[row.stage] || ['ADMIN'], [report?.actorId, task.assigneeId], memo);
-    return { id: row.id, taskId: row.task_id, projectId: row.project_id, stage: row.stage, status: row.status, actorId: row.actor_id, createdAt: row.created_at, executionMode: row.execution_mode, inputHash: row.input_hash, policyHash: snapshot.policyHash || null, persona: snapshot.persona || 'legacy-unrecorded', skills: snapshot.skills?.map(skill => skill.id) || [], executor: 'UNCONFIGURED', snapshot, report, findings: findingsFor(row.id), decision: decisionFor(row.id), stale: !row.input_hash || row.input_hash !== inputs(task, row.stage, undefined, memo).inputHash, soloMode };
+    const cloudExecutor = row.execution_mode === 'CLOUD_AI' ? cloudExecutorFor(task.projectId) : null;
+    const executor = row.execution_mode === 'CLOUD_AI' ? (cloudExecutor?.executorLabel || 'UNCONFIGURED') : 'UNCONFIGURED';
+    return { id: row.id, taskId: row.task_id, projectId: row.project_id, stage: row.stage, status: row.status, actorId: row.actor_id, createdAt: row.created_at, executionMode: row.execution_mode, reviewRequired: reviewRequired(task, row.stage), inputHash: row.input_hash, policyHash: snapshot.policyHash || null, persona: snapshot.persona || 'legacy-unrecorded', skills: snapshot.skills?.map(skill => skill.id) || [], executor, snapshot, report, findings: findingsFor(row.id), decision: decisionFor(row.id), stale: !row.input_hash || row.input_hash !== inputs(task, row.stage, undefined, memo).inputHash, soloMode };
   };
   const roleCanReview = (role, stage) => REVIEW_ROLES[role]?.includes(stage);
   function createReview(task, user, role, body) {
+    requireReviewableTask(task, body.stage);
     if (!REVIEW_STAGES.includes(body.stage)) fail(400, 'INVALID_STAGE', '评审阶段不受支持');
     if (!roleCanReview(role, body.stage)) fail(403, 'FORBIDDEN', '当前角色无权发起此阶段评审');
     const mode = body.executionMode || 'LOCAL_REPORT';
     if (!['CLOUD_AI', 'HUMAN_REVIEW', 'LOCAL_REPORT'].includes(mode)) fail(400, 'INVALID_MODE', '执行模式不受支持');
+    const cloudExecutor = mode === 'CLOUD_AI' ? cloudExecutorFor(task.projectId) : null;
     const current = inputs(task, body.stage);
-    if (current.missing.length && mode !== 'CLOUD_AI') fail(409, 'MISSING_INPUT', `缺少输入：${current.missing.join('、')}`);
-    const existing = db.prepare("SELECT * FROM jobs WHERE task_id=? AND stage=? AND execution_mode=? AND input_hash=? AND status IN ('AWAITING_CONFIGURATION','AWAITING_REVIEW','AWAITING_REPORT') ORDER BY rowid DESC").all(task.id, body.stage, mode, current.inputHash).find(row => JSON.parse(row.snapshot).policyHash === current.snapshot.policyHash);
+    if (current.missing.length && (mode !== 'CLOUD_AI' || cloudExecutor)) fail(409, 'MISSING_INPUT', `缺少输入：${current.missing.join('、')}`);
+    const existing = db.prepare("SELECT * FROM jobs WHERE task_id=? AND stage=? AND execution_mode=? AND input_hash=? AND status IN ('AWAITING_CONFIGURATION','AWAITING_CLOUD_AI','AWAITING_REVIEW','AWAITING_REPORT') ORDER BY rowid DESC").all(task.id, body.stage, mode, current.inputHash).find(row => JSON.parse(row.snapshot).policyHash === current.snapshot.policyHash);
     if (existing) return { status: 200, job: jobRow(existing, task) };
-    const id = randomUUID(); const status = { CLOUD_AI: 'AWAITING_CONFIGURATION', HUMAN_REVIEW: 'AWAITING_REVIEW', LOCAL_REPORT: 'AWAITING_REPORT' }[mode];
+    const id = randomUUID(); const status = { CLOUD_AI: cloudExecutor ? 'AWAITING_CLOUD_AI' : 'AWAITING_CONFIGURATION', HUMAN_REVIEW: 'AWAITING_REVIEW', LOCAL_REPORT: 'AWAITING_REPORT' }[mode];
     transaction(() => {
       db.prepare('INSERT INTO jobs (id,task_id,stage,status,actor_id,created_at,project_id,execution_mode,input_hash,snapshot) VALUES (?,?,?,?,?,?,?,?,?,?)').run(id, task.id, body.stage, status, user.id, new Date().toISOString(), task.projectId, mode, current.inputHash, JSON.stringify(current.snapshot));
       audit(user.id, 'REVIEW_REQUEST', id, task.projectId);
@@ -192,8 +206,12 @@ export function createWorkflow(db, audit, transaction) {
   }
   const assertCurrent = (row, task) => { const current = inputs(task, row.stage); if (current.missing.length || row.input_hash !== current.inputHash) fail(409, 'STALE_REVIEW', '评审输入或上游审批已变化，请重新评审'); };
   function submitReport(row, task, user, role, body) {
+    requireReviewableTask(task, row.stage);
     if (!roleCanReview(role, row.stage)) fail(403, 'FORBIDDEN', '当前角色无权提交此阶段报告');
-    if (row.execution_mode === 'CLOUD_AI') fail(409, 'EXECUTOR_UNCONFIGURED', '云端 AI 执行器尚未配置，不能提交执行报告');
+    if (row.execution_mode === 'CLOUD_AI') {
+      if (cloudExecutorFor(task.projectId)) fail(409, 'CLOUD_AI_EXECUTE_REQUIRED', '云端 AI 评审请调用云端执行接口生成并提交报告');
+      fail(409, 'EXECUTOR_UNCONFIGURED', '云端 AI 执行器尚未配置，不能提交执行报告');
+    }
     if (reportFor(row.id)) fail(409, 'REPORT_EXISTS', '报告已提交，不可覆盖');
     assertCurrent(row, task);
     const expectedSource = row.execution_mode === 'HUMAN_REVIEW' ? 'MANUAL' : 'LOCAL_TOOL';
@@ -243,7 +261,47 @@ export function createWorkflow(db, audit, transaction) {
     });
     return jobRow(db.prepare('SELECT * FROM jobs WHERE id=?').get(row.id), task);
   }
+  function submitCloudReport(row, task, actorId, body) {
+    requireReviewableTask(task, row.stage);
+    if (row.execution_mode !== 'CLOUD_AI') fail(400, 'INVALID_MODE', '仅 CLOUD_AI 评审任务允许提交云端 AI 报告');
+    if (reportFor(row.id)) fail(409, 'REPORT_EXISTS', '报告已提交，不可覆盖');
+    assertCurrent(row, task);
+    const summary = textField(body.summary, 'summary', { max: 8000, preserve: true });
+    const evidence = body.evidence === undefined || body.evidence === null ? null : textField(body.evidence, 'evidence', { min: 0, max: 8000, preserve: true });
+    if (!Array.isArray(body.findings) || body.findings.length > 50) fail(400, 'INVALID_FINDINGS', 'findings必须为不超过50项的数组');
+    const findings = body.findings.map(item => {
+      if (!item || !['CRITICAL', 'WARN', 'INFO'].includes(item.severity)) fail(400, 'INVALID_FINDINGS', '问题严重程度不受支持');
+      return {
+        severity: item.severity,
+        title: textField(item.title, 'title', { max: 200, preserve: true }),
+        detail: textField(item.detail, 'detail', { max: 4000, preserve: true }),
+        location: item.location === undefined || item.location === null ? null : textField(item.location, 'location', { min: 0, max: 500, preserve: true }),
+        category: item.category && FINDING_CATEGORIES.includes(item.category) ? item.category : null,
+        confidence: Number.isInteger(item.confidence) && item.confidence >= 0 && item.confidence <= 10 ? item.confidence : null,
+        ruleId: typeof item.ruleId === 'string' && item.ruleId.trim() ? item.ruleId.trim().slice(0, 64) : null,
+        patchJson: null,
+      };
+    });
+    const tool = textField(body.tool || 'cloud-ai', 'tool', { max: 100 });
+    const verdict = body.verdict && REPORT_VERDICTS.includes(body.verdict)
+      ? body.verdict
+      : findings.some(f => f.severity === 'CRITICAL') ? 'FAIL'
+        : findings.some(f => f.severity === 'WARN') ? 'CONDITIONAL' : 'PASS';
+    const meta = normalizeReportMeta(body.meta || {}, findings);
+    transaction(() => {
+      db.prepare('INSERT INTO reports (id,job_id,summary,source,tool,evidence,actor_id,created_at,verdict,score,checklist,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(randomUUID(), row.id, summary, 'CLOUD_AI', tool, evidence, actorId, new Date().toISOString(), verdict, null, null, meta ? JSON.stringify(meta) : null);
+      for (const finding of findings) {
+        db.prepare('INSERT INTO findings (id,job_id,severity,title,detail,location,category,confidence,rule_id,patch_json) VALUES (?,?,?,?,?,?,?,?,?,?)')
+          .run(randomUUID(), row.id, finding.severity, finding.title, finding.detail, finding.location, finding.category, finding.confidence, finding.ruleId, finding.patchJson);
+      }
+      db.prepare("UPDATE jobs SET status='REPORT_SUBMITTED' WHERE id=?").run(row.id);
+      audit(actorId, 'CLOUD_AI_REPORT', row.id, task.projectId);
+    });
+    return jobRow(db.prepare('SELECT * FROM jobs WHERE id=?').get(row.id), task);
+  }
   function decide(row, task, user, role, body) {
+    requireReviewableTask(task, row.stage);
     if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权执行门禁审批');
     if (!APPROVAL_ROLES[row.stage].includes(role)) fail(403, 'FORBIDDEN', '当前角色无权审批此阶段');
     const report = reportFor(row.id);
@@ -265,6 +323,7 @@ export function createWorkflow(db, audit, transaction) {
     return jobRow(db.prepare('SELECT * FROM jobs WHERE id=?').get(row.id), task);
   }
   function waive(row, task, findingId, user, role, body) {
+    requireReviewableTask(task, row.stage);
     if (user.localDevice) fail(403, 'LOCAL_DEVICE_SCOPE', '本地设备无权执行问题豁免');
     if (!['TECH_SPEC', 'CODE_REVIEW'].includes(row.stage)) fail(403, 'WAIVER_STAGE_FORBIDDEN', '仅技术方案与代码审核问题允许申请豁免');
     if (!['ADMIN', 'LEAD'].includes(role)) fail(403, 'FORBIDDEN', '当前角色无权豁免问题');
@@ -281,5 +340,5 @@ export function createWorkflow(db, audit, transaction) {
     transaction(() => { db.prepare('INSERT INTO waivers VALUES (?,?,?,?,?)').run(randomUUID(), findingId, reason, user.id, new Date().toISOString()); audit(user.id, 'FINDING_WAIVER', findingId, task.projectId); });
     return jobRow(row, task);
   }
-  return { assetsFor, childrenFor, inputs, gate, gates, jobRow, createMemo, createReview, submitReport, decide, waive };
+  return { assetsFor, childrenFor, inputs, gate, gates, jobRow, createMemo, createReview, submitReport, submitCloudReport, decide, waive };
 }

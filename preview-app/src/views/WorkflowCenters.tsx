@@ -1,28 +1,30 @@
-import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
-import { App, Button, Card, Checkbox, Descriptions, Drawer, Empty, Flex, Form, Grid, Input, List, Pagination, Segmented, Select, Skeleton, Space, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import type { InputRef, TableColumnsType } from 'antd';
-import { CheckCircle2, ExternalLink, Play, Plus, RefreshCw, Search } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { App, Button, Card, Descriptions, Drawer, Empty, Flex, Form, Input, Pagination, Segmented, Select, Skeleton, Tag, Tooltip, Typography } from 'antd';
+import type { InputRef } from 'antd';
+import { ChevronRight, ExternalLink, Plus, RefreshCw, Search } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
-import { api, ApiError, ASSET_ROLES, Asset, AssetKind, ExecutionMode, ProjectGitStatus, REVIEW_ROLES, REVIEW_STAGE_OPTIONS, ReviewJob, Role, Stage, TaskDetailBundle, timeText, User, WorkTask } from './workspaceApi';
-import { assetKindFromRoute, navigateWorkspace, openTaskRoute, reviewStageFromRoute } from './workspaceNavigation';
-import { canQuickApproveReview, isTaskFrozen } from './taskAvailability';
-import { ASSET_KIND_OPTIONS, assetKindLabel, DEFAULT_APPROVE_REASON, executionModeLabel, reviewStatusLabel, stageLabel, taskStatusLabel } from './displayLabels';
-import { evaluateReviewSla, isReviewActionableByUser, sortReviewsByQueuePriority } from './reviewQueueSla';
-import { clearSearchOnEscape, isEditableTarget, isSubmitShortcut, readStoredBool, readStoredChoice, writeStoredBool, writeStoredString } from './uiPreferences';
+import { api, ApiError, ASSET_ROLES, Asset, AssetKind, isChildTask, Project, REVIEW_STAGE_OPTIONS, ReviewJob, Stage, timeText, User, WorkTask } from './workspaceApi';
+import { assetKindFromRoute, navigateWorkspace, openTaskRoute, reviewStageFromRoute, taskReturnFilters } from './workspaceNavigation';
+import type { MaterialCategory } from './workspaceNavigation';
+import { isTaskFrozen } from './taskAvailability';
+import { ASSET_KIND_OPTIONS, assetKindLabel, executionModeLabel, reviewStatusLabel, stageLabel } from './displayLabels';
+import { currentAiReviews, evaluateReviewSla, isReviewActionableByUser, sortReviewsByQueuePriority } from './reviewQueueSla';
+import { clearSearchOnEscape, isEditableTarget, isSubmitShortcut, readStoredChoice, writeStoredString } from './uiPreferences';
+import { groupTaskMaterials } from './assetGroups';
 import { MarkdownPreview } from './MarkdownPreview';
+import { CodeMaterialPreview } from './CodeMaterialPreview';
+import { ConfluencePreview, isConfluenceStorage } from './ConfluencePreview';
+import './WorkTaskDetail.css';
 import './WorkflowCenters.css';
 
-const ReviewDetail = lazy(() => import('./ReviewDetail').then(mod => ({ default: mod.ReviewDetail })));
-
-const { Text } = Typography;
+const PAGE_SIZE = 10;
 const REVIEW_SCOPE_KEY = 'taskflow.reviews.quickScope';
 const REVIEW_SORT_KEY = 'taskflow.reviews.sortMode';
-const ASSET_LATEST_ONLY_KEY = 'taskflow.assets.latestOnly';
 const REVIEW_SCOPES = ['all', 'needs_my_action', 'pending_approval', 'awaiting_report', 'approved'] as const;
 const REVIEW_SORT_MODES = ['newest', 'oldest_waiting'] as const;
-type ReviewQuickScope = typeof REVIEW_SCOPES[number];
+type ReviewQuickScope = typeof REVIEW_SCOPES[number] | 'history';
 type ReviewSortMode = typeof REVIEW_SORT_MODES[number];
-type CenterProps = { projectId: string; tasks: WorkTask[]; role?: Role; onChanged?: () => Promise<void>; onBeforeRefresh?: () => Promise<boolean>; onUnauthorized: () => void };
+type CenterProps = { projectId: string; projects: Project[]; tasks: WorkTask[]; onChanged?: () => Promise<void>; onBeforeRefresh?: () => Promise<boolean>; onUnauthorized: () => void };
 
 async function runCenterRefresh(
   refresh: () => Promise<void>,
@@ -32,7 +34,7 @@ async function runCenterRefresh(
   if (onBeforeRefresh && (await onBeforeRefresh())) return;
   await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
 }
-type ReviewCenterProps = CenterProps & { user?: User | null; members?: User[]; onForbidden?: () => void };
+type ReviewCenterProps = CenterProps & { user?: User | null };
 export interface ProjectAssetMetadata {
   id: string;
   taskId: string;
@@ -49,26 +51,41 @@ export interface ProjectAssetMetadata {
   taskTitle: string;
 }
 
+const materialCategoryOptions: { value: MaterialCategory; label: string }[] = [
+  ...ASSET_KIND_OPTIONS,
+  { value: 'JIRA_ISSUE', label: 'Jira 事项' },
+  { value: 'DESIGN_REFERENCE', label: '设计稿与原型' },
+];
+
+function materialCategory(asset: ProjectAssetMetadata): MaterialCategory {
+  if (asset.logicalKey.startsWith('jira:jira_issue:')) return 'JIRA_ISSUE';
+  if (asset.logicalKey === 'review:design-references') return 'DESIGN_REFERENCE';
+  return asset.kind;
+}
+
+function materialCategoryLabel(asset: ProjectAssetMetadata): string {
+  return materialCategoryOptions.find(option => option.value === materialCategory(asset))?.label ?? assetKindLabel(asset.kind);
+}
+
 function useProjectCollection<T>(resource: 'jobs' | 'assets', projectId: string, onUnauthorized: () => void) {
   const { message } = App.useApp();
-  const [data, setData] = useState<{ projectId: string; items: T[] }>({ projectId: '', items: [] });
+  const [data, setData] = useState<{ projectId: string; items: T[] }>();
   const [loading, setLoading] = useState(false);
   const [failure, setFailure] = useState<{ projectId: string; message: string }>();
   const sequence = useRef(0);
+  const activeProjectId = useRef(projectId);
   const unauthorizedRef = useRef(onUnauthorized);
   const messageRef = useRef(message);
   unauthorizedRef.current = onUnauthorized;
   messageRef.current = message;
+  activeProjectId.current = projectId;
 
   const refresh = useCallback(async () => {
+    if (activeProjectId.current !== projectId) return;
     const request = ++sequence.current;
-    if (!projectId) {
-      setData({ projectId: '', items: [] }); setFailure(undefined); setLoading(false);
-      return;
-    }
     setLoading(true); setFailure(undefined);
     try {
-      const response = await api<Record<string, T[]>>(resource + '?projectId=' + encodeURIComponent(projectId));
+      const response = await api<Record<string, T[]>>(resource + (projectId ? '?projectId=' + encodeURIComponent(projectId) : ''));
       if (request !== sequence.current) return;
       const items = response?.[resource];
       if (!Array.isArray(items)) throw new Error('平台响应格式不正确。');
@@ -77,7 +94,7 @@ function useProjectCollection<T>(resource: 'jobs' | 'assets', projectId: string,
       if (request !== sequence.current) return;
       const text = error instanceof Error ? error.message : '请求失败。';
       setFailure({ projectId, message: text });
-      setData(current => ({ projectId, items: error instanceof ApiError && error.status === 403 ? [] : current.projectId === projectId ? current.items : [] }));
+      setData(current => ({ projectId, items: error instanceof ApiError && error.status === 403 ? [] : current?.projectId === projectId ? current.items : [] }));
       void messageRef.current.error(text);
       if (error instanceof ApiError && error.status === 401) unauthorizedRef.current();
     } finally {
@@ -91,11 +108,30 @@ function useProjectCollection<T>(resource: 'jobs' | 'assets', projectId: string,
   }, [refresh]);
 
   return {
-    items: data.projectId === projectId ? data.items : [],
-    loading: loading || (!!projectId && data.projectId !== projectId),
+    items: data?.projectId === projectId ? data.items : [],
+    loading: loading || data?.projectId !== projectId,
     failure: failure?.projectId === projectId ? failure.message : undefined,
     refresh,
   };
+}
+
+function WorkflowRecords({ label, children, empty, loading, page, total, onPageChange }: {
+  label: string;
+  children: React.ReactNode;
+  empty: React.ReactNode;
+  loading: boolean;
+  page: number;
+  total: number;
+  onPageChange: (page: number) => void;
+}) {
+  return <Card className="tf-workflow-records" size="small"
+    title={<span className="tf-workflow-records-title">{label}<span>{total}</span></span>}
+  >
+    {total > 0 ? <>
+      <ul className="tf-workflow-record-list" aria-label={label}>{children}</ul>
+      <Pagination className="tf-workflow-pagination" size="small" current={page} onChange={onPageChange} total={total} pageSize={PAGE_SIZE} showSizeChanger={false} hideOnSinglePage />
+    </> : loading ? <Skeleton active paragraph={{ rows: 4 }} /> : empty}
+  </Card>;
 }
 
 const reviewBadgeVariant = (status: string): 'green' | 'blue' | 'warn' | 'neutral' => {
@@ -105,32 +141,23 @@ const reviewBadgeVariant = (status: string): 'green' | 'blue' | 'warn' | 'neutra
   return 'neutral';
 };
 
-export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, user, role = 'DEV', members = [], onChanged, onBeforeRefresh, onUnauthorized, onForbidden }) => {
-  const { message } = App.useApp();
-  const screens = Grid.useBreakpoint();
+const readReviewStage = (): Stage | 'all' => reviewStageFromRoute() ?? taskReturnFilters().stage ?? 'all';
+
+export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, projects, tasks, user, onChanged, onBeforeRefresh, onUnauthorized }) => {
   const { items: jobs, loading, failure, refresh } = useProjectCollection<ReviewJob>('jobs', projectId, onUnauthorized);
-  const [stage, setStage] = useState<Stage | 'all'>(() => reviewStageFromRoute() || 'all');
+  const [stage, setStage] = useState(readReviewStage);
   const [statusScope, setStatusScope] = useState<ReviewQuickScope>(() => readStoredChoice(REVIEW_SCOPE_KEY, REVIEW_SCOPES, 'all'));
   const [sortMode, setSortMode] = useState<ReviewSortMode>(() => readStoredChoice(REVIEW_SORT_KEY, REVIEW_SORT_MODES, 'newest'));
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState('');
-  const [createOpen, setCreateOpen] = useState(false);
-  const [creatingReview, setCreatingReview] = useState(false);
-  const [activeJob, setActiveJob] = useState<ReviewJob | null>(null);
-  const [gitStatus, setGitStatus] = useState<ProjectGitStatus | null>(null);
-  const [approvingJobId, setApprovingJobId] = useState('');
-  const [batchApproving, setBatchApproving] = useState(false);
-  const [reviewForm] = Form.useForm<{ taskId: string; stage: Stage; executionMode: ExecutionMode }>();
   const searchRef = useRef<InputRef>(null);
-  useEffect(() => { setStage(reviewStageFromRoute() || 'all'); setPage(1); setQuery(''); setCreateOpen(false); setActiveJob(null); setGitStatus(null); }, [projectId]);
+
+  useEffect(() => { setStage(readReviewStage()); setPage(1); setQuery(''); }, [projectId]);
   useEffect(() => {
-    if (!projectId || !activeJob) return;
-    let alive = true;
-    void api<ProjectGitStatus>(`projects/${encodeURIComponent(projectId)}/git-status`)
-      .then(res => { if (alive) setGitStatus(res); })
-      .catch(() => { if (alive) setGitStatus(null); });
-    return () => { alive = false; };
-  }, [projectId, activeJob?.id]);
+    const update = () => setStage(readReviewStage());
+    window.addEventListener('hashchange', update);
+    return () => window.removeEventListener('hashchange', update);
+  }, []);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target)) {
@@ -141,106 +168,40 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
-  useEffect(() => {
-    const update = () => { setStage(reviewStageFromRoute() || 'all'); setPage(1); };
-    window.addEventListener('hashchange', update);
-    return () => window.removeEventListener('hashchange', update);
-  }, []);
-  const taskMap = new Map(tasks.filter(task => task.projectId === projectId).map(task => [task.id, task]));
-  const eligibleTasks = tasks.filter(task => task.projectId === projectId && !isTaskFrozen(task, tasks));
-  const allowedStages = REVIEW_STAGE_OPTIONS.filter(item => REVIEW_ROLES[item.value].includes(role));
-  const triggerNewReview = () => {
-    const preferredStage = stage !== 'all' && REVIEW_ROLES[stage]?.includes(role) ? stage : allowedStages[0]?.value;
-    reviewForm.setFieldsValue({
-      taskId: eligibleTasks[0]?.id,
-      stage: preferredStage,
-      executionMode: 'LOCAL_REPORT',
-    });
-    setCreateOpen(true);
-  };
-  const submitNewReview = async (values: { taskId: string; stage: Stage; executionMode: ExecutionMode }) => {
-    if (creatingReview) return;
-    setCreatingReview(true);
-    try {
-      const res = await api<{ job: ReviewJob }>('reviews', values);
-      setCreateOpen(false);
-      void message.success('评审申请已创建，可直接运行 AI 审核或填写报告。');
-      await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
-      setActiveJob(res.job);
-    } catch (error) {
-      void message.error(error instanceof Error ? error.message : '发起评审失败。');
-      if (error instanceof ApiError && error.status === 401) onUnauthorized();
-    } finally {
-      setCreatingReview(false);
-    }
-  };
-  const quickApprove = async (job: ReviewJob) => {
-    if (approvingJobId || batchApproving) return;
-    setApprovingJobId(job.id);
-    try {
-      await api<{ job: ReviewJob }>(`jobs/${encodeURIComponent(job.id)}/decision`, {
-        decision: 'APPROVE',
-        reason: DEFAULT_APPROVE_REASON,
-      });
-      const taskKey = taskMap.get(job.taskId)?.jiraKey || '';
-      void message.success(`已一键批准${taskKey ? ` ${taskKey}` : ''}【${stageLabel(job.stage)}】。`);
-      await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
-    } catch (error) {
-      void message.error(error instanceof Error ? error.message : '批准失败。');
-      if (error instanceof ApiError && error.status === 401) onUnauthorized();
-    } finally {
-      setApprovingJobId('');
-    }
-  };
-  const stageOrderIndex = (value: Stage) => REVIEW_STAGE_OPTIONS.findIndex(item => item.value === value);
-  const quickApproveBatch = async (jobsToApprove: ReviewJob[]) => {
-    if (!jobsToApprove.length || approvingJobId || batchApproving) return;
-    setBatchApproving(true);
-    let approvedCount = 0;
-    const ordered = [...jobsToApprove].sort((a, b) => stageOrderIndex(a.stage) - stageOrderIndex(b.stage));
-    try {
-      for (const job of ordered) {
-        await api<{ job: ReviewJob }>(`jobs/${encodeURIComponent(job.id)}/decision`, {
-          decision: 'APPROVE',
-          reason: DEFAULT_APPROVE_REASON,
-        });
-        approvedCount += 1;
-      }
-      void message.success(`已一键批准全部 ${approvedCount} 份待审批记录。`);
-    } catch (error) {
-      const errText = error instanceof Error ? error.message : '批量批准中断。';
-      void message.error(approvedCount ? `已批准 ${approvedCount} 份，剩余项失败：${errText}` : errText);
-      if (error instanceof ApiError && error.status === 401) onUnauthorized();
-    } finally {
-      setBatchApproving(false);
-      if (approvedCount > 0) {
-        await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
-      }
-    }
-  };
-  const stageFilteredJobs = jobs.filter(job => stage === 'all' || job.stage === stage);
-  const actionableByMeJobs = stageFilteredJobs.filter(job => isReviewActionableByUser(job, taskMap.get(job.taskId), tasks, user, role));
-  const nextActionableQueue = sortReviewsByQueuePriority(actionableByMeJobs, 'oldest_waiting');
+
+  const taskMap = new Map(tasks.filter(task => !projectId || task.projectId === projectId).map(task => [task.id, task]));
+  const projectMap = new Map(projects.map(project => [project.id, project]));
+  const isActionable = (job: ReviewJob) => isReviewActionableByUser(job, taskMap.get(job.taskId), tasks, user, projectMap.get(job.projectId)?.role);
+  const currentJobs = currentAiReviews(jobs);
+  const showingHistory = statusScope === 'history';
+  const currentIds = new Set(currentJobs.map(job => job.id));
+  const stageFilteredJobs = currentJobs.filter(job => stage === 'all' || job.stage === stage);
+  const historicalJobs = jobs.filter(job => !currentIds.has(job.id) && (stage === 'all' || job.stage === stage));
+  const actionableByMeJobs = stageFilteredJobs.filter(isActionable);
   const overdueActiveCount = stageFilteredJobs.filter(job => evaluateReviewSla(job).isOverdue).length;
   const pendingApprovalCount = stageFilteredJobs.filter(job => job.status === 'REPORT_SUBMITTED' && !job.stale).length;
   const awaitingReportCount = stageFilteredJobs.filter(job => ['AWAITING_REPORT', 'AWAITING_REVIEW'].includes(job.status) && !job.stale).length;
   const approvedCount = stageFilteredJobs.filter(job => job.status === 'APPROVED').length;
   const matchesStatusScope = (job: ReviewJob): boolean => {
-    if (statusScope === 'needs_my_action') return isReviewActionableByUser(job, taskMap.get(job.taskId), tasks, user, role);
+    if (statusScope === 'needs_my_action') return isActionable(job);
     if (statusScope === 'pending_approval') return job.status === 'REPORT_SUBMITTED' && !job.stale;
     if (statusScope === 'awaiting_report') return ['AWAITING_REPORT', 'AWAITING_REVIEW'].includes(job.status) && !job.stale;
     if (statusScope === 'approved') return job.status === 'APPROVED';
     return true;
   };
   const search = query.trim().toLowerCase();
-  const filteredJobs = stageFilteredJobs.filter(job => {
+  const filteredJobs = (showingHistory ? historicalJobs : stageFilteredJobs).filter(job => {
     const task = taskMap.get(job.taskId);
-    return matchesStatusScope(job) && (!search || [job.id, job.status, reviewStatusLabel(job.status), stageLabel(job.stage), task?.jiraKey, task?.title].filter(Boolean).join(' ').toLowerCase().includes(search));
+    const project = projectMap.get(job.projectId);
+    return matchesStatusScope(job) && (!search || [
+      job.id, job.status, reviewStatusLabel(job.status), stageLabel(job.stage), executionModeLabel(job.executionMode), task?.jiraKey, task?.title, project?.key, project?.name,
+    ].filter(Boolean).join(' ').toLowerCase().includes(search));
   });
   const visibleJobs = sortReviewsByQueuePriority(filteredJobs, sortMode);
-  const approvableVisibleJobs = visibleJobs.filter(job => canQuickApproveReview(job, taskMap.get(job.taskId), tasks, user, role));
-  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleJobs.length / 10)));
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleJobs.length / PAGE_SIZE)));
+  const pageJobs = visibleJobs.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
   useEffect(() => { if (currentPage !== page) setPage(currentPage); }, [currentPage, page]);
+
   const resetFilters = () => {
     setStage('all');
     setStatusScope('all');
@@ -249,249 +210,191 @@ export const ReviewCenter: React.FC<ReviewCenterProps> = ({ projectId, tasks, us
     setPage(1);
     navigateWorkspace('reviews');
   };
-  const openReview = (job: ReviewJob) => setActiveJob(job);
-  const columns: TableColumnsType<ReviewJob> = [
-    { title: '所属任务', key: 'task', width: 252, render: (_, job) => {
-      const task = taskMap.get(job.taskId);
-      return <div className="tf-workflow-title-cell"><Text className="tf-workflow-code">{task?.jiraKey || job.taskId}</Text><Button type="link" className="tf-workflow-title-link" onClick={() => openReview(job)}>{task?.title || job.taskId}</Button></div>;
-    } },
-    { title: '评审阶段', dataIndex: 'stage', key: 'stage', width: 146, render: value => <Text>{stageLabel(value)}</Text> },
-    { title: '评审状态', dataIndex: 'status', key: 'status', width: 152, render: value => <StatusBadge variant={reviewBadgeVariant(value)}>{reviewStatusLabel(value)}</StatusBadge> },
-    { title: 'SLA 时效', key: 'sla', width: 132, render: (_, job) => {
-      const sla = evaluateReviewSla(job);
-      return <Tag color={sla.tagColor} style={{ marginInlineEnd: 0 }}>{sla.label}</Tag>;
-    } },
-    { title: '材料有效性', dataIndex: 'stale', key: 'stale', width: 116, render: value => <StatusBadge variant={value ? 'warn' : 'neutral'}>{value ? '材料已更新' : '当前有效'}</StatusBadge> },
-    { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 162, render: value => <Text type="secondary" className="tf-workflow-secondary">{timeText(value)}</Text> },
-    { title: '操作', key: 'action', width: 164, render: (_, job) => {
-      const task = taskMap.get(job.taskId);
-      const canApprove = canQuickApproveReview(job, task, tasks, user, role);
-      return <Space size={4} wrap>
-        {canApprove && (
-          <Button
-            type="primary"
-            size="small"
-            icon={<CheckCircle2 size={13} />}
-            loading={approvingJobId === job.id}
-            disabled={batchApproving || (!!approvingJobId && approvingJobId !== job.id)}
-            onClick={event => { event.stopPropagation(); void quickApprove(job); }}
-          >
-            一键批准
-          </Button>
-        )}
-        <Button type="link" size="small" onClick={event => { event.stopPropagation(); openReview(job); }}>查看</Button>
-      </Space>;
-    } },
-  ];
   const hasFilters = stage !== 'all' || statusScope !== 'all' || !!search;
-  const emptyDescription = failure || (projectId ? !hasFilters ? '当前项目暂无评审记录。' : '没有符合条件的评审记录。' : '请先选择项目。');
-  const empty = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>{!failure && projectId && (hasFilters ? <Button onClick={resetFilters}>清空筛选</Button> : eligibleTasks.length ? <Button type="primary" icon={<Plus size={14} />} disabled={!allowedStages.length} onClick={triggerNewReview}>就地发起阶段评审</Button> : <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心创建任务</Button>)}</Empty>;
+  const emptyDescription = failure || (hasFilters ? '没有符合条件的评审记录。' : '暂无评审记录。');
 
-  return <div className="tf-workflow-center">
-    <Card
-      title={<Space size={8} wrap><h2 className="tf-workflow-heading">评审记录</h2><Text type="secondary" className="tf-workflow-secondary">{visibleJobs.length} / {jobs.length}</Text>{overdueActiveCount > 0 && <Tag color="warning" style={{ marginInlineEnd: 0 }}>超 SLA 滞留 {overdueActiveCount}</Tag>}</Space>}
-      extra={
-        <Space wrap size={8}>
-          {nextActionableQueue.length > 0 && (
-            <Tooltip title="按滞留时长优先，就地打开最需要你处理的评审详情">
-              <Button
-                icon={<Play size={14} />}
-                onClick={() => openReview(nextActionableQueue[0])}
-              >
-                逐项处理待办 ({nextActionableQueue.length})
-              </Button>
-            </Tooltip>
-          )}
-          {approvableVisibleJobs.length >= 2 && (
-            <Button
-              type="primary"
-              icon={<CheckCircle2 size={15} />}
-              loading={batchApproving}
-              disabled={!!approvingJobId}
-              onClick={() => void quickApproveBatch(approvableVisibleJobs)}
-            >
-              一键全部批准 ({approvableVisibleJobs.length})
-            </Button>
-          )}
-          <Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)}>刷新</Button>
-          <Button type={approvableVisibleJobs.length >= 2 ? 'default' : 'primary'} icon={<Plus size={16} />} disabled={!projectId || !eligibleTasks.length || !allowedStages.length} onClick={triggerNewReview}>发起评审</Button>
-        </Space>
-      }
-    >
-      <Tabs activeKey={stage} onChange={value => { const next = REVIEW_STAGE_OPTIONS.find(item => item.value === value)?.value; setStage(next || 'all'); setPage(1); navigateWorkspace('reviews', { stage: next }); }} items={[{ key: 'all', label: '全部' }, ...REVIEW_STAGE_OPTIONS.map(item => ({ key: item.value, label: item.label }))]} />
-      <Flex justify="space-between" align="center" gap={10} wrap style={{ marginBottom: 12 }}>
-        <div style={{ overflowX: 'auto' }}>
-          <Segmented<ReviewQuickScope>
-            aria-label="评审状态快捷筛选"
-            value={statusScope}
-            onChange={val => { setStatusScope(val); writeStoredString(REVIEW_SCOPE_KEY, val); setPage(1); }}
-            options={[
-              { value: 'all', label: `全部 (${stageFilteredJobs.length})` },
-              { value: 'needs_my_action', label: `待我处理 (${actionableByMeJobs.length})` },
-              { value: 'pending_approval', label: `待审批 (${pendingApprovalCount})` },
-              { value: 'awaiting_report', label: `待提交报告 (${awaitingReportCount})` },
-              { value: 'approved', label: `已通过 (${approvedCount})` },
-            ]}
-          />
-        </div>
-        <Segmented<ReviewSortMode>
-          size="small"
+  return <div className="tf-workflow-center tf-workflow-center--reviews">
+    <div className="tf-workflow-controls">
+      <div className="tf-workflow-toolbar">
+        <Input ref={searchRef} aria-label="搜索评审" prefix={<Search size={15} />} allowClear placeholder="搜索任务、标题或状态" value={query}
+          onChange={event => { setQuery(event.target.value); setPage(1); }}
+          onKeyDown={clearSearchOnEscape(query, () => { setQuery(''); setPage(1); })} />
+        <Select<Stage | 'all'>
+          aria-label="评审阶段"
+          value={stage}
+          options={[{ value: 'all', label: '全部阶段' }, ...REVIEW_STAGE_OPTIONS]}
+          onChange={value => {
+            setStage(value);
+            setPage(1);
+            navigateWorkspace('reviews', { stage: value === 'all' ? undefined : value });
+          }}
+        />
+        <Select<ReviewSortMode>
           aria-label="评审队列排序模式"
           value={sortMode}
-          onChange={val => { setSortMode(val); writeStoredString(REVIEW_SORT_KEY, val); setPage(1); }}
+          onChange={value => { setSortMode(value); writeStoredString(REVIEW_SORT_KEY, value); setPage(1); }}
+          options={[{ value: 'newest', label: '最新创建' }, { value: 'oldest_waiting', label: '滞留最久优先' }]}
+        />
+      </div>
+      <div className="tf-workflow-actions">
+        <Tooltip title="刷新评审">
+          <Button aria-label="刷新评审" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)} />
+        </Tooltip>
+      </div>
+    </div>
+    <div className="tf-workflow-scopes">
+      <div className="tf-workflow-quick-scopes">
+        <Segmented<ReviewQuickScope>
+          aria-label="评审状态快捷筛选"
+          value={statusScope}
+          onChange={value => { setStatusScope(value); if (value !== 'history') writeStoredString(REVIEW_SCOPE_KEY, value); setPage(1); }}
           options={[
-            { value: 'newest', label: '最新创建' },
-            { value: 'oldest_waiting', label: '滞留最久优先' },
+            { value: 'all', label: `当前评审 (${stageFilteredJobs.length})` },
+            { value: 'needs_my_action', label: `待我处理 (${actionableByMeJobs.length})` },
+            { value: 'pending_approval', label: `待审批 (${pendingApprovalCount})` },
+            { value: 'awaiting_report', label: `待提交报告 (${awaitingReportCount})` },
+            { value: 'approved', label: `已通过 (${approvedCount})` },
+            { value: 'history', label: `历史 (${historicalJobs.length})` },
           ]}
         />
-      </Flex>
-      <div className="tf-workflow-toolbar"><Input ref={searchRef} aria-label="搜索评审" prefix={<Search size={16} />} allowClear placeholder="搜索任务号、任务标题或评审状态（按 / 聚焦，Esc 清空）" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} onKeyDown={clearSearchOnEscape(query, () => { setQuery(''); setPage(1); })} />{(stage !== 'all' || statusScope !== 'all' || !!query) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}</div>
-      {screens.md ? <Table<ReviewJob> rowKey="id" columns={columns} dataSource={visibleJobs} loading={loading} scroll={{ x: 1124 }} pagination={{ current: currentPage, onChange: setPage, pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }} locale={{ emptyText: empty }} onRow={record => ({ style: { cursor: 'pointer' }, onClick: event => { if (!(event.target as HTMLElement).closest('button,a,input,.ant-select')) openReview(record); } })} /> : <>
-        <List className="tf-workflow-mobile-list" rowKey="id" loading={loading} dataSource={visibleJobs.slice((currentPage - 1) * 10, currentPage * 10)} locale={{ emptyText: empty }} renderItem={job => {
-          const task = taskMap.get(job.taskId);
-          const canApprove = canQuickApproveReview(job, task, tasks, user, role);
-          const sla = evaluateReviewSla(job);
-          return <List.Item>
-            <div className="tf-workflow-title-cell"><Text className="tf-workflow-code">{task?.jiraKey || job.taskId}</Text><Button type="link" className="tf-workflow-title-link" onClick={() => openReview(job)}>{task?.title || job.taskId}</Button></div>
-            <Text>{stageLabel(job.stage)}</Text>
-            <Space wrap size={[8, 8]}><StatusBadge variant={reviewBadgeVariant(job.status)}>{reviewStatusLabel(job.status)}</StatusBadge><Tag color={sla.tagColor} style={{ marginInlineEnd: 0 }}>{sla.label}</Tag>{job.stale && <StatusBadge variant="warn">材料已更新</StatusBadge>}</Space>
-            <Flex justify="space-between" align="center" gap={8} wrap>
-              <Text type="secondary" className="tf-workflow-secondary">{timeText(job.createdAt)}</Text>
-              <Space size={6}>
-                {canApprove && <Button type="primary" size="small" icon={<CheckCircle2 size={13} />} loading={approvingJobId === job.id} disabled={!!approvingJobId && approvingJobId !== job.id} onClick={() => void quickApprove(job)}>一键批准</Button>}
-                <Button type="link" size="small" onClick={() => openReview(job)}>查看</Button>
-              </Space>
-            </Flex>
-          </List.Item>;
-        }} />
-        <Pagination className="tf-workflow-mobile-pagination" size="small" current={currentPage} onChange={setPage} total={visibleJobs.length} pageSize={10} showSizeChanger={false} hideOnSinglePage />
-      </>}
-    </Card>
-    <Drawer
-      forceRender
-      title="发起阶段评审"
-      size={560}
-      open={createOpen}
-      closable={!creatingReview}
-      maskClosable={!creatingReview}
-      onClose={() => !creatingReview && setCreateOpen(false)}
-      footer={
-        <Flex justify="flex-end" gap={8}>
-          <Button disabled={creatingReview} onClick={() => setCreateOpen(false)}>取消</Button>
-          <Button type="primary" loading={creatingReview} disabled={!eligibleTasks.length || !allowedStages.length} onClick={() => reviewForm.submit()}>
-            创建评审申请
-          </Button>
-        </Flex>
-      }
-    >
-      <Form
-        form={reviewForm}
-        layout="vertical"
-        disabled={creatingReview}
-        onFinish={values => void submitNewReview(values)}
-      >
-        <Form.Item name="taskId" label="关联任务" rules={[{ required: true, message: '请选择要发起评审的任务' }]}>
-          <Select
-            showSearch={{ optionFilterProp: 'label' }}
-            placeholder="选择当前项目下的任务"
-            options={eligibleTasks.map(item => ({ value: item.id, label: `${item.jiraKey} · ${item.title}` }))}
-          />
-        </Form.Item>
-        <Form.Item name="stage" label="评审阶段" rules={[{ required: true, message: '请选择评审阶段' }]}>
-          <Select
-            options={REVIEW_STAGE_OPTIONS.map(item => ({
-              value: item.value,
-              label: item.label,
-              disabled: !REVIEW_ROLES[item.value].includes(role),
-            }))}
-          />
-        </Form.Item>
-        <Form.Item name="executionMode" label="执行方式" rules={[{ required: true }]}>
-          <Select
-            options={[
-              { value: 'LOCAL_REPORT', label: executionModeLabel('LOCAL_REPORT') },
-              { value: 'HUMAN_REVIEW', label: executionModeLabel('HUMAN_REVIEW') },
-              { value: 'CLOUD_AI', label: executionModeLabel('CLOUD_AI') + '（暂未开放）', disabled: true },
-            ]}
-          />
-        </Form.Item>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          创建后将直接在评审中心打开报告抽屉，可就地执行本机 AI 审核、填写报告或审批，无需跳转任务中心。
-        </Typography.Paragraph>
-      </Form>
-    </Drawer>
-
-    <Drawer
-      title={
-        activeJob ? (
-          <Flex justify="space-between" align="center" gap={8} wrap>
-            <span>{`${taskMap.get(activeJob.taskId)?.jiraKey || activeJob.taskId} · ${stageLabel(activeJob.stage)}`}</span>
-            <Button
-              size="small"
-              type="link"
-              onClick={() => {
-                const target = activeJob;
-                setActiveJob(null);
-                openTaskRoute(target.taskId, { tab: 'reviews', jobId: target.id, from: 'reviews' });
-              }}
-            >
-              前往所属任务链路 →
-            </Button>
-          </Flex>
-        ) : '评审报告详情'
-      }
-      size={920}
-      open={!!activeJob}
-      onClose={() => setActiveJob(null)}
-      destroyOnHidden
-    >
-      {activeJob && user && (() => {
-        const activeTask = taskMap.get(activeJob.taskId);
-        if (!activeTask) return <Empty description="该任务当前不可见或已移出。" />;
-        return (
-          <Suspense fallback={<Skeleton active paragraph={{ rows: 6 }} />}>
-            <ReviewDetail
-              key={activeJob.id}
-              jobId={activeJob.id}
-              task={activeTask}
-              user={user}
-              role={role}
-              members={members}
-              repoPath={gitStatus?.repoPath || null}
-              constitutionFiles={gitStatus?.constitutionFiles || []}
-              onChanged={async () => {
-                await Promise.all([refresh(), onChanged ? onChanged().catch(() => {}) : Promise.resolve()]);
-              }}
-              onUnauthorized={onUnauthorized}
-              onForbidden={onForbidden || onUnauthorized}
-              onOpenJob={nextId => {
-                const found = jobs.find(j => j.id === nextId);
-                if (found) setActiveJob(found);
-              }}
-            />
-          </Suspense>
-        );
-      })()}
-    </Drawer>
+      </div>
+      {overdueActiveCount > 0 && <Tag color="warning">超 SLA {overdueActiveCount}</Tag>}
+      {hasFilters && <Button type="text" size="small" onClick={resetFilters}>清空筛选</Button>}
+    </div>
+    <WorkflowRecords label={showingHistory ? '历史评审' : '评审列表'}
+      empty={<Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription} />}
+      loading={loading} page={currentPage} total={visibleJobs.length} onPageChange={setPage}>
+      {pageJobs.map(job => {
+        const task = taskMap.get(job.taskId);
+        const project = projectMap.get(job.projectId);
+        const sla = evaluateReviewSla(job);
+        return <li key={job.id} className="tf-workflow-record">
+          <button type="button" className="tf-workflow-record-button tf-review-queue-row" disabled={!task}
+            onClick={() => task && openTaskRoute(task.id, { tab: 'reviews', jobId: job.id, from: 'reviews' })}>
+            <span className="tf-review-queue-task">
+              {task && <span className="tf-workflow-code">{task.jiraKey}</span>}
+              {!projectId && project && <span className="tf-workflow-project" title={project.name}>{project.key}</span>}
+              <span className="tf-workflow-record-title" title={task?.title}>{task?.title || '所属任务不可见'}</span>
+            </span>
+            <span className="tf-review-queue-stage">{stageLabel(job.stage)}</span>
+            <span className="tf-review-queue-status">
+              <StatusBadge variant={reviewBadgeVariant(job.status)}>{reviewStatusLabel(job.status)}</StatusBadge>
+              {showingHistory && job.stale && <Tag>快照已过期</Tag>}
+              {!showingHistory && <Tag color={sla.tagColor}>{sla.label}</Tag>}
+            </span>
+            <time className="tf-review-queue-date" dateTime={job.createdAt}>{timeText(job.createdAt)}</time>
+            {task && <ChevronRight size={15} className="tf-review-queue-chevron" aria-hidden />}
+          </button>
+        </li>;
+      })}
+    </WorkflowRecords>
   </div>;
 };
 
-export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'DEV', onChanged, onBeforeRefresh, onUnauthorized }) => {
+const AssetReadingPane: React.FC<{
+  asset: ProjectAssetMetadata;
+  versions: ProjectAssetMetadata[];
+  onVersionChange: (id: string) => void;
+  onUnauthorized: () => void;
+}> = ({ asset, versions, onVersionChange, onUnauthorized }) => {
   const { message } = App.useApp();
-  const screens = Grid.useBreakpoint();
+  const [detail, setDetail] = useState<Asset | null>();
+  const [readAttempt, setReadAttempt] = useState(0);
+  const onUnauthorizedRef = useRef(onUnauthorized);
+  const messageRef = useRef(message);
+  onUnauthorizedRef.current = onUnauthorized;
+  messageRef.current = message;
+
+  useEffect(() => {
+    let alive = true;
+    void api<{ assets: Asset[] }>(`tasks/${encodeURIComponent(asset.taskId)}/assets`)
+      .then(result => { if (alive) setDetail(result.assets.find(item => item.id === asset.id) ?? null); })
+      .catch(error => {
+        if (!alive) return;
+        setDetail(null);
+        void messageRef.current.error(error instanceof Error ? error.message : '读取材料正文失败。');
+        if (error instanceof ApiError && error.status === 401) onUnauthorizedRef.current();
+      });
+    return () => { alive = false; };
+  }, [asset.taskId, asset.id, readAttempt]);
+
+  const title = materialTitle(asset);
+  const confluence = detail && detail.kind !== 'CODE' && isConfluenceStorage(detail.content);
+  return <section className="tf-asset-reading-pane" aria-label="材料正文">
+    <Flex vertical gap={12}>
+      <header className="tf-asset-reading-header">
+        <h3 title={asset.title}>{title}</h3>
+        <Flex align="center" gap={8} wrap className="tf-asset-reading-meta">
+          <span className="tf-asset-kind">{materialCategoryLabel(asset)}</span>
+          <span className="tf-asset-owner">所属任务 <Button size="small" type="link" className="tf-workflow-copy" title={asset.taskTitle} onClick={() => openTaskRoute(asset.taskId, { tab: 'assets', from: 'assets' })}>{asset.taskKey}</Button></span>
+          <span>版本</span>
+          {versions.length > 1 ? <Select
+            aria-label="材料修订版本"
+            size="small"
+            value={asset.id}
+            onChange={onVersionChange}
+            options={versions.map(item => ({ value: item.id, label: `r${item.revision} · ${timeText(item.createdAt)}` }))}
+          /> : <span>r{asset.revision}</span>}
+          {asset.sourceUrl && /^https?:\/\//i.test(asset.sourceUrl) && <Typography.Link href={asset.sourceUrl} target="_blank" rel="noreferrer noopener" className="tf-workflow-source">查看原文<ExternalLink size={13} /></Typography.Link>}
+        </Flex>
+        <details className="tf-asset-metadata">
+          <summary>材料信息</summary>
+          <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
+            ...(title !== asset.title ? [{ key: 'original-title', label: '原始标题', children: asset.title }] : []),
+            { key: 'created', label: '创建时间', children: timeText(asset.createdAt) },
+            { key: 'sha', label: 'SHA-256', children: <Button size="small" type="link" className="tf-workflow-copy" title={asset.sha256} onClick={() => { void navigator.clipboard.writeText(asset.sha256).then(() => message.success('已复制 SHA-256 指纹。')).catch(() => {}); }}><code>{asset.sha256.slice(0, 12)}</code> · 复制</Button> },
+          ]} />
+        </details>
+      </header>
+      {detail === undefined ? <Skeleton active paragraph={{ rows: 6 }} /> : detail ? (
+        detail.kind === 'CODE' ? <CodeMaterialPreview content={detail.content} />
+          : confluence ? <>
+            <ConfluencePreview content={detail.content} sourceUrl={detail.sourceUrl} />
+            <details className="tf-asset-metadata">
+              <summary>查看原始文本</summary>
+              <pre className="tf-code-panel">{detail.content}</pre>
+            </details>
+          </> : <MarkdownPreview content={detail.content} />
+      ) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可查看的材料正文"><Button size="small" onClick={() => { setDetail(undefined); setReadAttempt(value => value + 1); }}>重新加载正文</Button></Empty>}
+    </Flex>
+  </section>;
+};
+
+function materialTitle(asset: ProjectAssetMetadata): string {
+  if (asset.kind === 'CODE') {
+    const commit = /^\S+\/\S+\s+\(([a-f0-9]{7,64})\)(?:\s*[·—：:]\s*(\S.*))?$/i.exec(asset.title);
+    if (commit) return commit[2]?.trim() || `代码提交 ${commit[1].slice(0, 8)}`;
+  }
+  return asset.title;
+}
+
+function materialVersions(assets: ProjectAssetMetadata[]): ProjectAssetMetadata[][] {
+  const byDocument = new Map<string, ProjectAssetMetadata[]>();
+  for (const asset of assets) {
+    const key = JSON.stringify([asset.taskId, asset.kind, asset.logicalKey]);
+    const versions = byDocument.get(key);
+    if (versions) versions.push(asset);
+    else byDocument.set(key, [asset]);
+  }
+  return [...byDocument.values()].map(versions => versions.sort((a, b) => b.revision - a.revision));
+}
+
+const materialKinds = (project?: Project) => ASSET_KIND_OPTIONS.filter(option => project && ASSET_ROLES[option.value].includes(project.role));
+
+export const AssetCenter: React.FC<CenterProps> = ({ projectId, projects, tasks, onChanged, onBeforeRefresh, onUnauthorized }) => {
+  const { message } = App.useApp();
   const { items: assets, loading, failure, refresh } = useProjectCollection<ProjectAssetMetadata>('assets', projectId, onUnauthorized);
-  const [kind, setKind] = useState<AssetKind | undefined>(assetKindFromRoute);
-  const [latestOnly, setLatestOnly] = useState<boolean>(() => readStoredBool(ASSET_LATEST_ONLY_KEY, false));
+  const [kind, setKind] = useState(() => assetKindFromRoute() ?? taskReturnFilters().kind);
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState('');
   const [createOpen, setCreateOpen] = useState(false);
   const [savingAsset, setSavingAsset] = useState(false);
-  const [previewAsset, setPreviewAsset] = useState<ProjectAssetMetadata | null>(null);
-  const [previewDetail, setPreviewDetail] = useState<Asset | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [selectedAssetId, setSelectedAssetId] = useState('');
   const [assetForm] = Form.useForm<{ taskId: string; kind: AssetKind; title: string; content: string; sourceUrl?: string; logicalKey?: string }>();
+  const assetTaskId = Form.useWatch('taskId', assetForm);
   const searchRef = useRef<InputRef>(null);
-  useEffect(() => { setKind(assetKindFromRoute()); setPage(1); setQuery(''); setCreateOpen(false); setPreviewAsset(null); setPreviewDetail(null); }, [projectId]);
+  useEffect(() => { setKind(assetKindFromRoute()); setPage(1); setQuery(''); setCreateOpen(false); setSelectedGroupId(''); setSelectedAssetId(''); }, [projectId]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === '/' && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target)) {
@@ -503,23 +406,29 @@ export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'D
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
   useEffect(() => {
-    const update = () => { setKind(assetKindFromRoute()); setPage(1); };
+    const update = () => setKind(assetKindFromRoute() ?? taskReturnFilters().kind);
     window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
   }, []);
-  const eligibleTasks = tasks.filter(task => task.projectId === projectId && !isTaskFrozen(task, tasks));
-  const allowedKinds = (Object.keys(ASSET_ROLES) as AssetKind[]).filter(k => ASSET_ROLES[k].includes(role));
+  const projectMap = new Map(projects.map(project => [project.id, project]));
+  const writableProjects = new Set(projects.filter(project => materialKinds(project).length > 0).map(project => project.id));
+  const eligibleTasks = tasks.filter(task => !isChildTask(task) && (!projectId || task.projectId === projectId) && writableProjects.has(task.projectId) && !isTaskFrozen(task, tasks));
+  const selectedTask = eligibleTasks.find(task => task.id === assetTaskId);
+  const allowedKinds = materialKinds(projectMap.get(selectedTask?.projectId || ''));
   const triggerNewAsset = () => {
-    const preferredKind = kind && ASSET_ROLES[kind]?.includes(role) ? kind : allowedKinds[0];
     assetForm.resetFields();
-    assetForm.setFieldsValue({
-      taskId: eligibleTasks[0]?.id,
-      kind: preferredKind,
-    });
+    if (projectId) {
+      const task = eligibleTasks.find(task => task.id === activeAsset?.taskId)
+        || eligibleTasks.find(task => task.id === (activeAsset && activeGroup?.rootTaskIds.get(activeAsset.taskId)))
+        || eligibleTasks.find(task => task.id === activeGroup?.taskId) || eligibleTasks[0];
+      const kinds = materialKinds(projectMap.get(projectId));
+      assetForm.setFieldsValue({ taskId: task?.id, kind: kinds.find(option => option.value === kind)?.value ?? kinds[0]?.value });
+    }
     setCreateOpen(true);
   };
   const submitNewAsset = async (values: { taskId: string; kind: AssetKind; title: string; content: string; sourceUrl?: string; logicalKey?: string }) => {
-    if (savingAsset) return;
+    const task = eligibleTasks.find(item => item.id === values.taskId);
+    if (savingAsset || !task || !materialKinds(projectMap.get(task.projectId)).some(option => option.value === values.kind)) return;
     setSavingAsset(true);
     try {
       await api<{ asset: Asset }>(`tasks/${encodeURIComponent(values.taskId)}/assets`, {
@@ -539,82 +448,100 @@ export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'D
       setSavingAsset(false);
     }
   };
-  const maxRevisionBySlot = new Map<string, number>();
-  for (const item of assets) {
-    const slotKey = `${item.taskId}::${item.kind}::${item.logicalKey}`;
-    const prev = maxRevisionBySlot.get(slotKey) ?? 0;
-    if (item.revision > prev) maxRevisionBySlot.set(slotKey, item.revision);
-  }
-  const isLatestRevision = (item: ProjectAssetMetadata) =>
-    maxRevisionBySlot.get(`${item.taskId}::${item.kind}::${item.logicalKey}`) === item.revision;
-  const scopedAssets = latestOnly ? assets.filter(isLatestRevision) : assets;
   const search = query.trim().toLowerCase();
-  const visibleAssets = scopedAssets.filter(asset => (!kind || asset.kind === kind) && (!search || [asset.title, asset.logicalKey, assetKindLabel(asset.kind), asset.taskKey, asset.taskTitle].join(' ').toLowerCase().includes(search)));
-  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleAssets.length / 10)));
+  const matchesAsset = (asset: ProjectAssetMetadata) =>
+    [asset.title, materialTitle(asset), asset.logicalKey, materialCategoryLabel(asset), asset.taskKey, asset.taskTitle].join(' ').toLowerCase().includes(search);
+  const tasksById = new Map(tasks.map(task => [task.id, task]));
+  const groups = groupTaskMaterials(assets, tasks).map(group => ({
+    ...group, documents: materialVersions(group.assets), project: projectMap.get(group.assets[0].projectId),
+  }));
+  const documentCounts = new Map<MaterialCategory, number>();
+  let documentCount = 0;
+  for (const group of groups) {
+    documentCount += group.documents.length;
+    for (const [latest] of group.documents) {
+      const category = materialCategory(latest);
+      documentCounts.set(category, (documentCounts.get(category) || 0) + 1);
+    }
+  }
+  const visibleGroups = groups.map(group => {
+    const matchesGroup = !search || [group.taskKey, group.taskTitle, group.project?.key, group.project?.name].join(' ').toLowerCase().includes(search);
+    const documents = group.documents.filter(versions => {
+      const owner = tasksById.get(group.rootTaskIds.get(versions[0].taskId) || '');
+      const matchesOwner = owner && `${owner.jiraKey} ${owner.title}`.toLowerCase().includes(search);
+      return (!kind || materialCategory(versions[0]) === kind) && (matchesGroup || matchesOwner || versions.some(matchesAsset));
+    });
+    return { ...group, documents, matchesGroup };
+  }).filter(group => group.documents.length > 0);
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(visibleGroups.length / PAGE_SIZE)));
+  const pageGroups = visibleGroups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  const activeGroup = pageGroups.find(group => group.id === selectedGroupId) || pageGroups[0];
+  const activeVersions = activeGroup?.documents.find(versions => versions.some(asset => asset.id === selectedAssetId)) || activeGroup?.documents[0] || [];
+  const preferredVersion = (versions: ProjectAssetMetadata[]) =>
+    (!activeGroup?.matchesGroup && versions.find(matchesAsset)) || versions[0];
+  const activeAsset = activeVersions.find(asset => asset.id === selectedAssetId) || preferredVersion(activeVersions);
   useEffect(() => { if (currentPage !== page) setPage(currentPage); }, [currentPage, page]);
-  const resetFilters = () => { setKind(undefined); setLatestOnly(false); writeStoredBool(ASSET_LATEST_ONLY_KEY, false); setQuery(''); setPage(1); navigateWorkspace('assets'); };
-  const openAssets = (asset: ProjectAssetMetadata) => {
-    setPreviewAsset(asset);
-    setPreviewDetail(null);
-    setPreviewLoading(true);
-    void api<TaskDetailBundle>(`tasks/${encodeURIComponent(asset.taskId)}/bundle`)
-      .then(bundle => {
-        const found = bundle.assets.find(item => item.id === asset.id) || null;
-        setPreviewDetail(found);
-      })
-      .catch(error => {
-        void message.error(error instanceof Error ? error.message : '读取材料正文失败。');
-        if (error instanceof ApiError && error.status === 401) onUnauthorized();
-      })
-      .finally(() => setPreviewLoading(false));
-  };
-  const formatLogicalKey = (asset: ProjectAssetMetadata) =>
-    asset.logicalKey === asset.kind ? `默认${assetKindLabel(asset.kind)}标识` : asset.logicalKey;
-  const columns: TableColumnsType<ProjectAssetMetadata> = [
-    { title: '材料', key: 'asset', width: 260, render: (_, asset) => <div className="tf-workflow-title-cell"><Button type="link" className="tf-workflow-title-link" onClick={() => openAssets(asset)}>{asset.title}</Button><Text type="secondary" className="tf-workflow-code tf-workflow-ellipsis" ellipsis={{ tooltip: asset.logicalKey }}>{formatLogicalKey(asset)}</Text></div> },
-    { title: '类型', dataIndex: 'kind', key: 'kind', width: 112, render: value => <StatusBadge variant="blue">{assetKindLabel(value)}</StatusBadge> },
-    { title: '所属任务', key: 'task', width: 200, render: (_, asset) => <div className="tf-workflow-title-cell"><Text className="tf-workflow-code">{asset.taskKey}</Text><Button type="link" className="tf-workflow-title-link" onClick={() => openAssets(asset)}>{asset.taskTitle}</Button></div> },
-    { title: '版本', dataIndex: 'revision', key: 'revision', width: 96, render: (value, asset) => <Space size={4}><Text className="tf-workflow-code">r{value}</Text>{isLatestRevision(asset) && value > 1 && <Tag color="success" style={{ marginInlineEnd: 0, fontSize: 11, lineHeight: '16px', paddingInline: 4 }}>最新</Tag>}</Space> },
-    { title: '内容指纹', dataIndex: 'sha256', key: 'sha256', width: 116, render: value => <Tooltip title={`点击复制完整 SHA-256：${value}`}><Text className="tf-workflow-code tf-workflow-hash" style={{ cursor: 'pointer' }} onClick={event => { event.stopPropagation(); void navigator.clipboard.writeText(String(value || '')).then(() => message.success('已复制完整 SHA-256 指纹。')).catch(() => {}); }}>{String(value || '').slice(0, 10)}</Text></Tooltip> },
-    { title: '创建时间', dataIndex: 'createdAt', key: 'createdAt', width: 168, render: value => <Text type="secondary" className="tf-workflow-secondary">{timeText(value)}</Text> },
-    { title: '来源', key: 'source', width: 96, render: (_, asset) => asset.sourceUrl ? <Typography.Link href={asset.sourceUrl} target="_blank" rel="noreferrer" className="tf-workflow-source" onClick={event => event.stopPropagation()}><span>查看来源</span><ExternalLink size={14} /></Typography.Link> : <Text type="secondary">—</Text> },
-  ];
-  const emptyDescription = failure || (projectId ? !kind && !search && !latestOnly ? '当前项目暂无材料版本。' : '没有符合条件的材料版本。' : '请先选择项目。');
-  const empty = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>{!failure && projectId && (kind || !!search || latestOnly ? <Button onClick={resetFilters}>清空筛选</Button> : eligibleTasks.length ? <Button type="primary" icon={<Plus size={14} />} disabled={!allowedKinds.length} onClick={triggerNewAsset}>就地添加材料</Button> : <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心创建任务</Button>)}</Empty>;
+  const changePage = (value: number) => { setSelectedGroupId(''); setSelectedAssetId(''); setPage(value); };
+  const resetFilters = () => { setKind(undefined); setQuery(''); changePage(1); navigateWorkspace('assets'); };
+  const emptyDescription = failure || (!kind && !search ? '暂无材料。' : '没有符合条件的材料。');
+  const empty = <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={emptyDescription}>{!failure && !kind && !search && !eligibleTasks.length && <Button onClick={() => navigateWorkspace('tasks')}>需求中心</Button>}</Empty>;
 
-  return <div className="tf-workflow-center">
-    <Card title={<Space size={8}><h2 className="tf-workflow-heading">材料版本</h2><Text type="secondary" className="tf-workflow-secondary">{visibleAssets.length} / {assets.length}</Text></Space>} extra={<Space wrap size={8}><Button icon={<RefreshCw size={16} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)}>刷新</Button><Button type="primary" icon={<Plus size={16} />} disabled={!projectId || !eligibleTasks.length || !allowedKinds.length} onClick={triggerNewAsset}>添加材料</Button></Space>}>
-      <div style={{ marginBottom: 12, overflowX: 'auto' }}>
-        <Segmented<string>
-          aria-label="材料类型快捷筛选"
-          value={kind || 'all'}
-          onChange={val => {
-            const next = val === 'all' ? undefined : (val as AssetKind);
-            setKind(next);
-            setPage(1);
-            navigateWorkspace('assets', { kind: next });
-          }}
-          options={[
-            { value: 'all', label: `全部 (${scopedAssets.length})` },
-            ...ASSET_KIND_OPTIONS.map(opt => ({
-              value: opt.value,
-              label: `${opt.label} (${scopedAssets.filter(item => item.kind === opt.value).length})`,
-            })),
-          ]}
-        />
+  return <div className="tf-workflow-center tf-workflow-center--assets">
+    <div className="tf-workflow-controls">
+      <div className="tf-workflow-toolbar">
+        <Input ref={searchRef} aria-label="搜索材料" prefix={<Search size={15} />} allowClear placeholder="搜索需求、任务或材料" value={query} onChange={event => { setQuery(event.target.value); changePage(1); }} onKeyDown={clearSearchOnEscape(query, () => { setQuery(''); changePage(1); })} />
+        <Select<MaterialCategory | 'all'> aria-label="材料类型" value={kind || 'all'} onChange={value => { const next = value === 'all' ? undefined : value; setKind(next); changePage(1); navigateWorkspace('assets', { kind: next }); }} options={[
+          { value: 'all', label: `全部类型 (${documentCount})` },
+          ...materialCategoryOptions.map(opt => ({ value: opt.value, label: `${opt.label} (${documentCounts.get(opt.value) || 0})` })),
+        ]} />
+        {(kind || !!query) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}
       </div>
-      <div className="tf-workflow-toolbar"><Input ref={searchRef} aria-label="搜索材料" prefix={<Search size={16} />} allowClear placeholder="搜索材料、任务或类型（按 / 聚焦，Esc 清空）" value={query} onChange={event => { setQuery(event.target.value); setPage(1); }} onKeyDown={clearSearchOnEscape(query, () => { setQuery(''); setPage(1); })} /><Select aria-label="材料类型" placeholder="全部类型" allowClear value={kind} onChange={value => { setKind(value); setPage(1); navigateWorkspace('assets', { kind: value }); }} options={ASSET_KIND_OPTIONS} /><Checkbox checked={latestOnly} onChange={e => { const next = e.target.checked; setLatestOnly(next); writeStoredBool(ASSET_LATEST_ONLY_KEY, next); setPage(1); }}>仅看最新修订</Checkbox>{(kind || !!query || latestOnly) && <Button type="text" onClick={resetFilters}>清空筛选</Button>}</div>
-      {screens.md ? <Table<ProjectAssetMetadata> rowKey="id" columns={columns} dataSource={visibleAssets} loading={loading} scroll={{ x: 1028 }} pagination={{ current: currentPage, onChange: setPage, pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }} locale={{ emptyText: empty }} onRow={record => ({ style: { cursor: 'pointer' }, onClick: event => { if (!(event.target as HTMLElement).closest('button,a,input,.ant-select')) openAssets(record); } })} /> : <>
-        <List className="tf-workflow-mobile-list" rowKey="id" loading={loading} dataSource={visibleAssets.slice((currentPage - 1) * 10, currentPage * 10)} locale={{ emptyText: empty }} renderItem={asset => <List.Item>
-          <div className="tf-workflow-title-cell"><Button type="link" className="tf-workflow-title-link" onClick={() => openAssets(asset)}>{asset.title}</Button><Text type="secondary" className="tf-workflow-code">{asset.logicalKey}</Text></div>
-          <Space wrap size={[8, 8]}><StatusBadge variant="blue">{assetKindLabel(asset.kind)}</StatusBadge><Text className="tf-workflow-code">r{asset.revision}</Text></Space>
-          <Button type="link" className="tf-workflow-title-link" onClick={() => openAssets(asset)}>{asset.taskKey} · {asset.taskTitle}</Button>
-          <Text type="secondary" className="tf-workflow-code">{asset.sha256}</Text>
-          <Flex gap={8} justify="space-between" wrap><Text type="secondary" className="tf-workflow-secondary">{timeText(asset.createdAt)}</Text>{asset.sourceUrl && <Typography.Link href={asset.sourceUrl} target="_blank" rel="noreferrer" className="tf-workflow-source">查看来源<ExternalLink size={14} /></Typography.Link>}</Flex>
-        </List.Item>} />
-        <Pagination className="tf-workflow-mobile-pagination" size="small" current={currentPage} onChange={setPage} total={visibleAssets.length} pageSize={10} showSizeChanger={false} hideOnSinglePage />
-      </>}
-    </Card>
+      <div className="tf-workflow-actions">
+        <Tooltip title="刷新材料"><Button aria-label="刷新材料" icon={<RefreshCw size={15} />} loading={loading} onClick={() => void runCenterRefresh(refresh, onChanged, onBeforeRefresh)} /></Tooltip>
+        <Button type="primary" icon={<Plus size={15} />} disabled={!eligibleTasks.length} onClick={triggerNewAsset}>添加材料</Button>
+      </div>
+    </div>
+    <div className={activeAsset ? 'tf-reading-layout tf-workflow-reader' : 'tf-workflow-empty'}>
+      <WorkflowRecords label="按需求查看" empty={empty} loading={loading} page={currentPage} total={visibleGroups.length} onPageChange={changePage}>
+        {pageGroups.map(group => (
+          <li key={group.id} className="tf-workflow-record">
+            <button type="button" className="tf-workflow-record-button" aria-pressed={group.id === activeGroup?.id} onClick={() => {
+              if (group.id !== activeGroup?.id) { setSelectedGroupId(group.id); setSelectedAssetId(''); }
+            }}>
+              <span className="tf-workflow-record-title" title={group.taskTitle}>{group.taskTitle}</span>
+              <span className="tf-asset-group-meta tf-workflow-record-meta">
+                <span className="tf-asset-group-key">
+                  <span className="tf-workflow-code">{group.taskKey}</span>
+                  {!projectId && group.project && <span className="tf-workflow-project" title={group.project.name}>{group.project.name}</span>}
+                </span>
+                <span>{group.documents.length} 份材料</span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </WorkflowRecords>
+      {activeGroup && activeAsset && <Card className="tf-workflow-asset-detail" title={
+        <h2 className="tf-workflow-heading" title={activeGroup.taskTitle}>{activeGroup.taskKey} · {activeGroup.taskTitle}</h2>
+      } extra={<Button type="link" size="small" onClick={() => openTaskRoute(activeGroup.taskId, { tab: 'assets', from: 'assets' })}>打开任务 {activeGroup.taskKey}</Button>}>
+        <ul className="tf-asset-document-list" aria-label="需求材料">
+          {activeGroup.documents.map(versions => {
+            const asset = preferredVersion(versions);
+            return <li key={versions[0].id}>
+              <button type="button" className="tf-asset-document-button" aria-pressed={versions === activeVersions} onClick={() => {
+                if (versions !== activeVersions) setSelectedAssetId(asset.id);
+              }}>
+                <span className="tf-workflow-record-title" title={asset.title}>{materialTitle(asset)}</span>
+                <span className="tf-asset-document-meta">
+                  <span className="tf-asset-kind">{materialCategoryLabel(asset)}</span>
+                  <span className="tf-workflow-code">{asset.taskKey}</span>
+                </span>
+              </button>
+            </li>;
+          })}
+        </ul>
+        <AssetReadingPane key={activeAsset.id} asset={activeAsset} versions={activeVersions} onVersionChange={setSelectedAssetId} onUnauthorized={onUnauthorized} />
+      </Card>}
+    </div>
     <Drawer
       forceRender
       title="登记任务材料"
@@ -626,27 +553,35 @@ export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'D
       footer={
         <Flex justify="flex-end" gap={8}>
           <Button disabled={savingAsset} onClick={() => setCreateOpen(false)}>取消</Button>
-          <Button type="primary" loading={savingAsset} disabled={!eligibleTasks.length || !allowedKinds.length} onClick={() => assetForm.submit()}>
+          <Button type="primary" loading={savingAsset} disabled={!selectedTask || !allowedKinds.length} onClick={() => assetForm.submit()}>
             保存新版本
           </Button>
         </Flex>
       }
     >
       <Form form={assetForm} layout="vertical" disabled={savingAsset} onFinish={values => void submitNewAsset(values)}>
-        <Form.Item name="taskId" label="所属任务" rules={[{ required: true, message: '请选择所属任务' }]}>
+        <Form.Item name="taskId" label="所属主任务" rules={[{ required: true, message: '请选择所属主任务' }]}>
           <Select
             showSearch={{ optionFilterProp: 'label' }}
-            placeholder="选择当前项目下的任务"
-            options={eligibleTasks.map(item => ({ value: item.id, label: `${item.jiraKey} · ${item.title}` }))}
+            placeholder={projectId ? '选择主任务' : '选择项目及主任务'}
+            options={eligibleTasks.map(item => ({
+              value: item.id,
+              label: [!projectId && projectMap.get(item.projectId)?.name, item.jiraKey, item.title].filter(Boolean).join(' · '),
+            }))}
+            onChange={taskId => {
+              const task = eligibleTasks.find(item => item.id === taskId);
+              const kinds = materialKinds(projectMap.get(task?.projectId || ''));
+              const previousKind = assetForm.getFieldValue('kind');
+              if (!kinds.some(option => option.value === previousKind)) {
+                assetForm.setFieldValue('kind', kinds.find(option => option.value === kind)?.value ?? kinds[0]?.value);
+              }
+            }}
           />
         </Form.Item>
         <Form.Item name="kind" label="材料类型" rules={[{ required: true, message: '请选择材料类型' }]}>
           <Select
-            options={ASSET_KIND_OPTIONS.map(opt => ({
-              value: opt.value,
-              label: opt.label,
-              disabled: !ASSET_ROLES[opt.value]?.includes(role),
-            }))}
+            disabled={!selectedTask}
+            options={allowedKinds}
           />
         </Form.Item>
         <Form.Item name="title" label="材料标题" rules={[{ required: true, whitespace: true, message: '请填写材料标题' }]}>
@@ -674,59 +609,5 @@ export const AssetCenter: React.FC<CenterProps> = ({ projectId, tasks, role = 'D
       </Form>
     </Drawer>
 
-    <Drawer
-      title={
-        previewAsset ? (
-          <Flex justify="space-between" align="center" gap={8} wrap>
-            <span>{`${previewAsset.title} · r${previewAsset.revision}`}</span>
-            <Button
-              size="small"
-              type="link"
-              onClick={() => {
-                const target = previewAsset;
-                setPreviewAsset(null);
-                openTaskRoute(target.taskId, { tab: 'assets', from: 'assets' });
-              }}
-            >
-              前往所属任务 →
-            </Button>
-          </Flex>
-        ) : '材料内容预览'
-      }
-      size={760}
-      open={!!previewAsset}
-      onClose={() => { setPreviewAsset(null); setPreviewDetail(null); }}
-      destroyOnHidden
-    >
-      {previewAsset && (
-        <Flex vertical gap={12}>
-          <Descriptions
-            bordered
-            size="small"
-            column={2}
-            items={[
-              { key: 'task', label: '所属任务', children: `${previewAsset.taskKey} · ${previewAsset.taskTitle}` },
-              { key: 'kind', label: '类型 / 版本', children: `${assetKindLabel(previewAsset.kind)} · r${previewAsset.revision}` },
-              { key: 'sha', label: 'SHA-256', children: <code>{previewAsset.sha256}</code> },
-              { key: 'created', label: '创建时间', children: timeText(previewAsset.createdAt) },
-              ...(previewAsset.sourceUrl
-                ? [{ key: 'source', label: '原文来源', span: 2, children: <Typography.Link href={previewAsset.sourceUrl} target="_blank" rel="noreferrer">{previewAsset.sourceUrl}</Typography.Link> }]
-                : []),
-            ]}
-          />
-          {previewLoading ? (
-            <Skeleton active paragraph={{ rows: 8 }} />
-          ) : previewDetail ? (
-            previewDetail.kind === 'CODE' ? (
-              <pre className="tf-code-panel">{previewDetail.content}</pre>
-            ) : (
-              <MarkdownPreview content={previewDetail.content} />
-            )
-          ) : (
-            <Empty description="暂无材料正文" />
-          )}
-        </Flex>
-      )}
-    </Drawer>
   </div>;
 };

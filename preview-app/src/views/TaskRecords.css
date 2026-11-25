@@ -1,0 +1,364 @@
+.tf-task-materials,
+.tf-task-activity,
+.tf-task-release {
+  container-type: inline-size;
+  min-width: 0;
+}
+
+.tf-task-materials-layout,
+.tf-task-activity-layout,
+.tf-task-release-layout,
+.tf-record-stack {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 12px;
+}
+
+.tf-record-ellipsis {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tf-record-actions,
+.tf-material-header,
+.tf-material-evidence,
+.tf-record-section-header,
+.tf-record-row-heading,
+.tf-record-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tf-record-actions {
+  gap: 4px;
+  flex: 0 1 auto;
+}
+
+.tf-record-actions > *,
+.tf-record-row-heading > .ant-btn,
+.tf-record-progress-presets > * {
+  flex-shrink: 0;
+}
+
+.tf-record-meta {
+  color: var(--tf-muted);
+  font-size: 12px;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.tf-material-list,
+.tf-material-content,
+.tf-record-section {
+  min-width: 0;
+  background: var(--tf-surface);
+  border: 1px solid var(--tf-border);
+  border-radius: var(--tf-control-radius, 8px);
+}
+
+.tf-material-list {
+  display: flex;
+  overflow: auto;
+  padding: 4px;
+  gap: 3px;
+}
+
+.tf-material-option {
+  flex: 0 0 150px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px 8px;
+  text-align: start;
+  font: inherit;
+  color: var(--tf-text);
+  background: transparent;
+  border: 0;
+  border-radius: var(--tf-control-radius, 6px);
+  cursor: pointer;
+}
+
+.tf-material-option > strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tf-material-option > small {
+  color: var(--tf-muted);
+  font-size: 11px;
+}
+
+.tf-material-option:hover {
+  background: var(--tf-raised);
+}
+
+.tf-material-option[aria-current="true"] {
+  background: var(--tf-accent-soft);
+}
+
+.tf-material-option:focus-visible {
+  outline: 2px solid var(--tf-accent);
+  outline-offset: -2px;
+}
+
+.tf-material-header {
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.tf-material-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tf-material-header h3,
+.tf-record-section-header h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--tf-text);
+}
+
+.tf-material-header .tf-record-meta {
+  margin-top: 3px;
+}
+
+.tf-material-evidence {
+  padding: 4px 10px;
+  background: var(--tf-raised);
+  color: var(--tf-muted);
+  font-size: 11px;
+  min-height: 32px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.tf-material-evidence .ant-tag,
+.tf-record-title .ant-tag {
+  margin: 0;
+}
+
+.tf-material-evidence > :not(.tf-record-ellipsis) {
+  flex-shrink: 0;
+}
+
+.tf-material-fingerprint.ant-btn {
+  font: inherit;
+  color: var(--tf-muted);
+  margin-inline-start: auto;
+}
+
+.tf-material-content > .ant-alert {
+  margin: 8px;
+}
+
+.tf-material-scan {
+  max-block-size: 120px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  display: grid;
+  gap: 5px;
+}
+
+.tf-material-preview {
+  max-block-size: min(52dvh, 660px);
+  overflow: auto;
+  min-width: 0;
+  overscroll-behavior: contain;
+  border-top: 1px solid var(--tf-border);
+}
+
+.tf-material-preview > .tf-md-preview,
+.tf-material-preview > .tf-code-panel,
+.tf-material-preview > .tf-diff-viewer {
+  max-height: none;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+}
+
+.tf-material-preview > .tf-md-preview {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 14px 16px;
+}
+
+.tf-material-preview > .tf-code-panel {
+  width: max-content;
+  min-width: 100%;
+  white-space: pre;
+}
+
+.tf-record-section-header {
+  min-height: 45px;
+  padding: 8px 12px;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--tf-border);
+}
+
+.tf-record-section-header,
+.tf-record-title,
+.tf-record-row-heading {
+  white-space: nowrap;
+}
+
+.tf-record-section-header h3 > .tf-record-meta {
+  margin-inline-start: 4px;
+}
+
+.tf-record-reporter {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--tf-border);
+}
+
+.tf-record-progress-presets {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.tf-record-progress-presets > .ant-input-affix-wrapper {
+  width: 70px;
+}
+
+.tf-record-progress-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+}
+
+.tf-record-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tf-record-row {
+  padding: 9px 12px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.tf-record-row + .tf-record-row {
+  border-top: 1px solid var(--tf-border);
+}
+
+.tf-record-row-heading {
+  justify-content: space-between;
+}
+
+.tf-record-row-heading > .ant-btn-link {
+  padding-inline: 2px;
+}
+
+.tf-record-run-meta {
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.tf-record-run-meta .ant-btn-link {
+  padding-inline: 3px;
+}
+
+.tf-record-notes,
+.tf-record-evidence {
+  margin: 5px 0 0;
+  max-block-size: 96px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.tf-record-notes p {
+  margin: 0;
+}
+
+.tf-record-error {
+  color: var(--tf-error);
+}
+
+.tf-record-detail {
+  margin: 4px 0;
+  color: var(--tf-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tf-record-evidence {
+  padding-inline-start: 18px;
+  font-size: 12px;
+}
+
+.tf-record-branch,
+.tf-record-device-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tf-record-branch {
+  margin-top: 4px;
+  color: var(--tf-muted);
+  font-size: 11px;
+}
+
+.tf-record-branch > svg,
+.tf-record-device-name > svg {
+  flex-shrink: 0;
+}
+
+.tf-record-reporter + .tf-record-branch,
+.tf-record-section-header + .tf-record-branch {
+  padding-inline: 12px;
+  padding-block: 4px;
+}
+
+.tf-record-pagination {
+  justify-content: flex-end;
+  padding: 8px;
+}
+
+@container (min-width: 850px) {
+  .tf-task-materials-layout {
+    grid-template-columns: 190px minmax(0, 1fr);
+  }
+
+  .tf-material-list {
+    flex-direction: column;
+    max-block-size: min(58dvh, 560px);
+  }
+
+  .tf-material-option {
+    flex-basis: auto;
+  }
+
+  .tf-task-activity-layout {
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  }
+
+  .tf-task-release-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  }
+}
+
+@container (max-width: 590px) {
+  .tf-material-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tf-material-header .tf-record-actions {
+    overflow-x: auto;
+    padding-block-end: 2px;
+  }
+}

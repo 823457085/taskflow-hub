@@ -1,11 +1,11 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
-import { Alert, App as AntApp, Button, Card, Collapse, Descriptions, Drawer, Dropdown, Flex, Form, Grid, Input, Progress, Segmented, Select, Skeleton, Space, Spin, Steps, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, Checkbox, Collapse, Descriptions, Drawer, Dropdown, Flex, Form, Grid, Input, Segmented, Select, Skeleton, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
 import type { DescriptionsProps, MenuProps, TableColumnsType } from 'antd';
-import { Check, CheckCircle2, ChevronDown, ClipboardPaste, Copy, ExternalLink, FileCheck2, FileText, FolderGit2, FolderOpen, GitBranch, Laptop, Link2, Maximize2, MoreHorizontal, Package, Pencil, RefreshCw, Sparkles, Terminal, Trash2, X } from 'lucide-react';
+import { Check, CheckCircle2, ChevronRight, ClipboardPaste, Copy, ExternalLink, EyeOff, FileBarChart, FileCheck2, FileText, FolderOpen, GitBranch, Laptop, Link2, Maximize2, MoreHorizontal, Package, Pencil, Plus, Sparkles, Terminal, Trash2, X } from 'lucide-react';
 import { StatusBadge } from '../components/Primitives';
 import {
-  api, ApiError, APPROVE_ROLES, ASSET_ROLES, Asset, AssetKind, CodeupMrItem, ConnectorSummary, ExecutionMode,
-  Gates, LocalAiRun, LocalGitRepo, memberName, ProgressEvent, ProjectGitStatus, ProjectPermissions, ProjectWorkspace,
+  api, ApiError, ApiSpecImportResult, APPROVE_ROLES, ASSET_ROLES, Asset, AssetKind, CloudAiConfig, CodeupMrItem, ConnectorSummary, ExecutionMode,
+  Gates, isChildTask, LocalAiRun, LocalGitRepo, memberName, ProgressEvent, ProjectGitStatus, ProjectPermissions, ProjectWorkspace,
   REVIEW_ROLES, REVIEW_STAGE_OPTIONS, ReviewJob, Role, Stage, GateStage, STAGES, TaskContext, TaskDetailBundle, TaskStatus, timeText, User, WorkTask,
 } from './workspaceApi';
 import { Empty } from './WorkspaceFields';
@@ -13,14 +13,15 @@ import { TaskMergeRequests } from './TaskMergeRequests';
 import type { LocalTaskMode } from './localTaskWorkflowPrompt';
 import { parseSourceReference, type SourceProvider } from './sourceReference';
 import {
-  buildAssetTemplate, buildClipboardGitCommand, detectPastedReference,
-  extractTaskSmartHints, formatJiraTaskAsMarkdown,
+  buildAssetTemplate, buildClipboardGitCommand, canImportTaskMaterial, detectPastedReference,
+  extractTaskSmartHints, formatJiraDescriptionForDisplay, formatJiraTaskAsMarkdown,
 } from './taskSmartLinks';
-import { TASK_PANELS, type TaskPanel } from './workspaceNavigation';
-import { canQuickApproveReview } from './taskAvailability';
+import { navigateWorkspace, TASK_PANELS, type TaskPanel } from './workspaceNavigation';
+import { canQuickApproveReview, requiresTaskReview } from './taskAvailability';
+import { currentAiReviews } from './reviewQueueSla';
 import {
   assetKindLabel, DEFAULT_APPROVE_REASON, executionModeLabel, gateStatusLabel,
-  gitBranchLabel, mrStateLabel, reviewStatusLabel,
+  gitBranchLabel, mrStateLabel, reviewStatusLabel, roleLabel,
   stageLabel, TASK_STATUS_OPTIONS, taskStatusLabel, taskTypeLabel,
 } from './displayLabels';
 import { isEditableTarget, isSubmitShortcut } from './uiPreferences';
@@ -29,8 +30,10 @@ import { TaskActivityPanel } from './TaskActivityPanel';
 import { TaskAssetList } from './TaskAssetList';
 import { TaskReleasePanel } from './TaskReleasePanel';
 import { TaskSmartLinksCard } from './TaskSmartLinksCard';
-import { TaskChainPanel } from './TaskChainPanel';
-import type { ChainLink, ChainNextAction } from './workspaceApi';
+import { LinkifiedText, MarkdownPreview } from './MarkdownPreview';
+import { ChainReportDrawer, TaskChainPanel } from './TaskChainPanel';
+import { LINK_STATUS_META } from './ChainReportBits';
+import type { ChainLink, ChainNextAction, DeliveryChain } from './workspaceApi';
 import './WorkTaskDetail.css';
 
 const ReviewDetail = lazy(() => import('./ReviewDetail').then(mod => ({ default: mod.ReviewDetail })));
@@ -41,8 +44,8 @@ const GitHandoffModal = lazy(() => import('./GitHandoffModal').then(mod => ({ de
 
 interface TaskDraft { title: string; status: TaskStatus; assigneeId: string }
 interface AssetDraft { kind: AssetKind; logicalKey?: string; title: string; content: string; sourceUrl?: string }
-interface ReviewDraft { stage: Stage; executionMode: ExecutionMode }
-type AssetInputMode = 'link' | 'git' | 'manual';
+interface ReviewDraft { stage: Stage; executionMode: ExecutionMode; autoExecute?: boolean }
+type AssetInputMode = 'link' | 'git' | 'openapi' | 'manual';
 
 const STAGE_ASSET: Record<GateStage, AssetKind> = {
   PRD: 'PRD',
@@ -54,9 +57,10 @@ const STAGE_ASSET: Record<GateStage, AssetKind> = {
 
 export const WorkTaskDetail: React.FC<{
   taskId: string; user: User; role: Role; permissions: ProjectPermissions; members: User[]; tasks: WorkTask[]; allTasks?: WorkTask[];
-  embedded?: boolean; onOpenFullScreen?: () => void;
+  embedded?: boolean; inDrawer?: boolean; focusStage?: Stage; onFocusStageChange?: (stage?: Stage) => void; onOpenFullScreen?: (tab: TaskPanel, jobId?: string) => void; refreshTick?: number;
+  onSyncJiraChildren?: (task: WorkTask) => void; syncingJiraChildren?: boolean; onHideTask?: () => void;
   onOpenTask: (id: string) => void; onChanged: () => Promise<void>; onUnauthorized: () => void; onForbidden?: () => void;
-}> = ({ taskId, user, role, permissions, members, tasks, allTasks, embedded = false, onOpenFullScreen, onOpenTask, onChanged, onUnauthorized, onForbidden }) => {
+}> = ({ taskId, user, role, permissions, members, tasks, allTasks, embedded = false, inDrawer = false, focusStage, onFocusStageChange, onOpenFullScreen, refreshTick, onSyncJiraChildren, syncingJiraChildren, onHideTask, onOpenTask, onChanged, onUnauthorized, onForbidden }) => {
   const { message, modal } = AntApp.useApp();
   const screens = Grid.useBreakpoint();
   const [editingTitle, setEditingTitle] = useState(false);
@@ -67,6 +71,9 @@ export const WorkTaskDetail: React.FC<{
   const [assetBasisId, setAssetBasisId] = useState('');
   const [jobs, setJobs] = useState<ReviewJob[]>([]);
   const [gates, setGates] = useState<Gates | null>(null);
+  const [overviewChain, setOverviewChain] = useState<DeliveryChain | null>(null);
+  const [activeChainStage, setActiveChainStage] = useState<Stage | undefined>(focusStage);
+  const [chainReportOpen, setChainReportOpen] = useState(false);
   const [connectors, setConnectors] = useState<ConnectorSummary[]>([]);
   const [repositories, setRepositories] = useState<LocalGitRepo[]>([]);
   const [gitStatus, setGitStatus] = useState<ProjectGitStatus | null>(null);
@@ -80,17 +87,28 @@ export const WorkTaskDetail: React.FC<{
   const [gitTitle, setGitTitle] = useState('');
   const [codeupMrs, setCodeupMrs] = useState<CodeupMrItem[]>([]);
   const [loadingCodeupMrs, setLoadingCodeupMrs] = useState(false);
+  const [cloudAiConfig, setCloudAiConfig] = useState<CloudAiConfig | null>(null);
+  const [apiSpecSource, setApiSpecSource] = useState<'paste' | 'url' | 'apifox'>('paste');
+  const [apiSpecContent, setApiSpecContent] = useState('');
+  const [apiSpecUrl, setApiSpecUrl] = useState('');
+  const [apiSpecToken, setApiSpecToken] = useState('');
+  const [apifoxProjectId, setApifoxProjectId] = useState('');
+  const [apifoxToken, setApifoxToken] = useState('');
+  const [apiSpecTitle, setApiSpecTitle] = useState('');
+  const [apiSpecResult, setApiSpecResult] = useState<ApiSpecImportResult | null>(null);
 
   const readRoute = () => {
     const route = new URLSearchParams(location.hash.slice(1));
-    if (route.get('task') !== taskId) return { tab: 'chain' as TaskPanel, job: '' };
+    if (embedded || route.get('task') !== taskId) return { tab: (focusStage ? 'chain' : 'overview') as TaskPanel, job: '' };
     const requestedTab = route.get('tab');
     return {
       tab: ((TASK_PANELS as readonly string[]).includes(requestedTab || '') ? requestedTab : route.has('job') ? 'reviews' : 'chain') as TaskPanel,
       job: route.get('job') || '',
     };
   };
-  const [tab, setTab] = useState<TaskPanel>(() => readRoute().tab);
+  const [requestedTab, setTab] = useState<TaskPanel>(() => readRoute().tab);
+  const [visitedPanels, setVisitedPanels] = useState<TaskPanel[]>([]);
+  const detailScroll = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(true);
   const [selectedJobId, setSelectedJobId] = useState(() => readRoute().job);
   const [drawer, setDrawer] = useState<'task' | 'asset' | 'review' | null>(null);
@@ -104,12 +122,11 @@ export const WorkTaskDetail: React.FC<{
   const [gitHandoffEverOpened, setGitHandoffEverOpened] = useState(false);
   const [workflowInit, setWorkflowInit] = useState<{ mode?: LocalTaskMode; stage?: Stage; jobId?: string; runner?: 'local' | 'workbench' }>({});
   const [accessDenied, setAccessDenied] = useState(false);
-  const [chainReviewJobId, setChainReviewJobId] = useState('');
 
   const [taskForm] = Form.useForm<TaskDraft>();
   const [assetForm] = Form.useForm<AssetDraft>();
   const [reviewForm] = Form.useForm<ReviewDraft>();
-  const panelRef = useRef<HTMLDivElement>(null);
+  const watchedReviewMode = Form.useWatch('executionMode', reviewForm);
   const mounted = useRef(true);
   const accessLost = useRef(false);
   const refreshSequence = useRef(0);
@@ -117,13 +134,21 @@ export const WorkTaskDetail: React.FC<{
   const actionInFlight = useRef(false);
   const taskEditVersion = useRef(0);
   const stopActivity = useRef<(() => void) | null>(null);
-  const [navigationTarget, setNavigationTarget] = useState<'panel' | 'review' | null>(null);
+  const [revealReview, setRevealReview] = useState(false);
+  const linkedChild = !!task && isChildTask(task);
+  const jiraChild = linkedChild && task?.externalRef?.provider === 'jira';
+  const jiraParent = !!task && !linkedChild && task.externalRef?.provider === 'jira';
+  const linkedReview = linkedChild && jobs.some(job => job.id === selectedJobId && job.taskId === taskId);
+  const tab = linkedChild && (requestedTab === 'chain' || requestedTab === 'release' || (requestedTab === 'reviews' && !linkedReview) ||
+    (requestedTab === 'assets' && jiraChild && !assets.length))
+    ? 'overview'
+    : requestedTab;
 
   const clearSensitiveState = () => {
     accessLost.current = true; refreshSequence.current += 1; stopActivity.current?.();
-    setAccessDenied(true); setTask(null); setContext(null); setAssets([]); setJobs([]); setGates(null);
+    setAccessDenied(true); setTask(null); setContext(null); setAssets([]); setJobs([]); setGates(null); setOverviewChain(null); setChainReportOpen(false);
     setConnectors([]); setRepositories([]); setGitStatus(null); setAiRuns([]); setCodeupMrs([]);
-    setSelectedJobId(''); setDrawer(null); setLocalWorkflowOpen(false); setContextPackOpen(false); setGitHandoffOpen(false); setAssetBasisId(''); setNavigationTarget(null); setBusy(false);
+    setSelectedJobId(''); setDrawer(null); setLocalWorkflowOpen(false); setContextPackOpen(false); setGitHandoffOpen(false); setAssetBasisId(''); setRevealReview(false); setBusy(false);
     taskForm.resetFields(); assetForm.resetFields(); reviewForm.resetFields();
   };
   const handleForbidden = () => {
@@ -139,61 +164,111 @@ export const WorkTaskDetail: React.FC<{
     }
   };
   const updateRoute = (next: TaskPanel, jobId?: string) => {
-    if (accessLost.current || !mounted.current) return;
+    if (embedded || accessLost.current || !mounted.current) return;
     const route = new URLSearchParams(location.hash.slice(1));
     if (route.get('task') !== taskId) return;
     if (!route.has('view')) route.set('view', 'tasks');
     route.set('task', taskId); route.set('tab', next);
     if (jobId !== undefined) { if (jobId) route.set('job', jobId); else route.delete('job'); }
-    if (route.toString() !== location.hash.slice(1)) location.hash = route.toString();
+    const nextHash = route.toString();
+    if (nextHash !== location.hash.slice(1)) {
+      history.replaceState(history.state, '', location.pathname + location.search + '#' + nextHash);
+    }
   };
-  const changeTab = (next: string) => { setTab(next as TaskPanel); updateRoute(next as TaskPanel); setNavigationTarget('panel'); };
-  const openReview = (id: string) => { setSelectedJobId(id); setTab('reviews'); updateRoute('reviews', id); setNavigationTarget('review'); };
+  const changeTab = (next: TaskPanel) => {
+    setTab(next);
+    updateRoute(next, next === 'reviews' ? selectedJobId : '');
+  };
+  const openReview = (id: string) => {
+    setSelectedJobId(id);
+    setTab('reviews');
+    updateRoute('reviews', id);
+    setRevealReview(true);
+  };
 
   const openLocalWorkflow = (init: { mode?: LocalTaskMode; stage?: Stage; jobId?: string; runner?: 'local' | 'workbench' } = {}) => {
+    if (linkedChild || (init.stage && task && !requiresTaskReview(task, init.stage))) return;
     setWorkflowInit(init);
     setLocalWorkflowEverOpened(true);
     setLocalWorkflowOpen(true);
   };
 
   useEffect(() => {
-    const update = () => { const route = readRoute(); setTab(route.tab); setSelectedJobId(route.job); };
+    if (embedded) return;
+    const update = () => {
+      const route = readRoute();
+      setTab(route.tab);
+      setSelectedJobId(route.job);
+      if (route.job && route.tab === 'reviews') setRevealReview(true);
+    };
     update(); window.addEventListener('hashchange', update);
     return () => window.removeEventListener('hashchange', update);
-  }, [taskId]);
+  }, [taskId, embedded]);
 
   useEffect(() => {
-    if (!navigationTarget) return;
-    if (embedded && navigationTarget !== 'review') { setNavigationTarget(null); return; }
-    const target = navigationTarget === 'review' ? document.getElementById('workspace-review-detail') : panelRef.current;
-    target?.scrollIntoView({ block: 'start', behavior: 'instant' });
-    setNavigationTarget(null);
-  }, [navigationTarget, tab, selectedJobId, embedded]);
+    setVisitedPanels(panels => panels.includes(tab) ? panels : [...panels, tab]);
+    if (detailScroll.current) detailScroll.current.scrollTop = 0;
+  }, [tab]);
+
+  useEffect(() => {
+    if (!revealReview || tab !== 'reviews') return;
+    const panel = detailScroll.current;
+    const report = panel?.querySelector<HTMLElement>('#workspace-review-detail');
+    if (!panel || !report) return;
+    panel.scrollTop += report.getBoundingClientRect().top - panel.getBoundingClientRect().top - 16;
+    setRevealReview(false);
+  }, [revealReview, tab, task?.id, selectedJobId, jobs]);
+
+  useEffect(() => {
+    if (tab !== 'overview' || !task || linkedChild || accessDenied) return;
+    let current = true;
+    void api<{ chain: DeliveryChain }>(`tasks/${encodeURIComponent(taskId)}/chain`)
+      .then(result => { if (current) setOverviewChain(result.chain); })
+      .catch(error => {
+        if (!current) return;
+        if (error instanceof ApiError && error.status === 401) onUnauthorized();
+        if (error instanceof ApiError && error.status === 403) handleForbidden();
+      });
+    return () => { current = false; };
+  }, [tab, taskId, task?.version, assets.length, jobs, refreshTick, linkedChild, accessDenied]);
 
   const children = tasks.filter(item => item.parentId === taskId);
-  const doneAncestor = (() => {
-    const seen = new Set<string>(); let parent = tasks.find(item => item.id === task?.parentId);
-    while (parent && !seen.has(parent.id)) {
-      if (parent.status === 'DONE') return parent;
-      seen.add(parent.id); parent = tasks.find(item => item.id === parent?.parentId);
-    }
-    return undefined;
-  })();
+  const ancestors: WorkTask[] = [];
+  const seen = new Set([taskId]);
+  const directParent = tasks.find(item => item.id === task?.parentId) ||
+    (jiraChild && !task?.parentId ? tasks.find(item => item.projectId === task?.projectId && item.jiraKey === task?.externalRef?.parentKey) : undefined);
+  for (let parent = directParent; parent && !seen.has(parent.id); parent = tasks.find(item => item.id === parent?.parentId)) {
+    ancestors.push(parent);
+    seen.add(parent.id);
+  }
+  const mainTask = ancestors[ancestors.length - 1];
+  const doneAncestor = ancestors.find(parent => parent.status === 'DONE');
 
   const canAssign = permissions.assignTasks;
   const canEdit = canAssign || task?.assigneeId === user.id;
   const canClaim = !!task && task.status !== 'DONE' && !task.assigneeId && !doneAncestor;
-  const allowedKinds = (Object.keys(ASSET_ROLES) as AssetKind[]).filter(value => ASSET_ROLES[value].includes(role));
+  const allowedKinds = jiraChild ? [] : (Object.keys(ASSET_ROLES) as AssetKind[]).filter(value => ASSET_ROLES[value].includes(role));
   const latestAssets = assets.filter(asset => allowedKinds.includes(asset.kind) && !assets.some(other => other.kind === asset.kind && other.logicalKey === asset.logicalKey && other.revision > asset.revision));
   const assetBasis = assets.find(asset => asset.id === assetBasisId && allowedKinds.includes(asset.kind));
   const assetChoices = assetBasis && !latestAssets.some(asset => asset.id === assetBasis.id) ? [assetBasis, ...latestAssets] : latestAssets;
-  const allowedStages = STAGES.filter(value => REVIEW_ROLES[value.value].includes(role));
-  const allowedReviewStages = REVIEW_STAGE_OPTIONS.filter(value => REVIEW_ROLES[value.value].includes(role));
-  const canComplete = gates?.overall === 'PASS' && children.every(item => item.status === 'DONE');
+  const canReviewStage = (stage: Stage) => !!task && requiresTaskReview(task, stage) && REVIEW_ROLES[stage]?.includes(role);
+  const allowedStages = STAGES.filter(value => canReviewStage(value.value));
+  const allowedReviewStages = REVIEW_STAGE_OPTIONS.filter(value => canReviewStage(value.value));
+  const canComplete = linkedChild || gates?.overall === 'PASS';
   const inputsFrozen = task?.status === 'DONE' || !!doneAncestor;
 
   useEffect(() => { setLocalWorkflowOpen(false); setEditingTitle(false); }, [taskId, user.id, role, canEdit, inputsFrozen]);
-  const selectedJob = jobs.find(job => job.id === selectedJobId && job.taskId === taskId && job.projectId === task?.projectId);
+  useEffect(() => { setActiveChainStage(focusStage); }, [taskId, focusStage]);
+  const taskJobs = jobs.filter(job => job.taskId === taskId && job.projectId === task?.projectId);
+  const activeTaskJobs = taskJobs.filter(job => job.reviewRequired !== false && task && requiresTaskReview(task, job.stage));
+  const currentTaskReviews = currentAiReviews(activeTaskJobs);
+  const selectedJob = taskJobs.find(job => job.id === selectedJobId) || currentTaskReviews[0];
+  const selectedHistoricalReview = !!selectedJob && !currentTaskReviews.some(job => job.id === selectedJob.id);
+  const visibleReviewJobs = linkedChild ? taskJobs : currentTaskReviews;
+
+  const canImportFrom = (provider: ConnectorSummary['provider']) =>
+    canImportTaskMaterial(connectors.find(item => item.provider === provider), permissions.manageConnections, user.role === 'ADMIN');
+  const canImportCodeup = canImportFrom('yunxiao');
 
   const loadSupplementary = (projectId: string, currentTaskId: string, seq: number) => {
     void Promise.allSettled([
@@ -201,12 +276,14 @@ export const WorkTaskDetail: React.FC<{
       api<{ repositories: LocalGitRepo[] }>('local-git/repositories'),
       api<ProjectGitStatus>(`projects/${encodeURIComponent(projectId)}/git-status`),
       api<{ runs: LocalAiRun[] }>(`tasks/${encodeURIComponent(currentTaskId)}/ai-runs`),
-    ]).then(([connRes, repoRes, gitRes, runRes]) => {
+      api<{ config: CloudAiConfig | null }>(`projects/${encodeURIComponent(projectId)}/cloud-ai`),
+    ]).then(([connRes, repoRes, gitRes, runRes, cloudRes]) => {
       if (accessLost.current || !mounted.current || seq !== refreshSequence.current) return;
       if (connRes.status === 'fulfilled') setConnectors(connRes.value.connectors || []);
       if (repoRes.status === 'fulfilled') setRepositories(repoRes.value.repositories || []);
       if (gitRes.status === 'fulfilled') setGitStatus(gitRes.value);
       if (runRes.status === 'fulfilled') setAiRuns(runRes.value.runs || []);
+      if (cloudRes.status === 'fulfilled') setCloudAiConfig(cloudRes.value.config || null);
     });
   };
 
@@ -229,7 +306,7 @@ export const WorkTaskDetail: React.FC<{
     catch (error) {
       if (accessLost.current || !mounted.current || sequence !== actionSequence.current) return;
       void message.error(error instanceof Error ? error.message : '请求失败。');
-      if (error instanceof ApiError && error.status === 403) handleForbidden();
+      if (error instanceof ApiError && error.status === 403 && !['CONNECTOR_FORBIDDEN', 'ACCOUNT_FORBIDDEN'].includes(error.code || '')) handleForbidden();
       else if (error instanceof ApiError && error.status === 401) { clearSensitiveState(); onUnauthorized(); }
     } finally { if (mutation) actionInFlight.current = false; if (mounted.current && !accessLost.current && sequence === actionSequence.current) setBusy(false); }
   };
@@ -239,7 +316,14 @@ export const WorkTaskDetail: React.FC<{
     return () => { mounted.current = false; refreshSequence.current += 1; actionSequence.current += 1; stopActivity.current?.(); };
   }, []);
 
+  const prevRefreshTick = useRef(refreshTick);
   useEffect(() => { void run(refresh); }, [taskId]);
+  useEffect(() => {
+    if (prevRefreshTick.current !== refreshTick) {
+      prevRefreshTick.current = refreshTick;
+      if (refreshTick) void run(refresh);
+    }
+  }, [refreshTick]);
 
   useEffect(() => {
     if (task && drawer !== 'task') taskForm.setFieldsValue({ title: task.title, status: task.status, assigneeId: task.assigneeId || '' });
@@ -309,6 +393,8 @@ export const WorkTaskDetail: React.FC<{
     setGitSourceMode('auto');
     setGitCommitSha('');
     setGitTitle('');
+    setApiSpecTitle('');
+    setApiSpecResult(null);
     assetForm.resetFields();
     if (options?.template) {
       const tpl = buildAssetTemplate(chosenKind, task, context?.workspace?.repoPath);
@@ -336,13 +422,19 @@ export const WorkTaskDetail: React.FC<{
       openAssetDrawer({ mode: 'manual' });
       return;
     }
+    if (!allowedReviewStages.length) return;
     const defaultStage =
       (preferredStage && allowedReviewStages.some(item => item.value === preferredStage) ? preferredStage : undefined) ||
       allowedStages.find(item => gates?.gates.find(g => g.stage === item.value)?.status !== 'PASS' && assets.some(a => a.kind === STAGE_ASSET[item.value]))?.value ||
       allowedStages.find(item => gates?.gates.find(g => g.stage === item.value)?.status !== 'PASS')?.value ||
       allowedStages[0]?.value;
     reviewForm.resetFields();
-    reviewForm.setFieldsValue({ stage: defaultStage, executionMode: 'LOCAL_REPORT' });
+    const useCloudDefault = !!(defaultStage && cloudAiConfig?.enabled && cloudAiConfig.autoStages.includes(defaultStage));
+    reviewForm.setFieldsValue({
+      stage: defaultStage,
+      executionMode: useCloudDefault ? 'CLOUD_AI' : 'LOCAL_REPORT',
+      autoExecute: useCloudDefault,
+    });
     setDrawer('review');
   };
 
@@ -350,7 +442,7 @@ export const WorkTaskDetail: React.FC<{
     if (drawer === 'task' && (!canEdit || doneAncestor) ||
         drawer === 'asset' && (inputsFrozen || !allowedKinds.length) ||
         drawer === 'review' && (inputsFrozen || !allowedReviewStages.some(item => item.value === reviewForm.getFieldValue('stage')))) closeDrawer();
-  }, [drawer, role, permissions.assignTasks, task?.assigneeId, inputsFrozen]);
+  }, [drawer, role, permissions.assignTasks, task?.assigneeId, task?.parentId, task?.externalRef?.provider, inputsFrozen]);
 
   const claimTaskNow = () => {
     if (!task || !canClaim) return;
@@ -363,7 +455,7 @@ export const WorkTaskDetail: React.FC<{
   };
 
   useEffect(() => {
-    if (!canClaim || busy || drawer || localWorkflowOpen || editingTitle) return;
+    if (embedded || !canClaim || busy || drawer || localWorkflowOpen || editingTitle) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key.toLowerCase() === 'i' && !event.metaKey && !event.ctrlKey && !event.altKey && !isEditableTarget(event.target)) {
         event.preventDefault();
@@ -372,7 +464,7 @@ export const WorkTaskDetail: React.FC<{
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [canClaim, busy, drawer, localWorkflowOpen, editingTitle, task?.version]);
+  }, [embedded, canClaim, busy, drawer, localWorkflowOpen, editingTitle, task?.version]);
 
   const completeTaskNow = () => {
     if (!task || !canComplete || task.status === 'DONE' || !canEdit || doneAncestor) return;
@@ -433,6 +525,15 @@ export const WorkTaskDetail: React.FC<{
     setDrawer('asset');
   };
 
+  const updateImportReference = (value: string) => {
+    setLinkInput(value);
+    const info = detectPastedReference(value);
+    setLinkKind(current => info.suggestedKinds.includes(current)
+      ? current
+      : info.suggestedKinds.find(kind => allowedKinds.includes(kind)) || current);
+    return info;
+  };
+
   const pasteClipboardLink = async () => {
     try {
       const text = (await navigator.clipboard.readText()).trim();
@@ -440,11 +541,7 @@ export const WorkTaskDetail: React.FC<{
         void message.warning('当前剪贴板为空，请先复制链接或 Jira 事项号。');
         return;
       }
-      setLinkInput(text);
-      const info = detectPastedReference(text);
-      const validSuggested = info.suggestedKinds.find(k => allowedKinds.includes(k));
-      if (validSuggested) setLinkKind(validSuggested);
-      if (info.provider) void message.success(`已从剪贴板识别：${info.label}，按回车或点击右下角即可拉取保存。`);
+      updateImportReference(text);
     } catch {
       void message.warning('浏览器未能直接读取剪贴板，请在输入框按 Cmd/Ctrl + V 粘贴。');
     }
@@ -476,9 +573,8 @@ export const WorkTaskDetail: React.FC<{
   };
 
   const loadCodeupMrs = async () => {
-    if (!task || loadingCodeupMrs) return;
+    if (!task || loadingCodeupMrs || !canImportCodeup) return;
     const yunxiaoConn = connectors.find(item => item.provider === 'yunxiao');
-    if (yunxiaoConn && yunxiaoConn.status === 'UNCONFIGURED' && !yunxiaoConn.localProfileAvailable) return;
     setLoadingCodeupMrs(true);
     try {
       if (yunxiaoConn?.status === 'UNCONFIGURED' && yunxiaoConn.localProfileAvailable && user.role === 'ADMIN' && permissions.manageConnections) {
@@ -495,7 +591,7 @@ export const WorkTaskDetail: React.FC<{
   };
 
   const importCodeupMrAsCode = (mr: CodeupMrItem) => {
-    if (!task || inputsFrozen || !allowedKinds.includes('CODE')) return;
+    if (!task || inputsFrozen || !allowedKinds.includes('CODE') || !canImportCodeup) return;
     const yunxiaoConn = connectors.find(item => item.provider === 'yunxiao');
     void run(async () => {
       const res = await api<{ imported: boolean; asset: Asset }>('connectors/yunxiao/import', {
@@ -515,12 +611,12 @@ export const WorkTaskDetail: React.FC<{
   };
 
   const importReferenceAsAsset = (params: {
-    provider: 'confluence' | 'gitlab' | 'jenkins' | 'jira' | 'yunxiao';
+    provider: ConnectorSummary['provider'];
     url?: string;
     issueKey?: string;
     kind: AssetKind;
   }) => {
-    if (!task || inputsFrozen || !allowedKinds.includes(params.kind)) return;
+    if (!task || inputsFrozen || !allowedKinds.includes(params.kind) || !canImportFrom(params.provider)) return;
     void run(async () => {
       let connector = connectors.find(item => item.provider === params.provider);
       if ((!connector || connector.status === 'UNCONFIGURED') && connector?.localProfileAvailable && user.role === 'ADMIN' && permissions.manageConnections) {
@@ -618,6 +714,47 @@ export const WorkTaskDetail: React.FC<{
     }, true);
   };
 
+  const importApiSpecAsset = () => {
+    if (!task || inputsFrozen || !allowedKinds.includes('TECH_SPEC')) return;
+    const payload: Record<string, unknown> = {
+      logicalKey: 'api-contract',
+      ...(apiSpecTitle.trim() ? { title: apiSpecTitle.trim() } : {}),
+    };
+    if (apiSpecSource === 'paste') {
+      if (!apiSpecContent.trim()) {
+        void message.warning('请先粘贴 OpenAPI 3.x / Swagger 2.0 / Apifox JSON 或 YAML 接口文档。');
+        return;
+      }
+      payload.content = apiSpecContent;
+    } else if (apiSpecSource === 'url') {
+      if (!apiSpecUrl.trim()) {
+        void message.warning('请输入可访问的 OpenAPI / Swagger 文档 URL。');
+        return;
+      }
+      payload.sourceUrl = apiSpecUrl.trim();
+      if (apiSpecToken.trim()) payload.token = apiSpecToken.trim();
+    } else {
+      if (!apifoxProjectId.trim() || !apifoxToken.trim()) {
+        void message.warning('请填写 Apifox 项目 ID 与访问令牌（Access Token）。');
+        return;
+      }
+      payload.apifoxProjectId = apifoxProjectId.trim();
+      payload.apifoxToken = apifoxToken.trim();
+    }
+    void run(async () => {
+      const res = await api<ApiSpecImportResult>(`tasks/${encodeURIComponent(task.id)}/assets/import-api-spec`, payload);
+      if (accessLost.current || !mounted.current) return;
+      setApiSpecResult(res);
+      const crit = res.findings.filter(f => f.severity === 'CRITICAL').length;
+      const warn = res.findings.filter(f => f.severity === 'WARN').length;
+      void message.success(
+        `已导入 ${res.specSummary.endpointCount} 个接口并保存为${assetKindLabel('TECH_SPEC')} r${res.asset.revision}`
+        + (res.findings.length ? `（契约预检：阻断 ${crit} / 风险 ${warn}）` : '（未发现契约异常）'),
+      );
+      await changed();
+    }, true);
+  };
+
   const saveTask = (values: TaskDraft) => {
     if (!task || !canEdit || doneAncestor) return;
     void run(async () => {
@@ -638,12 +775,28 @@ export const WorkTaskDetail: React.FC<{
     }, true);
   };
   const createReview = (values: ReviewDraft) => {
-    if (!task || inputsFrozen || !REVIEW_ROLES[values.stage]?.includes(role)) return;
+    if (!task || inputsFrozen || !canReviewStage(values.stage)) return;
     void run(async () => {
-      const result = await api<{ job: ReviewJob }>('reviews', { taskId, ...values });
+      const result = await api<{ job: ReviewJob }>('reviews', {
+        taskId,
+        stage: values.stage,
+        executionMode: values.executionMode,
+      });
       if (accessLost.current || !mounted.current) return;
       setJobs(current => [result.job, ...current.filter(job => job.id !== result.job.id)]); setGates(null);
-      closeDrawer(); openReview(result.job.id); void message.success('评审申请已创建，等待提交报告。');
+      closeDrawer(); openReview(result.job.id);
+      if (values.executionMode === 'CLOUD_AI' && values.autoExecute && cloudAiConfig?.enabled) {
+        try {
+          const exec = await api<{ job: ReviewJob }>(`jobs/${encodeURIComponent(result.job.id)}/cloud-execute`, {});
+          if (accessLost.current || !mounted.current) return;
+          setJobs(current => [exec.job, ...current.filter(job => job.id !== exec.job.id)]);
+          void message.success('已创建评审任务并完成云端 AI 自动评审。');
+        } catch (err) {
+          void message.warning(`评审申请已创建，但云端 AI 执行失败：${err instanceof Error ? err.message : '请稍后在详情内重试'}`);
+        }
+      } else {
+        void message.success('评审申请已创建，等待提交报告。');
+      }
       await changed();
     }, true);
   };
@@ -718,23 +871,20 @@ export const WorkTaskDetail: React.FC<{
     return true;
   };
 
-  const childColumns: TableColumnsType<WorkTask> = [
-    { title: '子任务', key: 'title', render: (_, item) => <div className="tf-table-title"><Button type="link" size="small" onClick={() => onOpenTask(item.id)}>{item.jiraKey}</Button><Typography.Text className="tf-break">{item.title}</Typography.Text></div> },
-    { title: '本地受理人', width: 140, render: (_, item) => memberName(members, item.assigneeId) },
-    { title: '本地状态', width: 140, render: (_, item) => <StatusBadge variant={item.status === 'DONE' ? 'green' : 'neutral'}>{taskStatusLabel(item.status)}</StatusBadge> },
-  ];
   if (accessDenied) return null;
   if (!task) return <Card title="任务详情"><Skeleton active loading={busy} />{!busy && <Empty><Space orientation="vertical"><span>任务尚未加载，请返回列表或重试。</span><Button onClick={() => void run(refresh)}>重试</Button></Space></Empty>}</Card>;
 
   const jira = task.externalRef;
   const boundRepoPath = context?.workspace?.repoPath || gitStatus?.repoPath || null;
   const smartHints = extractTaskSmartHints(task, repositories);
+  const jiraParentReference = smartHints.relatedJira.find(item => item.relation === 'parent');
+  const mainTaskId = mainTask?.id || task.parentId;
   const hasAssetKind = (k: AssetKind) => assets.some(a => a.kind === k);
   const gateFor = (s: Stage) => gates?.gates.find(g => g.stage === s);
 
   // Compute recommended 1-click next action(s) across the 7-step delivery flow
 
-  const hasSmartSuggestions = !inputsFrozen && (
+  const hasSmartSuggestions = !jiraChild && !inputsFrozen && (
     smartHints.detectedLinks.length > 0 ||
     smartHints.relatedJira.length > 0 ||
     (!boundRepoPath && smartHints.matchedRepos.length > 0) ||
@@ -750,6 +900,7 @@ export const WorkTaskDetail: React.FC<{
       showRepos={!boundRepoPath}
       showSelfPrd={!!jira && !hasAssetKind('PRD') && allowedKinds.includes('PRD')}
       hasAssetKind={hasAssetKind}
+      canImportFrom={canImportFrom}
       onBindRepo={bindRepoQuick}
       onOpenRepo={(app, path) => void openRepoInApp(app, path)}
       onImport={importReferenceAsAsset}
@@ -769,8 +920,16 @@ export const WorkTaskDetail: React.FC<{
     ...(jira.fixVersions?.length ? [{ key: 'versions', label: '修复版本', children: jira.fixVersions.map(item => item.name).join(' · ') }] : []),
     ...(jira.labels?.length ? [{ key: 'labels', label: '标签', span: 2, children: jira.labels.join(' · ') }] : []),
   ] : [];
+  const embeddedSourceItems = sourceItems.filter(item => ['priority', 'assignee', 'components', 'versions', 'labels'].includes(String(item.key)));
 
   const detectedPaste = detectPastedReference(linkInput);
+  const canImportPasted = detectedPaste.provider !== null && canImportFrom(detectedPaste.provider) &&
+    detectedPaste.suggestedKinds.includes(linkKind);
+  const shortcutLinks = smartHints.detectedLinks.filter(link => link.provider !== 'external' &&
+    canImportFrom(link.provider) && link.suggestedKinds.includes(linkKind));
+  const shortcutJira = linkKind === 'PRD' && canImportFrom('jira')
+    ? smartHints.relatedJira.filter(issue => issue.sameProject)
+    : [];
 
   const taskEditor = <Form form={taskForm} layout="vertical" onFinish={saveTask} className="tf-form-width" disabled={busy} scrollToFirstError>
     <Form.Item name="title" label="任务标题" htmlFor="task-edit-title" rules={[{ required: true, whitespace: true, message: '请填写任务标题' }]}><Input id="task-edit-title" maxLength={200} disabled={!canEdit || busy || inputsFrozen} /></Form.Item>
@@ -788,8 +947,9 @@ export const WorkTaskDetail: React.FC<{
         block
         value={assetInputMode}
         options={[
-          { value: 'link', label: '粘贴链接一键导入' },
-          ...(allowedKinds.includes('CODE') ? [{ value: 'git' as const, label: '云效 Codeup / 本地 Git 代码' }] : []),
+          { value: 'link', label: '粘贴链接导入' },
+          ...(allowedKinds.includes('CODE') ? [{ value: 'git' as const, label: canImportCodeup ? '云效 Codeup / 本地 Git' : '本地 Git 代码' }] : []),
+          ...(allowedKinds.includes('TECH_SPEC') ? [{ value: 'openapi' as const, label: 'OpenAPI / Apifox 接口' }] : []),
           { value: 'manual', label: '结构模板 / 手动录入' },
         ]}
         onChange={val => {
@@ -811,16 +971,10 @@ export const WorkTaskDetail: React.FC<{
                 placeholder="例如 https://confluence.example.invalid/x/0gQ 、 https://codeup.aliyun.com/.../change/42 或 DEMO-778"
                 allowClear
                 value={linkInput}
-                onChange={e => {
-                  const next = e.target.value;
-                  setLinkInput(next);
-                  const info = detectPastedReference(next);
-                  const validSuggested = info.suggestedKinds.find(k => allowedKinds.includes(k));
-                  if (validSuggested) setLinkKind(validSuggested);
-                }}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && detectedPaste.provider && !busy) {
-                    e.preventDefault();
+                onChange={event => updateImportReference(event.target.value)}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && canImportPasted && !busy) {
+                    event.preventDefault();
                     assetDrawerPrimaryAction();
                   }
                 }}
@@ -835,51 +989,37 @@ export const WorkTaskDetail: React.FC<{
             <Select
               style={{ width: '100%' }}
               value={linkKind}
-              options={allowedKinds.map(k => ({ value: k, label: assetKindLabel(k) }))}
+              options={allowedKinds.filter(kind => !detectedPaste.provider || detectedPaste.suggestedKinds.includes(kind))
+                .map(kind => ({ value: kind, label: assetKindLabel(kind) }))}
               onChange={setLinkKind}
             />
           </div>
-          {detectedPaste.provider && (
-            <Alert
-              type="success"
-              showIcon
-              title={`已识别来源：${detectedPaste.label}（${detectedPaste.provider.toUpperCase()}）`}
-              description="按回车或点击右下角「一键拉取并保存」即可直接导入，无需跳转平台连接页面。"
-            />
+          {detectedPaste.provider && !canImportFrom(detectedPaste.provider) && (
+            <Flex gap={8} align="center" wrap>
+              <Typography.Text type="secondary">当前账号无法通过已选连接读取此来源。</Typography.Text>
+              {detectedPaste.url && <Typography.Link href={detectedPaste.url} target="_blank" rel="noopener noreferrer">查看原文</Typography.Link>}
+              <Button type="link" size="small" onClick={() => {
+                assetForm.setFieldsValue({ kind: linkKind, sourceUrl: detectedPaste.url || '' });
+                setAssetInputMode('manual');
+              }}>手动录入</Button>
+            </Flex>
           )}
-          {(smartHints.detectedLinks.length > 0 || smartHints.relatedJira.some(r => r.sameProject)) && (
-            <Card size="small" title="从任务描述中识别到的快捷来源（点击直接拉取保存）">
+          {(shortcutLinks.length > 0 || shortcutJira.length > 0) && (
+            <Card size="small" title="可导入的关联来源">
               <Space wrap size={[8, 8]}>
-                {smartHints.detectedLinks.filter(l => l.provider !== 'external').map(l => {
-                  const targetKind = l.suggestedKinds.find(x => allowedKinds.includes(x)) || linkKind;
-                  return (
-                    <Button
-                      key={l.url}
-                      size="small"
-                      disabled={busy}
-                      onClick={() => importReferenceAsAsset({
-                        provider: l.provider as 'confluence' | 'gitlab' | 'jenkins' | 'jira' | 'yunxiao',
-                        url: l.url,
-                        kind: targetKind,
-                      })}
-                    >
-                      直接导入 {l.label}（{assetKindLabel(targetKind)}）
-                    </Button>
-                  );
-                })}
-                {smartHints.relatedJira.filter(r => r.sameProject).map(r => {
-                  const targetKind: AssetKind = allowedKinds.includes('PRD') ? 'PRD' : linkKind;
-                  return (
-                    <Button
-                      key={r.key}
-                      size="small"
-                      disabled={busy}
-                      onClick={() => importReferenceAsAsset({ provider: 'jira', issueKey: r.key, kind: targetKind })}
-                    >
-                      直接导入 Jira {r.key}（{assetKindLabel(targetKind)}）
-                    </Button>
-                  );
-                })}
+                {shortcutLinks.map(link => (
+                  <Button key={link.url} size="small" disabled={busy} onClick={() => {
+                    if (link.provider === 'external') return;
+                    importReferenceAsAsset({ provider: link.provider, url: link.url, issueKey: link.issueKey, kind: linkKind });
+                  }}>
+                    导入 {link.label}
+                  </Button>
+                ))}
+                {shortcutJira.map(issue => (
+                  <Button key={issue.key} size="small" disabled={busy} onClick={() => importReferenceAsAsset({ provider: 'jira', issueKey: issue.key, kind: linkKind })}>
+                    导入 Jira {issue.key}
+                  </Button>
+                ))}
               </Space>
             </Card>
           )}
@@ -888,10 +1028,7 @@ export const WorkTaskDetail: React.FC<{
 
       {assetInputMode === 'git' && (
         <Flex vertical gap={12} className="tf-form-width">
-          <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            支持直接用你的云效账号一键拉取 Codeup 合并请求 Diff，或从本机 Git 仓库提取工作区改动作为代码改动评审材料。
-          </Typography.Paragraph>
-          <Card
+          {canImportCodeup && <Card
             size="small"
             title={<Space size={6}><GitBranch size={15} /><span>方式 A：从云效 Codeup 选择合并请求一键导入（免终端、免桌面权限）</span></Space>}
             extra={<Button size="small" loading={loadingCodeupMrs} onClick={() => void loadCodeupMrs()}>刷新 MR</Button>}
@@ -943,7 +1080,7 @@ export const WorkTaskDetail: React.FC<{
                 {loadingCodeupMrs ? '正在读取云效 Codeup 最近合并请求…' : '点击右上角「刷新 MR」读取云效 Codeup 合并请求，或切到「粘贴链接一键导入」直接粘贴 Codeup MR/Commit 链接。'}
               </Typography.Text>
             )}
-          </Card>
+          </Card>}
           {repositories.length > 0 && (
             <div>
               <Typography.Text style={{ display: 'block', marginBottom: 6 }}>绑定 / 切换项目本地 Git 仓库</Typography.Text>
@@ -1030,6 +1167,109 @@ export const WorkTaskDetail: React.FC<{
         </Flex>
       )}
 
+      {assetInputMode === 'openapi' && (
+        <Flex vertical gap={12}>
+          <Alert
+            type="info"
+            showIcon
+            title="结构化导入接口契约（OpenAPI 3.x / Swagger 2.0 / Apifox）"
+            description="解析所有端点、鉴权、参数与响应 Schema，并自动对照历史版本检测破坏性变更与安全规范问题（保存为技术方案 · api-contract）。"
+          />
+          <Segmented
+            value={apiSpecSource}
+            onChange={v => setApiSpecSource(v as 'paste' | 'url' | 'apifox')}
+            options={[
+              { value: 'paste', label: '粘贴 JSON / YAML' },
+              { value: 'url', label: 'Swagger / OpenAPI URL' },
+              { value: 'apifox', label: 'Apifox 项目导出' },
+            ]}
+          />
+          <div>
+            <Typography.Text style={{ display: 'block', marginBottom: 6 }}>自定义标题（可选）</Typography.Text>
+            <Input
+              placeholder="留空自动使用规范中的 info.title 与版本"
+              value={apiSpecTitle}
+              onChange={e => setApiSpecTitle(e.target.value)}
+              maxLength={200}
+            />
+          </div>
+          {apiSpecSource === 'paste' && (
+            <div>
+              <Typography.Text style={{ display: 'block', marginBottom: 6 }}>OpenAPI / Swagger / Apifox 文档内容（上限 256KB）</Typography.Text>
+              <Input.TextArea
+                rows={9}
+                value={apiSpecContent}
+                onChange={e => setApiSpecContent(e.target.value)}
+                placeholder={'{\n  "openapi": "3.0.3",\n  "info": { "title": "Order Service API", "version": "1.2.0" },\n  "paths": { ... }\n}'}
+              />
+            </div>
+          )}
+          {apiSpecSource === 'url' && (
+            <>
+              <div>
+                <Typography.Text style={{ display: 'block', marginBottom: 6 }}>OpenAPI / Swagger JSON 或 YAML URL</Typography.Text>
+                <Input
+                  placeholder="https://api.example.com/v3/api-docs"
+                  value={apiSpecUrl}
+                  onChange={e => setApiSpecUrl(e.target.value)}
+                  maxLength={1000}
+                />
+              </div>
+              <div>
+                <Typography.Text style={{ display: 'block', marginBottom: 6 }}>Bearer Token（可选，私有文档地址时填写）</Typography.Text>
+                <Input.Password
+                  placeholder="可选，拉取时附带 Authorization: Bearer ..."
+                  value={apiSpecToken}
+                  onChange={e => setApiSpecToken(e.target.value)}
+                  maxLength={1024}
+                />
+              </div>
+            </>
+          )}
+          {apiSpecSource === 'apifox' && (
+            <>
+              <div>
+                <Typography.Text style={{ display: 'block', marginBottom: 6 }}>Apifox 项目 ID</Typography.Text>
+                <Input
+                  placeholder="例如：4812903"
+                  value={apifoxProjectId}
+                  onChange={e => setApifoxProjectId(e.target.value)}
+                  maxLength={64}
+                />
+              </div>
+              <div>
+                <Typography.Text style={{ display: 'block', marginBottom: 6 }}>Apifox Access Token</Typography.Text>
+                <Input.Password
+                  placeholder="在 Apifox 账号设置 -> API 访问令牌中生成"
+                  value={apifoxToken}
+                  onChange={e => setApifoxToken(e.target.value)}
+                  maxLength={1024}
+                />
+              </div>
+            </>
+          )}
+          {apiSpecResult && (
+            <Alert
+              type={apiSpecResult.findings.some(f => f.severity === 'CRITICAL') ? 'error' : apiSpecResult.findings.length ? 'warning' : 'success'}
+              showIcon
+              title={`已保存 ${apiSpecResult.specSummary.title} v${apiSpecResult.specSummary.version}（r${apiSpecResult.asset.revision} · 共 ${apiSpecResult.specSummary.endpointCount} 个接口 · ${apiSpecResult.findings.length} 条预检）`}
+              description={
+                apiSpecResult.findings.length > 0 ? (
+                  <Flex vertical gap={4} style={{ marginTop: 6 }}>
+                    {apiSpecResult.findings.slice(0, 8).map((f, idx) => (
+                      <Typography.Text key={`${f.title}-${idx}`} style={{ fontSize: 12 }}>
+                        <Tag color={f.severity === 'CRITICAL' ? 'error' : f.severity === 'WARN' ? 'warning' : 'blue'}>{f.severity}</Tag>
+                        {f.title}{f.location ? ` (${f.location})` : ''}
+                      </Typography.Text>
+                    ))}
+                  </Flex>
+                ) : '所有接口均满足基础安全、错误码与契约规范。'
+              }
+            />
+          )}
+        </Flex>
+      )}
+
       {assetInputMode === 'manual' && (
         <>
           <Flex justify="space-between" align="center" gap={8} wrap>
@@ -1084,12 +1324,21 @@ export const WorkTaskDetail: React.FC<{
   </Flex>;
 
   const reviewEditor = <>
-    <Form form={reviewForm} layout="vertical" onFinish={createReview} className="tf-form-width" initialValues={{ stage: allowedStages[0]?.value, executionMode: 'LOCAL_REPORT' }} disabled={busy || inputsFrozen}>
+    <Form form={reviewForm} layout="vertical" onFinish={createReview} className="tf-form-width" initialValues={{ stage: allowedStages[0]?.value, executionMode: 'LOCAL_REPORT', autoExecute: true }} disabled={busy || inputsFrozen}>
       <div className="tf-form-grid">
-        <Form.Item name="stage" label="评审阶段" htmlFor="review-stage" rules={[{ required: true, message: '请选择评审阶段' }]}><Select id="review-stage" options={REVIEW_STAGE_OPTIONS.map(item => ({ value: item.value, label: item.label, disabled: !REVIEW_ROLES[item.value].includes(role) }))} disabled={!allowedStages.length || busy || inputsFrozen} /></Form.Item>
-        <Form.Item name="executionMode" label="执行方式" htmlFor="review-mode" rules={[{ required: true }]}><Select id="review-mode" options={[{ value: 'LOCAL_REPORT', label: executionModeLabel('LOCAL_REPORT') }, { value: 'HUMAN_REVIEW', label: executionModeLabel('HUMAN_REVIEW') }, { value: 'CLOUD_AI', label: executionModeLabel('CLOUD_AI') + '（暂未开放）', disabled: true }]} /></Form.Item>
+        <Form.Item name="stage" label="评审阶段" htmlFor="review-stage" rules={[{ required: true, message: '请选择评审阶段' }]}><Select id="review-stage" options={REVIEW_STAGE_OPTIONS.map(item => ({ value: item.value, label: item.label, disabled: !canReviewStage(item.value) }))} disabled={!allowedStages.length || busy || inputsFrozen} /></Form.Item>
+        <Form.Item name="executionMode" label="执行方式" htmlFor="review-mode" rules={[{ required: true }]}><Select id="review-mode" options={[
+          { value: 'CLOUD_AI', label: executionModeLabel('CLOUD_AI', !!cloudAiConfig?.enabled) + (cloudAiConfig?.enabled ? `（${cloudAiConfig.name}）` : ''), disabled: !cloudAiConfig?.enabled },
+          { value: 'LOCAL_REPORT', label: executionModeLabel('LOCAL_REPORT') },
+          { value: 'HUMAN_REVIEW', label: executionModeLabel('HUMAN_REVIEW') },
+        ]} /></Form.Item>
       </div>
-      <Typography.Paragraph type="secondary">申请会冻结当前资产版本、角色与 Skills 声明。也可直接在任务顶部点击「一键 AI 评审」自动创建申请并生成结构化草稿。</Typography.Paragraph>
+      {watchedReviewMode === 'CLOUD_AI' && cloudAiConfig?.enabled && (
+        <Form.Item name="autoExecute" valuePropName="checked" style={{ marginBottom: 8 }}>
+          <Checkbox>创建后立即运行确定性规则预检并调用云端 AI 生成评审报告</Checkbox>
+        </Form.Item>
+      )}
+      <Typography.Paragraph type="secondary">申请会冻结当前资产版本、角色与 Skills 声明。{cloudAiConfig?.enabled ? '项目已接入云端 AI 执行器，支持服务端全自动预检与 AI 评审；' : ''}也可在任务顶部点击「一键 AI 评审」由本机工作区生成草稿。</Typography.Paragraph>
     </Form>
   </>;
 
@@ -1099,113 +1348,76 @@ export const WorkTaskDetail: React.FC<{
   };
   const passedGateCount = gates?.gates.filter(gate => gate.status === 'PASS').length || 0;
 
-  const openDecompose = () => { setDecomposeEverOpened(true); setDecomposeOpen(true); };
-  const jiraDescription = jira ? (typeof jira.description === 'string' ? jira.description.trim() : jira.description ? JSON.stringify(jira.description, null, 2) : '') : '';
-  const doneChildren = children.filter(item => item.status === 'DONE').length;
-
-  const overview = <div className="tf-detail-stack">
-    {doneAncestor && <Alert type="info" showIcon title={<>上级任务 <Button type="link" size="small" style={{ paddingInline: 2 }} onClick={() => onOpenTask(doneAncestor.id)}>{doneAncestor.jiraKey}</Button> 已完成并冻结，需先重开上级任务才能修改此任务。</>} />}
-    {task.status === 'DONE' && <Alert type="info" showIcon title="任务已完成，可查看历史；需先重开才能新增材料、评审或重新认领。" />}
-    {jira && <Card
-      title={<Space size={8} wrap><span>需求描述</span><Typography.Text type="secondary" className="tf-card-subtitle">来自 Jira {jira.key} · {jira.status}</Typography.Text></Space>}
-      extra={<Typography.Link href={jira.url} target="_blank" rel="noreferrer"><Space size={4}><ExternalLink size={13} />Jira 原单</Space></Typography.Link>}
-    >
-      <div className="tf-detail-stack tf-detail-stack-small">
-        {jira.title !== task.title && <Typography.Text strong>{jira.title}</Typography.Text>}
-        {jiraDescription ? <pre className="tf-code-panel tf-jira-description">{jiraDescription}</pre> : <Typography.Text type="secondary">Jira 正文为空。</Typography.Text>}
-        <Collapse ghost size="small" className="tf-jira-source" items={[{ key: 'meta', label: 'Jira 字段（优先级、组件、版本等）', children: <Descriptions bordered size="small" column={{ xs: 1, sm: 2 }} items={sourceItems} /> }]} />
-      </div>
-    </Card>}
-    <Card title="基本信息" extra={<Button size="small" disabled={!canEdit || busy || !!doneAncestor} onClick={() => openDrawer('task')}>编辑任务</Button>}>
-      <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
-        { key: 'progress', label: '自报进度', children: <Progress percent={task.progress} size="small" style={{ width: 160, margin: 0 }} /> },
-        { key: 'updated', label: '最近更新', children: timeText(task.updatedAt) },
-        { key: 'repo', label: '本地仓库', span: 2, children: boundRepoPath ? <Space size={8} wrap><Typography.Text code>{boundRepoPath}</Typography.Text>{!!gitStatus?.branch && gitStatus.branch !== 'HEAD' && <Tag icon={<GitBranch size={11} />}>{gitStatus.branch}</Tag>}{!!gitStatus?.constitutionFiles?.length && <Tag color="cyan">工程规范：{gitStatus.constitutionFiles.join(' · ')}</Tag>}</Space> : <Typography.Text type="secondary">未绑定（启动「本地 AI 一键处理」时可选择）</Typography.Text> },
-        ...(task.parentId ? [{ key: 'parent', label: '本地父任务', children: <Button type="link" size="small" style={{ paddingInline: 0 }} onClick={() => onOpenTask(task.parentId!)}>{tasks.find(item => item.id === task.parentId)?.jiraKey || task.parentId}</Button> }] : []),
-        ...(jira?.parentKey ? [{ key: 'jiraParent', label: 'Jira 父任务', children: <Typography.Link href={new URL(encodeURIComponent(jira.parentKey), jira.url).href} target="_blank" rel="noreferrer">{jira.parentKey}</Typography.Link> }] : []),
-        ...(task.lastSummary ? [{ key: 'summary', label: '最新进展', span: 2, children: <span className="tf-preserve">{task.lastSummary}</span> }] : []),
-      ]} />
-    </Card>
-    <Card
-      title={<Space size={8}><span>子任务</span>{children.length > 0 && <Typography.Text type="secondary" className="tf-card-subtitle">{doneChildren} / {children.length} 已完成</Typography.Text>}</Space>}
-      extra={children.length > 0 && !inputsFrozen && <Button size="small" icon={<Sparkles size={14} />} disabled={busy} onClick={openDecompose}>智能拆解 / 批量建子任务</Button>}
-    >
-      {children.length ? <Flex vertical gap={12}>
-        <Progress percent={Math.round(doneChildren / children.length * 100)} size="small" showInfo={false} />
-        <Table<WorkTask> rowKey="id" dataSource={children} columns={childColumns} size="middle" pagination={false} scroll={{ x: 580 }} />
-      </Flex> : <Empty>
-        <Space orientation="vertical" size={8}>
-          <span>暂无子任务。可从需求文档 / 技术方案一键拆解，或套用四步标准研发模板。</span>
-          {!inputsFrozen && <Button size="small" type="primary" ghost icon={<Sparkles size={14} />} disabled={busy} onClick={openDecompose}>智能拆解并创建子任务</Button>}
-        </Space>
-      </Empty>}
-    </Card>
-  </div>;
-
+  const openDecompose = () => {
+    if (jiraParent || linkedChild) return;
+    setDecomposeEverOpened(true); setDecomposeOpen(true);
+  };
+  const jiraDescription = formatJiraDescriptionForDisplay(jira?.description);
+  const jiraDescriptionPreview = jiraDescription ? (
+    <div className="tf-jira-description"><MarkdownPreview content={jiraDescription} /></div>
+  ) : null;
+  const materialActions: MenuProps['items'] = [
+    { key: 'link', label: '粘贴链接导入', disabled: !allowedKinds.length, onClick: () => openAssetDrawer({ mode: 'link' }) },
+    ...(allowedKinds.includes('TECH_SPEC') ? [{ key: 'api', label: '导入 OpenAPI / Apifox', onClick: () => openAssetDrawer({ mode: 'openapi', kind: 'TECH_SPEC' }) }] : []),
+    ...(allowedKinds.includes('CODE') ? [{ key: 'git', label: '提取本地 Git 代码', onClick: () => openAssetDrawer({ mode: 'git', kind: 'CODE' }) }] : []),
+  ];
   const assetPanel = <div className="tf-detail-stack">
-    {smartLinksCard}
-    <Card
-      title="任务材料"
-      extra={<Space size={8} wrap>
-        {allowedKinds.includes('CODE') && <Button icon={<GitBranch size={15} />} disabled={busy || inputsFrozen} onClick={() => openAssetDrawer({ mode: 'git', kind: 'CODE' })}>提取本地 Git 代码</Button>}
-        <Button icon={<Link2 size={15} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => openAssetDrawer({ mode: 'link' })}>粘贴链接导入</Button>
-        <Button type="primary" icon={<FileText size={16} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => openAssetDrawer({ mode: 'manual' })}>添加材料</Button>
+    <div className="tf-task-pane-heading">
+      <Typography.Title level={3}>任务材料</Typography.Title>
+      {!jiraChild && <Space size={6}>
+        <Dropdown menu={{ items: materialActions }} trigger={['click']} disabled={busy || inputsFrozen || !allowedKinds.length}>
+          <Button size="small">导入材料</Button>
+        </Dropdown>
+        <Button size="small" type="primary" icon={<Plus size={14} />} disabled={busy || inputsFrozen || !allowedKinds.length} onClick={() => openAssetDrawer({ mode: 'manual' })}>添加材料</Button>
       </Space>}
-    >
-      <TaskAssetList assets={assets} members={members} allowedKinds={allowedKinds} frozen={inputsFrozen} busy={busy} onUpdateFromBasis={openAssetFromBasis} />
-    </Card>
+    </div>
+    <TaskAssetList assets={assets} members={members} allowedKinds={allowedKinds} frozen={inputsFrozen || jiraChild} busy={busy} onUpdateFromBasis={openAssetFromBasis} />
+    {smartLinksCard}
   </div>;
 
+  const canStartReview = !busy && !inputsFrozen && allowedStages.length > 0;
+  const selectedCanApprove = !!selectedJob && !selectedHistoricalReview && canQuickApproveReview(selectedJob, task, tasks, user, role);
   const reviewPanel = <div className="tf-detail-stack">
-    <Card
-      title="评审记录"
-      extra={<Space size={8} wrap>
-        {approvableTaskJobs.length >= 2 && (
-          <Button type="primary" icon={<CheckCircle2 size={15} />} disabled={busy} onClick={quickApproveAllTaskJobs}>
-            一键全部批准 ({approvableTaskJobs.length})
-          </Button>
-        )}
-        <Button icon={<Sparkles size={15} />} disabled={busy || inputsFrozen || !allowedStages.length} onClick={() => openLocalWorkflow({ mode: 'review' })}>一键 AI 评审</Button>
-        <Button type={approvableTaskJobs.length >= 2 ? 'default' : 'primary'} disabled={busy || inputsFrozen || !allowedStages.length} onClick={() => openDrawer('review')}>发起评审</Button>
+    <div className="tf-task-pane-heading">
+      <Typography.Title level={3}>{linkedChild ? '历史评审' : 'AI 评审'}</Typography.Title>
+      {!linkedChild && <Space size={6}>
+        {approvableTaskJobs.length >= 2 && <Dropdown menu={{ items: [
+          { key: 'approve-all', label: `批准可处理的 ${approvableTaskJobs.length} 份报告`, disabled: busy, onClick: quickApproveAllTaskJobs },
+        ] }} trigger={['click']}>
+          <Button size="small" icon={<MoreHorizontal size={16} />} aria-label="更多评审操作" />
+        </Dropdown>}
+        <Button size="small" type="primary" icon={<Sparkles size={14} />} disabled={!canStartReview} onClick={() => openLocalWorkflow({ mode: 'review' })}>发起 AI 评审</Button>
       </Space>}
-    >
-      <Table<ReviewJob>
-        rowKey="id"
-        dataSource={jobs}
-        size="middle"
-        pagination={false}
-        scroll={{ x: 660 }}
-        rowClassName={item => selectedJob?.id === item.id ? 'tf-selected-row' : ''}
-        onRow={item => ({
-          style: { cursor: 'pointer' },
-          onClick: event => {
-            if (!(event.target as HTMLElement).closest('button,a')) openReview(item.id);
-          },
-        })}
-        columns={[
-        { title: '阶段', dataIndex: 'stage', render: (value, item) => <div className="tf-table-title"><Button type="link" size="small" onClick={() => openReview(item.id)}>{stageLabel(value)}</Button><Typography.Text type="secondary" className="tf-table-secondary">{executionModeLabel(item.executionMode)} · {timeText(item.createdAt)}</Typography.Text></div> },
-        { title: '状态', render: (_, item) => <Space size={8} wrap><StatusBadge variant={item.status === 'APPROVED' ? 'green' : item.status === 'REPORT_SUBMITTED' ? 'blue' : 'neutral'}>{reviewStatusLabel(item.status)}</StatusBadge>{item.stale && <StatusBadge variant="warn">材料已更新</StatusBadge>}</Space> },
-        { title: '快捷操作', width: 220, render: (_, item) => {
-          const canApproveRow = canQuickApproveReview(item, task, tasks, user, role);
-          return <Space size={4} wrap>
-            {canApproveRow && (
-              <Button type="primary" size="small" icon={<CheckCircle2 size={13} />} disabled={busy} onClick={() => quickApproveJob(item)}>
-                一键批准
-              </Button>
-            )}
-            <Button type="link" size="small" onClick={() => openReview(item.id)}>查看</Button>
-            {!inputsFrozen && !item.stale && !item.report && item.executionMode === 'LOCAL_REPORT' && REVIEW_ROLES[item.stage].includes(role) && (
-              <Button type="link" size="small" onClick={() => openLocalWorkflow({ mode: 'review', jobId: item.id, stage: item.stage })}>AI 生成草稿</Button>
-            )}
-          </Space>;
-        } },
-      ]} locale={{ emptyText: <Empty><Space orientation="vertical" size={8}><span>尚无评审记录。材料就绪后可发起评审，或让本机 AI 直接生成评审报告草稿。</span>{!inputsFrozen && !!allowedStages.length && <Button size="small" type="primary" ghost icon={<Sparkles size={14} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: 'review' })}>一键 AI 评审</Button>}</Space></Empty> }} />
-      {jobs.length > 0 && !selectedJob && <Typography.Text type="secondary" className="tf-table-hint">点击任意一条评审查看报告、发现项与审批。</Typography.Text>}
-    </Card>
-    {selectedJob && <div id="workspace-review-detail" className="tf-review-panel"><Suspense fallback={<Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}><ReviewDetail key={selectedJob.id} jobId={selectedJob.id} task={task} user={user} role={role} members={members} repoPath={boundRepoPath} constitutionFiles={gitStatus?.constitutionFiles || []} onChanged={changed} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onOpenJob={id => openReview(id)} readOnly={inputsFrozen} onReady={() => { if (tab === 'reviews') document.getElementById('workspace-review-detail')?.scrollIntoView({ block: 'start', behavior: 'instant' }); }} /></Suspense></div>}
-    {hasAssetKind('CODE') && <TaskMergeRequests key={`${user.id}:${task.id}`} taskId={task.id} taskVersion={task.version}
+    </div>
+    {selectedJob ? (
+      <div className={visibleReviewJobs.length ? 'tf-task-review-layout' : undefined}>
+        {!!visibleReviewJobs.length && <ul className="tf-task-review-list" aria-label="评审列表">
+          {visibleReviewJobs.map(job => (
+            <li key={job.id}>
+              <button type="button" aria-pressed={job.id === selectedJob.id} onClick={() => openReview(job.id)}>
+                <span className="tf-task-review-row-title">{stageLabel(job.stage)}</span>
+                <span className="tf-task-review-row-state">{job.stale ? '材料已更新' : reviewStatusLabel(job.status)}</span>
+                <span className="tf-task-review-row-date">{timeText(job.createdAt)}</span>
+              </button>
+            </li>
+          ))}
+        </ul>}
+        <div id="workspace-review-detail" className="tf-review-panel">
+          {selectedCanApprove && (
+            <Space size={6} className="tf-task-review-selection-actions">
+              <Button size="small" type="primary" disabled={busy} onClick={() => quickApproveJob(selectedJob)}>批准报告</Button>
+            </Space>
+          )}
+          <Suspense fallback={<Card><Skeleton active paragraph={{ rows: 4 }} /></Card>}>
+            <ReviewDetail key={selectedJob.id} jobId={selectedJob.id} task={task} user={user} role={role} members={members} repoPath={boundRepoPath} constitutionFiles={gitStatus?.constitutionFiles || []} cloudAiEnabled={!!cloudAiConfig?.enabled} onChanged={changed} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onOpenJob={openReview} readOnly={inputsFrozen} historical={selectedHistoricalReview} aiReviewOnly />
+          </Suspense>
+        </div>
+      </div>
+    ) : <Empty>暂无有效 AI 评审</Empty>}
+    {!linkedChild && tab === 'reviews' && hasAssetKind('CODE') && <TaskMergeRequests key={`${user.id}:${task.id}`} taskId={task.id} taskVersion={task.version}
       approvedJobId={gates?.gates.find(gate => gate.stage === 'CODE_REVIEW' && gate.status === 'PASS')?.jobId}
-      active={tab === 'reviews'} readOnly={inputsFrozen} onUnauthorized={onUnauthorized}
+      latestCodeReviewJobId={[...jobs].filter(job => job.stage === 'CODE_REVIEW' && !!job.report).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]?.id}
+      active readOnly={inputsFrozen} onUnauthorized={onUnauthorized}
       onImport={!inputsFrozen && allowedKinds.includes('CODE') ? () => openAssetDrawer({ mode: 'link', kind: 'CODE' }) : undefined} />}
   </div>;
 
@@ -1241,46 +1453,129 @@ export const WorkTaskDetail: React.FC<{
     canReport={canReportProgress}
     busy={busy}
     onReport={reportProgress}
-    onStartLocalAi={() => openLocalWorkflow({ mode: 'read' })}
+    onStartLocalAi={linkedChild ? undefined : () => openLocalWorkflow({ mode: 'read' })}
     onOpenReview={openReview}
   />;
 
-  const chainRefreshKey = `${task.version}:${assets.length}:${jobs.map(job => `${job.id}:${job.status}:${job.stale ? 1 : 0}`).join(',')}:${children.map(child => `${child.id}:${child.version}`).join(',')}`;
+  const chainRefreshKey = `${refreshTick || 0}:${task.version}:${assets.length}:${jobs.map(job => `${job.id}:${job.status}:${job.stale ? 1 : 0}`).join(',')}:${children.map(child => `${child.id}:${child.version}`).join(',')}`;
   const assetModeForKind = (kind: AssetKind): AssetInputMode => {
     if (kind === 'CODE') return 'git';
-    if (kind === 'PRD' || kind === 'TECH_SPEC') return 'link';
-    return smartHints.detectedLinks.some(l => l.suggestedKinds.includes(kind)) ? 'link' : 'manual';
+    const hasReadableLink = smartHints.detectedLinks.some(link => link.provider !== 'external' &&
+      (kind !== 'TECH_SPEC' || link.provider !== 'jira') && canImportFrom(link.provider) && link.suggestedKinds.includes(kind));
+    const hasReadableRequirement = kind === 'PRD' && canImportFrom('jira') && smartHints.relatedJira.some(issue => issue.sameProject);
+    return hasReadableLink || hasReadableRequirement ? 'link' : 'manual';
   };
   const openChainInput = (link: ChainLink) => {
     if (busy || inputsFrozen) return;
     if (link.id === 'BREAKDOWN') { openDecompose(); return; }
     const kind = link.stage === 'RELEASE' ? 'RELEASE_PLAN' : STAGE_ASSET[link.stage as GateStage];
-    if (!kind || !allowedKinds.includes(kind)) { void message.warning('当前角色无权补充该类材料。'); return; }
+    if (!kind || !allowedKinds.includes(kind)) { void message.warning(`当前角色（${roleLabel(role)}）无权补充「${kind ? assetKindLabel(kind) : '该类材料'}」。`); return; }
     openAssetDrawer({ mode: assetModeForKind(kind), kind });
   };
   // One handler for every delivery-chain action, so each link exposes exactly one primary entry point.
   const handleChainAction = (link: ChainLink, action: ChainNextAction) => {
     if (busy) return;
     if (action.type === 'ADD_INPUT' && action.assetKind) {
-      if (inputsFrozen || !allowedKinds.includes(action.assetKind)) { void message.warning('当前角色无权补充该类材料，或任务已冻结。'); return; }
+      if (inputsFrozen) { void message.warning('当前任务已完成冻结，请先重开任务后再补充材料。'); return; }
+      if (!allowedKinds.includes(action.assetKind)) { void message.warning(`当前角色（${roleLabel(role)}）无权补充「${assetKindLabel(action.assetKind)}」。`); return; }
       openAssetDrawer({ mode: assetModeForKind(action.assetKind), kind: action.assetKind });
       return;
     }
     if (action.type === 'ADD_SUBTASKS') { if (!inputsFrozen) openDecompose(); return; }
     if (action.type === 'AI_REVIEW') {
       const stage = action.stage || link.stage;
-      if (!REVIEW_ROLES[stage].includes(role)) { void message.warning('当前角色无权发起该环节的审核。'); return; }
+      if (!REVIEW_ROLES[stage].includes(role)) { void message.warning(`当前角色（${roleLabel(role)}）无权发起「${stageLabel(stage)}」。`); return; }
       openLocalWorkflow({ mode: 'review', stage, jobId: action.jobId });
       return;
     }
-    if (action.jobId) { setChainReviewJobId(action.jobId); return; }
-    if (link.review?.jobId) setChainReviewJobId(link.review.jobId);
+    if (action.jobId) { openReview(action.jobId); return; }
+    if (link.review?.jobId) openReview(link.review.jobId);
   };
-  const chainPanel = <TaskChainPanel taskId={task.id} refreshKey={chainRefreshKey} frozen={inputsFrozen} onAction={handleChainAction} onAddInput={openChainInput} onOpenTask={onOpenTask} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onChanged={changed} />;
+  const handleSelectChainStage = (stage?: Stage) => {
+    setActiveChainStage(stage);
+    onFocusStageChange?.(stage);
+  };
+  const runStageAiReview = (stage: Stage) => {
+    if (busy || inputsFrozen) return;
+    if (!REVIEW_ROLES[stage].includes(role)) {
+      void message.warning(`当前角色（${roleLabel(role)}）无权发起「${stageLabel(stage)}」。`);
+      return;
+    }
+    openLocalWorkflow({ mode: 'review', stage });
+  };
+  const approvableJobIds = approvableTaskJobs.map(item => item.id);
+  const waivableJobIds = !task || inputsFrozen || !['ADMIN', 'LEAD'].includes(role)
+    ? []
+    : jobs.filter(item => {
+        if (!['TECH_SPEC', 'CODE_REVIEW'].includes(item.stage)) return false;
+        if (!item.report || item.decision || item.stale) return false;
+        const independent = item.report.actorId !== user.id && task.assigneeId !== user.id;
+        return independent || !!item.soloMode;
+      }).map(item => item.id);
+  const quickApproveJobById = (jobId: string) => {
+    const target = jobs.find(item => item.id === jobId);
+    if (target) quickApproveJob(target);
+  };
+  const quickWaiveFindingById = async (jobId: string, findingId: string, reason: string) => {
+    await run(async () => {
+      const result = await api<{ job: ReviewJob }>(`jobs/${encodeURIComponent(jobId)}/findings/${encodeURIComponent(findingId)}/waiver`, { reason });
+      if (accessLost.current || !mounted.current) return;
+      setJobs(current => current.map(item => item.id === result.job.id ? result.job : item));
+      setGates(null);
+      void message.success('已忽略该条问题并记录理由。');
+      await changed();
+    }, true);
+  };
+  const chainPanel = <TaskChainPanel
+    taskId={task.id}
+    refreshKey={chainRefreshKey}
+    frozen={inputsFrozen}
+    focusStage={activeChainStage}
+    onSelectStage={handleSelectChainStage}
+    onAction={handleChainAction}
+    onRunAiReview={runStageAiReview}
+    onAddInput={openChainInput}
+    onSyncJiraChildren={jiraParent && onSyncJiraChildren ? () => onSyncJiraChildren(task) : undefined}
+    syncingJiraChildren={syncingJiraChildren}
+    onImportOpenApi={!inputsFrozen && allowedKinds.includes('TECH_SPEC') ? () => openAssetDrawer({ mode: 'openapi', kind: 'TECH_SPEC' }) : undefined}
+    approvableJobIds={approvableJobIds}
+    waivableJobIds={waivableJobIds}
+    onQuickApprove={quickApproveJobById}
+    onQuickWaive={quickWaiveFindingById}
+    onOpenTask={onOpenTask}
+    onUnauthorized={onUnauthorized}
+    onForbidden={handleForbidden}
+    onChanged={changed}
+  />;
 
   const workflowMode: LocalTaskMode = inputsFrozen ? 'read' : canEdit ? 'develop' : 'read';
+  const canRemoveTask = permissions.assignTasks || task.ownerId === user.id;
+  const confirmRemoveCurrentTask = () => {
+    modal.confirm({
+      title: children.length ? `移出 ${task.jiraKey} 及其子任务？` : `移出任务 ${task.jiraKey}？`,
+      content: '仅从当前本地工作台移除该任务及关联的本地材料/评审记录，不会修改或删除外部 Jira 事项。',
+      okText: '移出工作台',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      onOk: () => run(async () => {
+        const res = await api<{ deletedCount: number }>('tasks/' + task.id + '?cascade=1', undefined, 'DELETE');
+        void message.success(`已从工作台移出 ${res.deletedCount} 项任务。`);
+        await onChanged();
+        onOpenTask('');
+      }),
+    });
+  };
   const moreActions: MenuProps['items'] = [
-    { key: 'workbench', icon: <Laptop size={14} />, label: '在工作台处理' },
+    ...(canEdit && !doneAncestor ? [{ key: 'edit-task', icon: <Pencil size={14} />, label: '编辑任务信息' }] : []),
+    ...(!linkedChild ? [
+      { key: 'local-ai', icon: <Sparkles size={14} />, label: '本地 AI 处理' },
+      { key: 'chain-report', icon: <FileBarChart size={14} />, label: '导出交付报告' },
+      { key: 'skills', icon: <Sparkles size={14} />, label: '配置 AI Skills' },
+    ] : []),
+    ...(!inputsFrozen && allowedKinds.includes('TECH_SPEC') ? [{ key: 'import-openapi', icon: <FileCheck2 size={14} />, label: '导入 OpenAPI / Apifox 接口' }] : []),
+    ...(!inputsFrozen && !linkedChild && !jiraParent ? [{ key: 'decompose', icon: <Sparkles size={14} />, label: '智能拆解子任务' }] : []),
+    { type: 'divider' as const },
+    ...(!linkedChild ? [{ key: 'workbench', icon: <Laptop size={14} />, label: '在工作台处理' }] : []),
     { key: 'context-pack', icon: <Package size={14} />, label: '打包上下文 / 导出' },
     { key: 'git-handoff', icon: <GitBranch size={14} />, label: '分支 / Worktree / MR 描述' },
     ...(boundRepoPath ? [
@@ -1289,9 +1584,20 @@ export const WorkTaskDetail: React.FC<{
       { key: 'cursor', icon: <ExternalLink size={14} />, label: '在 Cursor 打开仓库' },
       { key: 'terminal', icon: <Terminal size={14} />, label: '在终端打开仓库' },
     ] : []),
+    ...(onHideTask || canRemoveTask ? [{ type: 'divider' as const }] : []),
+    ...(onHideTask ? [{ key: 'hide-task', icon: <EyeOff size={14} />, label: '在我的工作台隐藏' }] : []),
+    ...(canRemoveTask ? [{ key: 'remove-task', icon: <Trash2 size={14} />, label: '从工作台移出任务', danger: true }] : []),
   ];
   const runMoreAction = (key: string) => {
-    if (key === 'workbench') openLocalWorkflow({ mode: workflowMode, runner: 'workbench' });
+    if (key === 'local-ai') openLocalWorkflow({ mode: workflowMode });
+    else if (key === 'chain-report') setChainReportOpen(true);
+    else if (key === 'skills') navigateWorkspace('skills');
+    else if (key === 'import-openapi') openAssetDrawer({ mode: 'openapi', kind: 'TECH_SPEC' });
+    else if (key === 'decompose') openDecompose();
+    else if (key === 'edit-task') openDrawer('task');
+    else if (key === 'hide-task') onHideTask?.();
+    else if (key === 'remove-task') confirmRemoveCurrentTask();
+    else if (key === 'workbench') openLocalWorkflow({ mode: workflowMode, runner: 'workbench' });
     else if (key === 'context-pack') { setContextPackEverOpened(true); setContextPackOpen(true); }
     else if (key === 'git-handoff') { setGitHandoffEverOpened(true); setGitHandoffOpen(true); }
     else if ((key === 'finder' || key === 'cursor' || key === 'terminal') && boundRepoPath) void openRepoInApp(key, boundRepoPath);
@@ -1299,10 +1605,7 @@ export const WorkTaskDetail: React.FC<{
 
   const assetDrawerPrimaryAction = () => {
     if (assetInputMode === 'link') {
-      if (!detectedPaste.provider) {
-        void message.warning('请粘贴有效的 Confluence、云效 Codeup、GitLab、Jenkins 链接或同项目 Jira 事项号。');
-        return;
-      }
+      if (!detectedPaste.provider || !canImportPasted) return;
       importReferenceAsAsset({
         provider: detectedPaste.provider,
         url: detectedPaste.url,
@@ -1319,176 +1622,283 @@ export const WorkTaskDetail: React.FC<{
       captureGitCodeAsset();
       return;
     }
+    if (assetInputMode === 'openapi') {
+      importApiSpecAsset();
+      return;
+    }
     assetForm.submit();
   };
 
-  return <Spin spinning={busy}><div className={`tf-task-detail${embedded ? ' tf-task-detail-embedded' : ''}`}>
-    <Card className="tf-task-summary">
-      <Flex justify="space-between" align="start" gap={16} className="tf-task-summary-layout">
-        <div className="tf-task-heading">
-          <Space size={8} wrap>
-            <Tooltip title="点击复制任务号">
-              <Typography.Text
-                strong
-                style={{ cursor: 'pointer' }}
-                onClick={() => { void navigator.clipboard.writeText(task.jiraKey).then(() => message.success(`已复制任务号 ${task.jiraKey}`)).catch(() => {}); }}
-              >
-                <code>{task.jiraKey}</code>
-              </Typography.Text>
-            </Tooltip>
-            <Typography.Text type="secondary">{jira ? jira.type : taskTypeLabel(task.type)}</Typography.Text>
-            {jira?.url && (
-              <Typography.Link href={jira.url} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
-                <Space size={3}><ExternalLink size={12} />查看 Jira 原单</Space>
-              </Typography.Link>
-            )}
-            {boundRepoPath && <Tag color="geekblue">{boundRepoPath.split('/').pop()}</Tag>}
-          </Space>
-          {editingTitle ? (
-            <div className="tf-task-inline-title-editor">
-              <Input
-                autoFocus
-                value={titleDraft}
-                maxLength={200}
-                disabled={busy}
-                aria-label="编辑任务标题"
-                onChange={e => setTitleDraft(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    saveInlineTitle();
-                  } else if (e.key === 'Escape') {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setEditingTitle(false);
-                    setTitleDraft(task.title);
-                  }
-                }}
-              />
-              <Button type="primary" size="small" icon={<Check size={14} />} disabled={busy} aria-label="保存标题" onClick={saveInlineTitle} />
-              <Button size="small" icon={<X size={14} />} disabled={busy} aria-label="取消编辑标题" onClick={() => { setEditingTitle(false); setTitleDraft(task.title); }} />
-            </div>
-          ) : (
-            <div className="tf-task-title-editable">
-              <Typography.Title
-                level={1}
-                className="tf-task-title"
-                onDoubleClick={() => {
-                  if (canEdit && !inputsFrozen && !busy) {
-                    setTitleDraft(task.title);
-                    setEditingTitle(true);
-                  }
-                }}
-              >
-                {task.title}
-              </Typography.Title>
-              {canEdit && !inputsFrozen && (
-                <Tooltip title="编辑标题（或双击标题直接修改，按回车保存）">
-                  <Button
-                    type="text"
-                    size="small"
-                    className="tf-task-title-edit-btn"
-                    icon={<Pencil size={14} />}
-                    disabled={busy}
-                    aria-label="编辑任务标题"
-                    onClick={() => { setTitleDraft(task.title); setEditingTitle(true); }}
-                  />
-                </Tooltip>
-              )}
-            </div>
-          )}
-          <Flex align="center" gap={12} wrap className="tf-task-summary-meta">
-            {jira && <Space size={8}><Typography.Text type="secondary">Jira</Typography.Text><StatusBadge variant="blue">{jira.status}</StatusBadge></Space>}
-            <Space size={8}>
-              <Typography.Text type="secondary">本地状态</Typography.Text>
-              {canEdit && !doneAncestor ? (
-                <Select
-                  size="small"
-                  aria-label="快速切换本地状态"
-                  value={task.status}
-                  disabled={busy}
-                  popupMatchSelectWidth={false}
-                  options={TASK_STATUS_OPTIONS.map(opt => ({ ...opt, disabled: opt.value === 'DONE' && task.status !== 'DONE' && !canComplete }))}
-                  onChange={quickSwitchStatus}
-                />
-              ) : (
-                <StatusBadge variant={task.status === 'DONE' ? 'green' : 'neutral'}>{taskStatusLabel(task.status)}</StatusBadge>
-              )}
-            </Space>
-            <Space size={8}>
-              <Typography.Text type="secondary">本地受理人</Typography.Text>
-              {canAssign && !inputsFrozen ? (
-                <Select<string>
-                  size="small"
-                  aria-label="快速切换本地受理人"
-                  value={task.assigneeId || ''}
-                  disabled={busy}
-                  popupMatchSelectWidth={false}
-                  options={[{ value: '', label: '未指派' }, ...members.map(member => ({ value: member.id, label: member.username }))]}
-                  onChange={quickSwitchAssignee}
-                />
-              ) : (
-                <Typography.Text className="tf-break">{memberName(members, task.assigneeId)}</Typography.Text>
-              )}
-              {canClaim && <Button type="link" size="small" style={{ paddingInline: 2 }} disabled={busy} onClick={claimTaskNow}>认领</Button>}
-            </Space>
-          </Flex>
-        </div>
-        <Space size={4}>
-          {embedded && onOpenFullScreen && (
-            <Button type="text" icon={<Maximize2 size={15} />} onClick={onOpenFullScreen}>全屏详情</Button>
-          )}
-          <Button type="text" icon={<RefreshCw size={16} />} disabled={busy} onClick={() => void run(refresh)}>刷新</Button>
-          {(permissions.assignTasks || task.ownerId === user.id) && (
-            <Button
-              type="text"
-              danger
-              icon={<Trash2 size={15} />}
-              disabled={busy}
-              onClick={() => {
-                modal.confirm({
-                  title: children.length ? `移出 ${task.jiraKey} 及其子任务？` : `移出任务 ${task.jiraKey}？`,
-                  content: '仅从当前本地工作台移除该任务及关联的本地材料/评审记录，不会修改或删除外部 Jira 事项。',
-                  okText: '移出工作台',
-                  cancelText: '取消',
-                  okButtonProps: { danger: true },
-                  onOk: () => run(async () => {
-                    const res = await api<{ deletedCount: number }>('tasks/' + task.id + '?cascade=1', undefined, 'DELETE');
-                    void message.success(`已从工作台移出 ${res.deletedCount} 项任务。`);
-                    await onChanged();
-                    onOpenTask('');
-                  }),
-                });
-              }}
-            >
-              移出
-            </Button>
-          )}
-        </Space>
-      </Flex>
-      <Flex gap={8} wrap className="tf-task-summary-actions">
-        {canComplete && task.status !== 'DONE' && canEdit && !doneAncestor && (
-          <Button type="primary" icon={<CheckCircle2 size={16} />} onClick={completeTaskNow}>一键完成核验</Button>
+  const taskTitleBlock = editingTitle ? (
+    <div className="tf-task-inline-title-editor">
+      <Input
+        autoFocus
+        value={titleDraft}
+        maxLength={200}
+        disabled={busy}
+        aria-label="编辑任务标题"
+        onChange={e => setTitleDraft(e.target.value)}
+        onKeyDown={e => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            saveInlineTitle();
+          } else if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            setEditingTitle(false);
+            setTitleDraft(task.title);
+          }
+        }}
+      />
+      <Button type="primary" size="small" icon={<Check size={14} />} disabled={busy} aria-label="保存标题" onClick={saveInlineTitle} />
+      <Button size="small" icon={<X size={14} />} disabled={busy} aria-label="取消编辑标题" onClick={() => { setEditingTitle(false); setTitleDraft(task.title); }} />
+    </div>
+  ) : (
+    <div className="tf-task-title-editable">
+      <Typography.Title
+        title={task.title}
+        level={embedded ? 2 : 1}
+        className="tf-task-title"
+        onDoubleClick={() => {
+          if (canEdit && !inputsFrozen && !busy) {
+            setTitleDraft(task.title);
+            setEditingTitle(true);
+          }
+        }}
+      >
+        {task.title}
+      </Typography.Title>
+      {canEdit && !inputsFrozen && (
+        <Tooltip title="编辑标题（或双击标题直接修改，按回车保存）">
+          <Button
+            type="text"
+            size="small"
+            className="tf-task-title-edit-btn"
+            icon={<Pencil size={14} />}
+            disabled={busy}
+            aria-label="编辑任务标题"
+            onClick={() => { setTitleDraft(task.title); setEditingTitle(true); }}
+          />
+        </Tooltip>
+      )}
+    </div>
+  );
+
+  const subtaskList = children.length > 0 ? (
+    <ul className="tf-side-subtasks">
+      {children.map(child => (
+        <li key={child.id}>
+          <button type="button" className="tf-side-subtask-item" onClick={() => onOpenTask(child.id)}>
+            <span className="tf-side-subtask-key">{child.jiraKey}</span>
+            <span className="tf-side-subtask-title" title={child.title}>{child.title}</span>
+            <span className={`tf-side-subtask-state${!child.externalRef?.status && child.status === 'DONE' ? ' is-done' : ''}`}>
+              {child.externalRef?.status || taskStatusLabel(child.status)}
+            </span>
+          </button>
+        </li>
+      ))}
+    </ul>
+  ) : null;
+
+  const descriptionPanel = (
+    <div className="tf-task-overview-grid">
+      <section className="tf-task-overview-copy" aria-label="任务描述">
+        <Typography.Title level={3}>任务描述</Typography.Title>
+        {jiraDescriptionPreview || <Typography.Text type="secondary">暂无描述</Typography.Text>}
+        {task.lastSummary && (
+          <section className="tf-task-overview-block">
+            <Typography.Title level={4}>最新进展</Typography.Title>
+            <Typography.Paragraph className="tf-preserve tf-embedded-description"><LinkifiedText text={task.lastSummary} /></Typography.Paragraph>
+          </section>
         )}
-        <Button type={canComplete && task.status !== 'DONE' ? 'default' : 'primary'} icon={<Sparkles size={16} />} disabled={busy} onClick={() => openLocalWorkflow({ mode: workflowMode })}>本地 AI 一键处理</Button>
+        {(jiraParent || subtaskList) && (
+          <section className="tf-task-overview-block" aria-label="关联子任务">
+            <div className="tf-task-overview-card-head">
+              <Typography.Title level={4} style={{ marginBottom: 0 }}>关联子任务（{children.length}）</Typography.Title>
+              {jiraParent && onSyncJiraChildren && (
+                <Button type="text" size="small" loading={syncingJiraChildren} onClick={() => onSyncJiraChildren(task)}>刷新 Jira 子任务</Button>
+              )}
+            </div>
+            {subtaskList || <Typography.Text type="secondary">暂无关联子任务</Typography.Text>}
+          </section>
+        )}
+      </section>
+      <aside className="tf-task-overview-side">
+        {!linkedChild && <section className="tf-task-overview-card" aria-label="交付状态">
+          <div className="tf-task-overview-card-head">
+            <Typography.Title level={4}>交付状态</Typography.Title>
+            <Typography.Text type="secondary">
+              {overviewChain || gates ? `${overviewChain?.overall.passed ?? passedGateCount} / ${overviewChain?.overall.total ?? STAGES.length} 通过` : '—'}
+            </Typography.Text>
+          </div>
+          {overviewChain?.links.length ? (
+            <ul className="tf-task-overview-stages">
+              {overviewChain.links.map(link => (
+                <li key={link.id}>
+                  <button type="button" onClick={() => { handleSelectChainStage(link.stage); changeTab('chain'); }}>
+                    <span title={link.title}>{link.title}</span>
+                    <span className={`tf-task-stage-state is-${LINK_STATUS_META[link.status]?.tone ?? 'idle'}`}>{link.statusLabel || LINK_STATUS_META[link.status]?.label}</span>
+                    <ChevronRight size={13} aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Button type="link" size="small" className="tf-task-parent-link" onClick={() => changeTab('chain')}>打开交付链路</Button>
+          )}
+        </section>}
+        {(embeddedSourceItems.length > 0 || boundRepoPath) && (
+          <section className="tf-task-overview-card" aria-label="任务属性">
+            <Typography.Title level={4}>任务属性</Typography.Title>
+            <Descriptions size="small" column={1} colon={false} items={[
+              ...embeddedSourceItems,
+              ...(boundRepoPath ? [{ key: 'repo', label: '仓库', children: boundRepoPath.split('/').filter(Boolean).pop() }] : []),
+              ...(gitStatus?.branch && gitStatus.branch !== 'HEAD' ? [{ key: 'branch', label: '分支', children: gitStatus.branch }] : []),
+            ]} />
+          </section>
+        )}
+      </aside>
+    </div>
+  );
+
+  const sections: { key: TaskPanel; label: string; count?: number | string; content: React.ReactNode }[] = [
+    { key: 'overview', label: '概览', content: descriptionPanel },
+    ...(!linkedChild ? [{ key: 'chain' as const, label: '交付链路', content: chainPanel }] : []),
+    ...(!jiraChild || assets.length > 0 ? [{ key: 'assets' as const, label: '材料', count: assets.length, content: assetPanel }] : []),
+    ...(!linkedChild || (tab === 'reviews' && linkedReview)
+      ? [{ key: 'reviews' as const, label: linkedChild ? '历史评审' : '评审', count: visibleReviewJobs.length, content: reviewPanel }]
+      : []),
+    ...(!linkedChild ? [{ key: 'release' as const, label: '门禁', count: `${passedGateCount}/${STAGES.length}`, content: releasePanel }] : []),
+    { key: 'activity', label: '进度', content: activityPanel },
+  ];
+
+  return <div className={`tf-task-frame${inDrawer ? ' tf-task-frame-in-drawer' : ''}`}><Spin spinning={busy}><div className={`tf-task-detail${embedded ? ' tf-task-detail-embedded' : ''}`}>
+    <header className="tf-embedded-task-head">
+      <div className="tf-embedded-task-head-main">
+        <Flex align="center" gap={8} className="tf-embedded-task-meta">
+          <Tooltip title="点击复制任务号">
+            <button
+              type="button"
+              className="tf-task-key-chip"
+              onClick={() => { void navigator.clipboard.writeText(task.jiraKey).then(() => message.success(`已复制任务号 ${task.jiraKey}`)).catch(() => {}); }}
+            >
+              {task.jiraKey}
+            </button>
+          </Tooltip>
+          {jira?.url && (
+            <Typography.Link href={jira.url} target="_blank" rel="noreferrer" className="tf-embedded-jira">
+              <ExternalLink size={12} />{jira.status ? `Jira · ${jira.status}` : 'Jira 原单'}
+            </Typography.Link>
+          )}
+        </Flex>
+        {taskTitleBlock}
+        <Flex align="center" gap={12} className="tf-embedded-task-properties">
+          <Space size={6}>
+            <Typography.Text type="secondary">状态</Typography.Text>
+            {canEdit && !doneAncestor ? (
+              <Select
+                size="small"
+                aria-label="快速切换本地状态"
+                value={task.status}
+                disabled={busy}
+                popupMatchSelectWidth={false}
+                options={TASK_STATUS_OPTIONS.map(opt => ({ ...opt, disabled: opt.value === 'DONE' && task.status !== 'DONE' && !canComplete }))}
+                onChange={quickSwitchStatus}
+              />
+            ) : (
+              <StatusBadge variant={task.status === 'DONE' ? 'green' : 'neutral'}>{taskStatusLabel(task.status)}</StatusBadge>
+            )}
+          </Space>
+          <Space size={6}>
+            <Typography.Text type="secondary">负责人</Typography.Text>
+            {canAssign && !inputsFrozen ? (
+              <Select<string>
+                size="small"
+                aria-label="快速切换本地受理人"
+                value={task.assigneeId || ''}
+                disabled={busy}
+                popupMatchSelectWidth={false}
+                options={[{ value: '', label: '未指派' }, ...members.map(member => ({ value: member.id, label: member.username }))]}
+                onChange={quickSwitchAssignee}
+              />
+            ) : (
+              <Typography.Text>{memberName(members, task.assigneeId)}</Typography.Text>
+            )}
+            {canClaim && <Button type="link" size="small" disabled={busy} onClick={claimTaskNow}>认领</Button>}
+          </Space>
+        </Flex>
+      </div>
+      <Space size={4} className="tf-embedded-task-actions">
+        {linkedChild && (mainTaskId ? (
+          <Button type="link" size="small" title={mainTask?.title} onClick={() => onOpenTask(mainTaskId)}>
+            主任务 {mainTask?.jiraKey || jiraParentReference?.key}
+          </Button>
+        ) : jiraParentReference?.url && (
+          <Button type="link" size="small" href={jiraParentReference.url} target="_blank" rel="noreferrer">
+            主任务 {jiraParentReference.key}
+          </Button>
+        ))}
+        {!linkedChild && canComplete && task.status !== 'DONE' && canEdit && !doneAncestor && (
+          <Button type="primary" size="small" icon={<CheckCircle2 size={14} />} disabled={busy} onClick={completeTaskNow}>完成任务</Button>
+        )}
+        {!linkedChild && <Button
+          size="small"
+          type={canComplete && task.status !== 'DONE' && canEdit && !doneAncestor ? 'default' : 'primary'}
+          icon={<Sparkles size={14} />}
+          aria-label="AI 助手"
+          title="AI 助手"
+          className="tf-task-ai-action"
+          disabled={busy}
+          onClick={() => openLocalWorkflow({ mode: workflowMode })}
+        >
+          <span className="tf-task-ai-label">AI 助手</span>
+        </Button>}
+        {onOpenFullScreen && (
+          <Tooltip title="打开完整详情">
+            <Button type="text" icon={<Maximize2 size={15} />} aria-label="打开完整详情" onClick={() => onOpenFullScreen(tab, tab === 'reviews' ? selectedJobId || undefined : undefined)} />
+          </Tooltip>
+        )}
         <Dropdown trigger={['click']} disabled={busy} menu={{ items: moreActions, onClick: ({ key }) => runMoreAction(key) }}>
-          <Button>更多操作<ChevronDown size={14} /></Button>
+          <Button type="text" icon={<MoreHorizontal size={16} />} aria-label="更多操作" />
         </Dropdown>
-      </Flex>
-    </Card>
+      </Space>
+    </header>
 
-    <div ref={panelRef} className="tf-detail-panel"><Tabs more={{ trigger: 'click', icon: <MoreHorizontal size={16} aria-label="更多页签" /> }} locale={{ dropdownAriaLabel: '更多页签' }} className="tf-task-tabs" activeKey={tab} onChange={changeTab} items={[
-      { key: 'chain', label: '交付链路', children: chainPanel },
-      { key: 'overview', label: '任务信息', children: overview },
-      { key: 'assets', label: '材料 (' + assets.length + ')', children: assetPanel },
-      { key: 'reviews', label: '评审 (' + jobs.length + ')', children: reviewPanel },
-      { key: 'release', label: '门禁与发布 (' + passedGateCount + '/' + STAGES.length + ')', children: releasePanel },
-      { key: 'activity', label: '开发进度', children: activityPanel },
-    ]} /></div>
+    <nav className="tf-task-section-links" aria-label="任务详情章节">
+      {sections.map(section => (
+        <button type="button" key={section.key} aria-pressed={tab === section.key} onClick={() => changeTab(section.key)}>
+          {section.label}
+          {section.count !== undefined && <span className="tf-task-panel-count">{section.count}</span>}
+        </button>
+      ))}
+    </nav>
+    <div className="tf-task-panel-scroll" ref={detailScroll} tabIndex={0} aria-label="任务内容">
+      {doneAncestor && <Alert type="info" showIcon title={<>上级任务 <Button type="link" size="small" style={{ paddingInline: 2 }} onClick={() => onOpenTask(doneAncestor.id)}>{doneAncestor.jiraKey}</Button> 已完成并冻结，需先重开上级任务才能修改此任务。</>} />}
+      {sections.map(section => (tab === section.key || visitedPanels.includes(section.key)) && (
+        <section
+          key={section.key}
+          hidden={tab !== section.key}
+          id={`task-detail-${section.key}`}
+          className="tf-task-panel"
+          aria-label={section.label}
+        >
+          {section.content}
+        </section>
+      ))}
+    </div>
 
-    <Drawer forceRender title="编辑任务" size={640} className="tf-task-detail-drawer" open={drawer === 'task'} closable={!busy} keyboard={!busy} maskClosable={!busy} onClose={closeDrawer} footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canEdit || !!doneAncestor} onClick={() => taskForm.submit()}>保存任务</Button></Flex>}>{taskEditor}</Drawer>
+    {!linkedChild && <ChainReportDrawer
+      taskId={task.id}
+      jiraKey={task.jiraKey}
+      open={chainReportOpen}
+      onClose={() => setChainReportOpen(false)}
+      onUnauthorized={onUnauthorized}
+    />}
+
+    <Drawer forceRender push={false} title="编辑任务" size={640} className="tf-task-detail-drawer" open={drawer === 'task'} closable={!busy} keyboard={!busy} maskClosable={!busy} onClose={closeDrawer} footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!canEdit || !!doneAncestor} onClick={() => taskForm.submit()}>保存任务</Button></Flex>}>{taskEditor}</Drawer>
     <Drawer
       forceRender
+      push={false}
       title="导入 / 添加任务材料"
       size={680}
       className="tf-task-detail-drawer"
@@ -1502,20 +1912,17 @@ export const WorkTaskDetail: React.FC<{
         <Button
           type="primary"
           loading={busy}
-          disabled={inputsFrozen || !allowedKinds.length || (assetInputMode === 'git' && !boundRepoPath)}
+          disabled={inputsFrozen || !allowedKinds.length || (assetInputMode === 'link' && !canImportPasted) || (assetInputMode === 'git' && !boundRepoPath)}
           onClick={assetDrawerPrimaryAction}
         >
-          {assetInputMode === 'link' ? '一键拉取并保存' : assetInputMode === 'git' ? (gitStatus?.tccProtected ? '从剪贴板保存代码改动' : '提取 Git 改动并保存') : '保存新版本'}
+          {assetInputMode === 'link' ? '一键拉取并保存' : assetInputMode === 'git' ? (gitStatus?.tccProtected ? '从剪贴板保存代码改动' : '提取 Git 改动并保存') : assetInputMode === 'openapi' ? '解析并导入接口契约' : '保存新版本'}
         </Button>
       </Flex>}
     >
       {assetEditor}
     </Drawer>
-    <Drawer forceRender title="发起评审" size={640} className="tf-task-detail-drawer" open={drawer === 'review'} closable={!busy} keyboard={!busy} maskClosable={!busy} onClose={closeDrawer} footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!allowedStages.length || inputsFrozen} onClick={() => reviewForm.submit()}>登记评审申请</Button></Flex>}>{reviewEditor}</Drawer>
-    <Drawer title="环节审核报告" size={920} className="tf-task-detail-drawer" open={!!chainReviewJobId} onClose={() => setChainReviewJobId('')} destroyOnHidden>
-      {chainReviewJobId && <Suspense fallback={<Skeleton active paragraph={{ rows: 6 }} />}><ReviewDetail key={chainReviewJobId} jobId={chainReviewJobId} task={task} user={user} role={role} members={members} repoPath={boundRepoPath} constitutionFiles={gitStatus?.constitutionFiles || []} onChanged={changed} onUnauthorized={onUnauthorized} onForbidden={handleForbidden} onOpenJob={id => setChainReviewJobId(id)} readOnly={inputsFrozen} /></Suspense>}
-    </Drawer>
-    {(decomposeOpen || decomposeEverOpened) && (
+    {!linkedChild && <Drawer forceRender push={false} title="发起评审" size={640} className="tf-task-detail-drawer" open={drawer === 'review'} closable={!busy} keyboard={!busy} maskClosable={!busy} onClose={closeDrawer} footer={<Flex justify="flex-end" gap={8}><Button disabled={busy} onClick={closeDrawer}>取消</Button><Button type="primary" loading={busy} disabled={!allowedStages.length || inputsFrozen} onClick={() => reviewForm.submit()}>登记评审申请</Button></Flex>}>{reviewEditor}</Drawer>}
+    {!jiraParent && !linkedChild && (decomposeOpen || decomposeEverOpened) && (
       <Suspense fallback={null}>
         <SubtaskDecomposeModal
           open={decomposeOpen && !busy && !inputsFrozen}
@@ -1558,7 +1965,7 @@ export const WorkTaskDetail: React.FC<{
         />
       </Suspense>
     )}
-    {(localWorkflowOpen || localWorkflowEverOpened) && (
+    {!linkedChild && (localWorkflowOpen || localWorkflowEverOpened) && (
       <Suspense fallback={null}>
         <LocalTaskWorkflow
           key={user.id + ':' + role + ':' + task.id}
@@ -1577,11 +1984,11 @@ export const WorkTaskDetail: React.FC<{
           initialJobId={workflowInit.jobId}
           initialRunner={workflowInit.runner}
           onChanged={changed}
-          onOpenReview={id => { setLocalWorkflowOpen(false); if (tab === 'chain') setChainReviewJobId(id); else openReview(id); }}
+          onOpenReview={id => { setLocalWorkflowOpen(false); openReview(id); }}
           onOpenAssets={() => { setLocalWorkflowOpen(false); changeTab('assets'); }}
           onCreateLocalReview={() => { if (inputsFrozen || !allowedStages.length) return; setLocalWorkflowOpen(false); changeTab('reviews'); openDrawer('review'); reviewForm.setFieldValue('executionMode', 'LOCAL_REPORT'); }}
         />
       </Suspense>
     )}
-  </div></Spin>;
+  </div></Spin></div>;
 };

@@ -4,9 +4,11 @@ import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, rea
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { ApiError, ASSET_ROLES, FINDING_CATEGORIES, REVIEW_ROLES, REVIEW_STAGES, RISK_LEVELS, fail, sha, textField, publicGitRemote } from './common.mjs';
+import { ApiError, ASSET_ROLES, FINDING_CATEGORIES, REVIEW_ROLES, REVIEW_STAGES, RISK_LEVELS, fail, isModelId, optionalModelId, sha, textField, publicGitRemote } from './common.mjs';
 import { projectPermissions } from './permissions.mjs';
 import { buildAiPrompt } from './ai-prompt.mjs';
+import { mapRunToSkillScopes } from './skill-bundles.mjs';
+import { requireReviewableTask } from './workflow.mjs';
 
 const execFileAsync = promisify(execFile);
 const isLoopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address || '');
@@ -18,6 +20,33 @@ export const AI_ENGINES = [
   { id: 'cursor', label: 'Cursor Agent', binary: 'cursor-agent', tool: 'cursor' },
   { id: 'claude', label: 'Claude Code', binary: 'claude', tool: 'claude-code' },
 ];
+
+function configuredModel(engine) {
+  try {
+    let model;
+    if (engine === 'codex') {
+      const path = resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex'), 'config.toml');
+      const root = readFileSync(path, 'utf8').split(/^[ \t]*\[/m, 1)[0];
+      model = /^[ \t]*model[ \t]*=[ \t]*(?:"([^"\r\n]+)"|'([^'\r\n]+)')[ \t]*(?:#.*)?$/m.exec(root)?.slice(1).find(Boolean);
+    } else {
+      const settingsPath = {
+        antigravity: '.gemini/antigravity-cli/settings.json',
+        cursor: '.cursor/cli-config.json',
+        claude: '.claude/settings.json',
+      }[engine];
+      if (settingsPath) model = JSON.parse(readFileSync(resolve(homedir(), settingsPath), 'utf8'))?.model;
+    }
+    return isModelId(model) ? model : null;
+  } catch {
+    return null;
+  }
+}
+
+function codexBannerModel(stderr) {
+  const banner = /^OpenAI Codex v[^\n]*\n-+\r?\nworkdir:[^\n]*\nmodel:[ \t]*([^\r\n]+)\r?\n/m.exec(stderr);
+  const model = banner?.[1].trim();
+  return isModelId(model) ? model : null;
+}
 
 function enrichedPath(baseEnv = process.env) {
   const extra = [
@@ -291,7 +320,7 @@ export function scanGitDirectoryTree(roots, { maxRepos = 80 } = {}) {
   return { repositories: [...found.values()], tccProtected };
 }
 
-export function spawnEngineProcess({ engineInfo, executable, mode, prompt, cwd, runDir, repoAccessiblePath, pathEnv = enrichedPath(), hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187' }) {
+export function spawnEngineProcess({ engineInfo, executable, mode, model = null, prompt, cwd, runDir, repoAccessiblePath, pathEnv = enrichedPath(), hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187' }) {
   const env = {
     ...process.env,
     PATH: pathEnv,
@@ -303,9 +332,11 @@ export function spawnEngineProcess({ engineInfo, executable, mode, prompt, cwd, 
   const lastMessageFile = join(runDir, 'last-message.txt');
   if (engineInfo.id === 'codex') {
     const args = [
-      'exec', '--skip-git-repo-check', '--ephemeral', '--color', 'never',
+      'exec', '--skip-git-repo-check', '--color', 'never',
       '-s', mode === 'develop' ? 'workspace-write' : 'read-only',
-      ...(mode !== 'develop' && repoAccessiblePath ? ['--add-dir', repoAccessiblePath] : []),
+      ...(mode !== 'develop' && repoAccessiblePath && repoAccessiblePath !== cwd ? ['--add-dir', repoAccessiblePath] : []),
+      ...(runDir && runDir !== cwd ? ['--add-dir', runDir] : []),
+      ...(model ? ['--model', model] : []),
       '-o', lastMessageFile,
       '-',
     ];
@@ -315,22 +346,27 @@ export function spawnEngineProcess({ engineInfo, executable, mode, prompt, cwd, 
   }
   if (engineInfo.id === 'antigravity') {
     const args = [
-      '--print',
       '--mode', mode === 'develop' ? 'accept-edits' : 'plan',
-      ...(mode !== 'develop' && repoAccessiblePath ? ['--add-dir', repoAccessiblePath] : []),
-      prompt,
+      ...(model ? [`--model=${model}`] : []),
+      ...(mode !== 'develop' && repoAccessiblePath && repoAccessiblePath !== cwd ? ['--add-dir', repoAccessiblePath] : []),
+      ...(runDir && runDir !== cwd ? ['--add-dir', runDir] : []),
+      // agy treats --print as a value-taking flag; attach the prompt with '=' so
+      // --mode / --add-dir or a prompt starting with '-' are never misparsed as flags.
+      `--print=${prompt}`,
     ];
     const child = spawn(executable, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     return { child, lastMessageFile: null };
   }
   if (engineInfo.id === 'cursor') {
-    const args = ['--print', ...(mode === 'develop' ? ['--force'] : ['--plan']), prompt];
+    const args = ['--print', ...(mode === 'develop' ? ['--force'] : ['--plan']), ...(model ? ['--model', model] : []), prompt];
     const child = spawn(executable, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     return { child, lastMessageFile: null };
   }
   const args = [
     '--print',
-    ...(mode !== 'develop' && repoAccessiblePath ? ['--add-dir', repoAccessiblePath] : []),
+    ...(model ? ['--model', model] : []),
+    ...(mode !== 'develop' && repoAccessiblePath && repoAccessiblePath !== cwd ? ['--add-dir', repoAccessiblePath] : []),
+    ...(runDir && runDir !== cwd ? ['--add-dir', runDir] : []),
   ];
   // Pass prompt via stdin so variadic --add-dir never swallows the prompt argument or triggers E2BIG.
   const child = spawn(executable, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -342,7 +378,7 @@ export function createLocalAutomation({
   db, transaction, audit, projectRole, visibleProjects, getTask, taskRole, assertWritable, assertAncestorsOpen,
   workflow, workspaceFor, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187',
   runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null,
-  workbenchBridge, canUseHostBridge,
+  workbenchBridge, canUseHostBridge, resolveActiveSkills = null,
 }) {
   const activeProcesses = new Map();
   const workbenchStarting = new Set();
@@ -368,12 +404,13 @@ export function createLocalAutomation({
     const actionType = row.action_type || payloadMeta?.actionType || 'DEFAULT';
     return {
       id: row.id, taskId: row.task_id, projectId: row.project_id, jobId: row.job_id || null,
-      actorId: row.actor_id, mode: row.mode, engine: row.engine, tool: row.tool, repoPath: row.repo_path || null,
+      actorId: row.actor_id, mode: row.mode, engine: row.engine, model: row.model ?? null, effectiveModel: row.effective_model ?? null, tool: row.tool, repoPath: row.repo_path || null,
       actionType,
       ...(payloadMeta?.askFindingId ? { askFindingId: payloadMeta.askFindingId } : {}),
       ...(payloadMeta?.askQuestion ? { askQuestion: payloadMeta.askQuestion } : {}),
       ...(payloadMeta?.worktreeBranch ? { worktreeBranch: payloadMeta.worktreeBranch } : {}),
       ...(payloadMeta?.worktreePath ? { worktreePath: payloadMeta.worktreePath } : {}),
+      ...(Array.isArray(payloadMeta?.appliedSkills) && payloadMeta.appliedSkills.length ? { appliedSkills: payloadMeta.appliedSkills } : {}),
       status: row.status, exitCode: row.exit_code ?? null, output: row.output || '', draft,
       error: row.error || null, startedAt: row.started_at, finishedAt: row.finished_at || null, updatedAt: row.updated_at,
       ...(row.runner === 'workbench' ? {
@@ -408,10 +445,11 @@ export function createLocalAutomation({
       ? extractReviewDraft(output, { allowPlainText: false }) : null;
     const updatedAt = typeof remote.updatedAt === 'string' && Number.isFinite(Date.parse(remote.updatedAt))
       ? remote.updatedAt : new Date().toISOString();
+    const effectiveModel = isModelId(remote.effectiveModel) ? remote.effectiveModel : null;
     const error = typeof remote.error === 'string' && remote.error ? remote.error.slice(0, 1000) : null;
-    db.prepare(`UPDATE local_ai_runs SET status=?,output=?,draft_json=?,error=?,finished_at=?,updated_at=?
+    db.prepare(`UPDATE local_ai_runs SET status=?,output=?,draft_json=?,error=?,finished_at=?,updated_at=?,effective_model=COALESCE(?,effective_model)
       WHERE id=? AND (status='RUNNING' OR updated_at<=?)`)
-      .run(status, output, draft ? JSON.stringify(draft) : null, error, status === 'RUNNING' ? null : updatedAt, updatedAt, row.id, updatedAt);
+      .run(status, output, draft ? JSON.stringify(draft) : null, error, status === 'RUNNING' ? null : updatedAt, updatedAt, effectiveModel, row.id, updatedAt);
     return db.prepare('SELECT * FROM local_ai_runs WHERE id=?').get(row.id);
   }
 
@@ -643,7 +681,7 @@ export function createLocalAutomation({
   }
 
   async function startAiRun(user, task, body, reauthorize) {
-    const allowed = ['mode', 'engine', 'jobId', 'stage', 'autoCreateReview', 'autoClaim', 'autoSubmitReport', 'customInstruction', 'runner', 'actionType', 'askFindingId', 'useWorktree'];
+    const allowed = ['mode', 'engine', 'model', 'jobId', 'stage', 'autoCreateReview', 'autoClaim', 'autoSubmitReport', 'customInstruction', 'runner', 'actionType', 'askFindingId', 'useWorktree', 'skillIds'];
     if (!body || Object.keys(body).some(key => !allowed.includes(key))) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
     const runner = body.runner || 'local';
     if (!['local', 'workbench'].includes(runner)) fail(400, 'INVALID_AI_RUNNER', '当前执行位置不受支持');
@@ -652,12 +690,17 @@ export function createLocalAutomation({
     const mode = body.mode || 'read';
     if (!['read', 'develop', 'review'].includes(mode)) fail(400, 'INVALID_AI_MODE', '不支持的 AI 执行模式');
     const actionType = body.actionType || 'DEFAULT';
-    const ACTION_TYPES = ['DEFAULT', 'CHAIN_ANALYZE', 'REVIEW_ASK', 'SUBTASK_DRAFT'];
+    const reviewRun = mode === 'review' || ['REVIEW_ASK', 'CHAIN_ANALYZE', 'SUBTASK_DRAFT'].includes(actionType);
+    const reviewStage = actionType === 'SUBTASK_DRAFT' ? 'TASK_BREAKDOWN' : actionType === 'CHAIN_ANALYZE' ? undefined : body.stage;
+    if (reviewRun) requireReviewableTask(task, reviewStage);
+    const ACTION_TYPES = ['DEFAULT', 'CHAIN_ANALYZE', 'REVIEW_ASK', 'SUBTASK_DRAFT', 'TECH_SPEC_GEN', 'TEST_CASE_GEN'];
     if (!ACTION_TYPES.includes(actionType)) fail(400, 'INVALID_ACTION_TYPE', '不支持的 AI 任务类型');
     if (actionType !== 'DEFAULT' && mode !== 'read') fail(400, 'INVALID_AI_MODE', '该专项分析任务仅支持只读模式执行');
     const engineInfo = AI_ENGINES.find(item => item.id === (body.engine || 'codex'));
     if (!engineInfo) fail(400, 'INVALID_AI_ENGINE', '不支持的本地 AI 引擎');
     if (workbench && !['codex', 'cursor'].includes(engineInfo.id)) fail(400, 'INVALID_AI_ENGINE', '工作台接入支持 Codex 与 Cursor Agent');
+    const model = optionalModelId(body.model);
+    if (model && workbench) fail(400, 'AI_MODEL_SELECTION_UNAVAILABLE', '工作台执行使用工作台配置的模型');
     const executable = workbench || runnerOverride ? 'managed' : findExecutable(engineInfo.binary, pathEnv);
     if (!executable) fail(409, 'AI_ENGINE_UNAVAILABLE', `未在本机检测到 ${engineInfo.label} (${engineInfo.binary}) 命令`);
 
@@ -695,12 +738,17 @@ export function createLocalAutomation({
       }
     }
 
+    if (reviewRun) {
+      currentTask = getTask(task.id, user);
+      requireReviewableTask(currentTask, reviewStage);
+    }
     let targetJob = null;
     let askFinding = null;
     if (mode === 'review') {
       if (body.jobId) {
         const row = db.prepare('SELECT * FROM jobs WHERE id=?').get(textField(body.jobId, 'jobId', { max: 64 }));
         if (!row || row.task_id !== currentTask.id) fail(404, 'JOB_NOT_FOUND', '指定的本地评审申请不存在');
+        requireReviewableTask(currentTask, row.stage);
         const hydrated = workflow.jobRow(row, currentTask);
         if (hydrated.executionMode !== 'LOCAL_REPORT' || hydrated.report || hydrated.decision || hydrated.stale) {
           fail(409, 'JOB_NOT_ELIGIBLE', '该评审申请已过期或已提交报告，请重新发起本地评审');
@@ -717,6 +765,7 @@ export function createLocalAutomation({
       const targetJobId = textField(body.jobId, 'jobId', { max: 64 });
       const row = db.prepare('SELECT * FROM jobs WHERE id=?').get(targetJobId);
       if (!row || row.task_id !== currentTask.id) fail(404, 'JOB_NOT_FOUND', '指定的评审报告不存在');
+      requireReviewableTask(currentTask, row.stage);
       targetJob = workflow.jobRow(row, currentTask);
       if (body.askFindingId) {
         const fid = textField(body.askFindingId, 'askFindingId', { max: 64 });
@@ -762,6 +811,31 @@ export function createLocalAutomation({
     const runDir = resolve(baseRunsDir, runId);
     mkdirSync(runDir, { recursive: true, mode: 0o700 });
     chmodSync(runDir, 0o700);
+    const explicitSkillIds = Array.isArray(body.skillIds)
+      ? body.skillIds.filter(item => typeof item === 'string' && item.trim()).slice(0, 12)
+      : null;
+    const targetScopes = mapRunToSkillScopes({ mode, actionType, stage: targetJob?.stage || body.stage || null });
+    const activeSkills = resolveActiveSkills
+      ? resolveActiveSkills(user, currentTask.projectId, targetScopes, explicitSkillIds)
+      : [];
+    let skillsDir = null;
+    if (activeSkills.length) {
+      skillsDir = join(runDir, 'skills');
+      mkdirSync(skillsDir, { recursive: true, mode: 0o700 });
+      for (const skill of activeSkills) {
+        const sDir = resolve(skillsDir, skill.name);
+        if (!sDir.startsWith(`${skillsDir}/`)) continue;
+        mkdirSync(sDir, { recursive: true, mode: 0o700 });
+        writeFileSync(join(sDir, 'SKILL.md'), String(skill.content || ''), { mode: 0o600 });
+        for (const f of Array.isArray(skill.files) ? skill.files : []) {
+          if (!f?.path || typeof f.content !== 'string') continue;
+          const targetFile = resolve(sDir, f.path);
+          if (!targetFile.startsWith(`${sDir}/`)) continue;
+          mkdirSync(dirname(targetFile), { recursive: true, mode: 0o700 });
+          writeFileSync(targetFile, f.content, { mode: 0o600 });
+        }
+      }
+    }
     const contextFilePath = join(runDir, 'context.json');
     const constitutionExcerpts = repoAccessiblePath ? readConstitutionExcerpts(repoAccessiblePath, repoStatus?.constitutionFiles || []) : [];
     const contextPayload = {
@@ -771,6 +845,7 @@ export function createLocalAutomation({
       workspace: bound,
       ...(repoStatus?.constitutionFiles?.length ? { constitutionFiles: repoStatus.constitutionFiles } : {}),
       ...(constitutionExcerpts.length ? { constitutionExcerpts } : {}),
+      ...(activeSkills.length ? { skills: activeSkills.map(s => ({ name: s.name, description: s.description, scopes: s.scopes, dir: skillsDir ? join(skillsDir, s.name) : null, files: (s.files || []).map(f => f.path) })) } : {}),
       ...(actionType === 'SUBTASK_DRAFT' ? { existingChildren: workflow.childrenFor(currentTask.id) } : {}),
       ...(targetJob ? {
         reviewJob: { id: targetJob.id, stage: targetJob.stage, inputHash: targetJob.inputHash },
@@ -782,14 +857,16 @@ export function createLocalAutomation({
     writeFileSync(contextFilePath, JSON.stringify(contextPayload, null, 2), { mode: 0o600 });
     chmodSync(contextFilePath, 0o600);
 
-    const cwd = mode === 'develop' ? usedRepoPath : runDir;
+    const cwd = usedRepoPath || runDir;
     const prompt = buildAiPrompt({
       mode, actionType, task: currentTask, job: targetJob, repoPath: usedRepoPath || null,
       constitutionFiles: repoStatus?.constitutionFiles || [], constitutionExcerpts,
+      activeSkills, skillsDir,
       contextFilePath, customInstruction, askFinding,
     });
     const runPayloadJson = JSON.stringify({
       actionType,
+      ...(activeSkills.length ? { appliedSkills: activeSkills.map(s => s.name) } : {}),
       ...(askFinding ? { askFindingId: askFinding.id } : {}),
       ...(actionType === 'REVIEW_ASK' && customInstruction ? { askQuestion: customInstruction } : {}),
       ...(worktreePath ? { worktreePath, worktreeBranch } : {}),
@@ -798,10 +875,10 @@ export function createLocalAutomation({
 
     transaction(() => {
       if (reauthorize) reauthorize();
-      db.prepare(`INSERT INTO local_ai_runs (id,task_id,project_id,job_id,actor_id,mode,engine,tool,repo_path,status,output,started_at,updated_at,runner,workbench_key,action_type,payload)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      db.prepare(`INSERT INTO local_ai_runs (id,task_id,project_id,job_id,actor_id,mode,engine,tool,repo_path,status,output,started_at,updated_at,runner,workbench_key,action_type,payload,model)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         runId, currentTask.id, currentTask.projectId, targetJob?.id || null, user.id, mode, engineInfo.id,
-        engineInfo.tool, usedRepoPath || null, 'RUNNING', '', now, now, runner, workbenchKey, actionType, runPayloadJson,
+        engineInfo.tool, usedRepoPath || null, 'RUNNING', '', now, now, runner, workbenchKey, actionType, runPayloadJson, model,
       );
       if (!workbench && mode === 'develop' && currentTask.assigneeId === user.id) {
         db.prepare('INSERT INTO devices VALUES (?,?,?,?,?,?) ON CONFLICT(task_id,device_id,actor_id) DO UPDATE SET tool=excluded.tool,status=excluded.status,last_seen=excluded.last_seen').run(
@@ -819,6 +896,7 @@ export function createLocalAutomation({
         requireWorkbenchOwner(fresh, currentTask.projectId);
         const latest = getTask(currentTask.id, fresh);
         const latestRole = taskRole(latest, fresh);
+        if (reviewRun) requireReviewableTask(latest, targetJob?.stage || reviewStage);
         if (mode !== 'read') assertWritable(latest, fresh);
         if (mode === 'develop' && latest.assigneeId !== fresh.id && !projectPermissions(fresh, latestRole).assignTasks) {
           fail(403, 'FORBIDDEN', '当前成员无权启动此任务的开发');
@@ -840,7 +918,7 @@ export function createLocalAutomation({
       try {
         const snapshot = JSON.stringify(contextPayload);
         const scopedPrompt = prompt.replace('（也可使用已配置的 taskflow MCP 工具核对）', '');
-        const objective = snapshot.length <= 120_000
+        const objective = scopedPrompt.length + snapshot.length <= 185_000
           ? `${scopedPrompt}\n\n以下 JSON 是当前成员获授权的任务数据快照，请作为资料阅读。\n${snapshot}`
           : scopedPrompt;
         const remote = await workbenchBridge.call({
@@ -865,6 +943,7 @@ export function createLocalAutomation({
 
     const beforeHead = mode === 'develop' ? repoStatus?.head || null : null;
     let outputBuffer = '';
+    let effectiveModel = null;
     let flushTimer = null;
     let settled = false;
 
@@ -877,7 +956,7 @@ export function createLocalAutomation({
           flushTimer = null;
           if (settled) return;
           try {
-            db.prepare("UPDATE local_ai_runs SET output=?,updated_at=? WHERE id=? AND status='RUNNING'").run(outputBuffer, new Date().toISOString(), runId);
+            db.prepare("UPDATE local_ai_runs SET output=?,updated_at=?,effective_model=? WHERE id=? AND status='RUNNING'").run(outputBuffer, new Date().toISOString(), effectiveModel, runId);
           } catch { /* db may be closed on shutdown */ }
         }, 500);
       }
@@ -897,7 +976,7 @@ export function createLocalAutomation({
           : actionType === 'SUBTASK_DRAFT' ? extractSubtaskDraft(cleanFinal || combined)
           : (actionType === 'CHAIN_ANALYZE' || actionType === 'REVIEW_ASK')
             ? { ...(extractReviewDraft(cleanFinal || combined, { allowPlainText: false }) || { summary: (cleanFinal || combined).trim().slice(0, 500), findings: [] }), answer: (cleanFinal || combined).slice(0, 32_000) }
-            : null)
+            : cleanFinal ? { summary: cleanFinal.slice(0, 500), findings: [], answer: cleanFinal } : null)
         : null;
       let autoSubmitted = false;
       let finalError = errorMessage;
@@ -955,8 +1034,8 @@ export function createLocalAutomation({
       const finishedAt = new Date().toISOString();
       const draftPayload = draft ? JSON.stringify({ ...draft, autoSubmitted }) : null;
       try {
-        db.prepare('UPDATE local_ai_runs SET status=?,exit_code=?,output=?,draft_json=?,error=?,finished_at=?,updated_at=? WHERE id=?').run(
-          status, exitCode, combined, draftPayload, finalError, finishedAt, finishedAt, runId,
+        db.prepare('UPDATE local_ai_runs SET status=?,exit_code=?,output=?,draft_json=?,error=?,finished_at=?,updated_at=?,effective_model=? WHERE id=?').run(
+          status, exitCode, combined, draftPayload, finalError, finishedAt, finishedAt, effectiveModel, runId,
         );
       } catch { /* db may be closed on shutdown */ }
     };
@@ -970,10 +1049,11 @@ export function createLocalAutomation({
         stop: () => { cancelled = true; controller.abort(); },
       });
       Promise.resolve().then(() => runnerOverride({
-        runId, mode, actionType, engine: engineInfo.id, tool: engineInfo.tool, task: currentTask, job: targetJob,
+        runId, mode, actionType, engine: engineInfo.id, model, tool: engineInfo.tool, task: currentTask, job: targetJob,
         repoPath: usedRepoPath, contextPayload, prompt, customInstruction, appendOutput, signal: controller.signal,
       })).then(result => {
         if (cancelled) return finalize({ status: 'CANCELLED', exitCode: null, errorMessage: '已由用户手动停止' });
+        if (isModelId(result?.effectiveModel)) effectiveModel = result.effectiveModel;
         return finalize({
           status: result?.exitCode && result.exitCode !== 0 ? 'FAILED' : 'SUCCEEDED',
           exitCode: result?.exitCode ?? 0,
@@ -992,7 +1072,7 @@ export function createLocalAutomation({
       const timeoutMins = Math.max(1, Math.round(timeoutMs / 60_000));
       const spawnRepoDir = ['CHAIN_ANALYZE', 'SUBTASK_DRAFT'].includes(actionType) ? null : repoAccessiblePath;
       const { child, lastMessageFile } = spawnEngineProcess({
-        engineInfo, executable, mode, prompt, cwd, runDir, repoAccessiblePath: spawnRepoDir, pathEnv, hostBridgeStateDir, hostBridgeApiUrl,
+        engineInfo, executable, mode, model, prompt, cwd, runDir, repoAccessiblePath: spawnRepoDir, pathEnv, hostBridgeStateDir, hostBridgeApiUrl,
       });
       let killedByStop = false;
       let timedOut = false;
@@ -1014,7 +1094,14 @@ export function createLocalAutomation({
         },
       });
       child.stdout?.on('data', appendOutput);
-      child.stderr?.on('data', appendOutput);
+      let startup = '';
+      child.stderr?.on('data', chunk => {
+        if (engineInfo.id === 'codex' && !effectiveModel && startup.length < 8192) {
+          startup = (startup + chunk.toString('utf8')).slice(0, 8192);
+          effectiveModel = codexBannerModel(startup);
+        }
+        appendOutput(chunk);
+      });
       child.on('error', err => {
         clearTimeout(timeoutHandle);
         void finalize({ status: 'FAILED', exitCode: null, errorMessage: err?.code === 'EPERM' ? 'macOS 权限限制，无法在此目录启动进程' : (err?.message || '启动本地 AI 进程失败') });
@@ -1291,7 +1378,7 @@ export function createLocalAutomation({
       requireBrowser(req, user, false);
       let engines;
       if (runnerOverride) {
-        engines = AI_ENGINES.map(item => ({ id: item.id, label: item.label, tool: item.tool, available: true }));
+        engines = AI_ENGINES.map(item => ({ id: item.id, label: item.label, tool: item.tool, available: true, supportsModel: true, defaultModel: null }));
       } else {
         const now = Date.now();
         if (!cachedEngineAvailability || now - cachedEngineAt >= 30_000) {
@@ -1300,11 +1387,16 @@ export function createLocalAutomation({
             label: item.label,
             tool: item.tool,
             available: !!findExecutable(item.binary, pathEnv),
+            supportsModel: true,
+            defaultModel: configuredModel(item.id),
           }));
           cachedEngineAt = now;
         }
         engines = cachedEngineAvailability;
       }
+      const workbenchProjectIds = visibleProjects(user)
+        .filter(project => canUseHostBridge(user, project.id))
+        .map(project => project.id);
       send(200, {
         supported: true,
         engines,
@@ -1313,6 +1405,8 @@ export function createLocalAutomation({
           terminal: process.platform === 'darwin' || !!appOpener,
           finder: process.platform === 'darwin' || !!appOpener,
           workbenchUrl: `${workbenchBridge.origin}/agent`,
+          workbenchSupportsModel: false,
+          workbenchProjectIds,
         },
       });
       return true;

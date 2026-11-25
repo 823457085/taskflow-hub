@@ -73,7 +73,7 @@ export const ChainStagePipelineBar: React.FC<{
         return (
           <React.Fragment key={stage}>
             {idx > 0 && <ChevronRight size={14} className="tf-stage-flow-arrow" aria-hidden="true" />}
-            <Tooltip title={`点击${selected ? '取消' : ''}筛选卡在「${STAGE_FULL_LABEL[stage]}」的交付链路`}>
+            <Tooltip title={selected ? '点击取消聚焦，查看全部 6 环交付链路' : blocked + stale + pending > 0 ? `点击聚焦「${STAGE_FULL_LABEL[stage]}」环节并查看待处理任务` : `点击查看「${STAGE_FULL_LABEL[stage]}」已通过的材料与评审结论`}>
               <button
                 type="button"
                 className={`tf-stage-flow-node${selected ? ' is-active' : ''}${blocked > 0 ? ' has-block' : cleared === roots.length ? ' is-all-clear' : ''}`}
@@ -112,6 +112,8 @@ export const TaskSplitChainView: React.FC<{
   role: Role;
   permissions: ProjectPermissions;
   chainStatuses: Record<string, ChainStatusMap>;
+  activeStage?: Stage;
+  onSelectStage?: (stage?: Stage) => void;
   selectedTaskId: string;
   onSelectTask: (id: string) => void;
   onOpenFullTask: (id: string) => void;
@@ -129,6 +131,8 @@ export const TaskSplitChainView: React.FC<{
   role,
   permissions,
   chainStatuses,
+  activeStage,
+  onSelectStage,
   selectedTaskId,
   onSelectTask,
   onOpenFullTask,
@@ -172,6 +176,10 @@ export const TaskSplitChainView: React.FC<{
   return (
     <div className="tf-tasks-split-layout">
       <div className="tf-tasks-split-rail" role="list" aria-label="交付任务清单">
+        <div className="tf-split-rail-head">
+          <span>任务清单</span>
+          <span>{tasks.length} 项</span>
+        </div>
         {tree.map(parent => {
           const parentSelected = activeTask?.id === parent.id;
           const statuses = chainStatuses[parent.id];
@@ -191,14 +199,7 @@ export const TaskSplitChainView: React.FC<{
                 <Flex justify="space-between" align="center" gap={6} wrap>
                   <Space size={6} wrap>
                     <Text className="tf-task-key" strong>{parent.jiraKey}</Text>
-                    <Tag style={{ marginInlineEnd: 0 }}>
-                      {parent.externalRef ? parent.externalRef.type : taskTypeLabel(parent.type)}
-                    </Tag>
-                    {!!parent.subtasks?.length && (
-                      <Tag color="geekblue" style={{ marginInlineEnd: 0 }}>
-                        {parent.subtasks.length} 子任务
-                      </Tag>
-                    )}
+                    <Text type="secondary" style={{ fontSize: 11.5 }}>{memberName(members, parent.assigneeId)}</Text>
                   </Space>
                   <StatusBadge variant={parent.status === 'DONE' ? 'green' : parent.status === 'IN_PROGRESS' || parent.status === 'IN_REVIEW' ? 'blue' : 'neutral'}>
                     {taskStatusLabel(parent.status)}
@@ -207,17 +208,14 @@ export const TaskSplitChainView: React.FC<{
                 <div className="tf-split-task-title">{parent.title}</div>
                 <Flex justify="space-between" align="center" gap={8} wrap>
                   <ChainStatusDots statuses={statuses} size="small" />
-                  <Text type="secondary" style={{ fontSize: 11.5 }}>
-                    {memberName(members, parent.assigneeId)}
-                  </Text>
+                  {bottleneck && bottleneckMeta ? (
+                    <span className={`tf-split-bottleneck tone-${bottleneckMeta.tone}`}>
+                      卡在 {bottleneck.index}.{CHAIN_STAGE_SHORT[bottleneck.stage]}
+                    </span>
+                  ) : statuses ? (
+                    <span className="tf-split-bottleneck tone-done">6 环全过</span>
+                  ) : null}
                 </Flex>
-                {bottleneck && bottleneckMeta ? (
-                  <div className={`tf-split-bottleneck tone-${bottleneckMeta.tone}`}>
-                    卡在 {bottleneck.index}. {CHAIN_STAGE_SHORT[bottleneck.stage]} · {bottleneckMeta.label}
-                  </div>
-                ) : statuses ? (
-                  <div className="tf-split-bottleneck tone-done">6 环链路全部就绪</div>
-                ) : null}
               </button>
 
               {!!parent.subtasks?.length && (
@@ -254,6 +252,8 @@ export const TaskSplitChainView: React.FC<{
               embedded
               key={activeTask.id}
               taskId={activeTask.id}
+              focusStage={activeStage}
+              onFocusStageChange={onSelectStage}
               user={user}
               role={role}
               permissions={permissions}

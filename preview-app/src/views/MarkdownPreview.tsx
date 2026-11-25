@@ -1,24 +1,32 @@
 import React from 'react';
-import { parseInlineTokens, parseMarkdownBlocks, type InlineToken, type MarkdownBlock } from './markdownLite';
+import { parseInlineTokens, parseMarkdownBlocks, parsePlainUrlTokens, type InlineToken, type MarkdownBlock } from './markdownLite';
+import './MarkdownPreview.css';
 
-function renderInline(text: string): React.ReactNode {
-  const tokens: InlineToken[] = parseInlineTokens(text);
+function renderTokens(tokens: InlineToken[]): React.ReactNode {
   return tokens.map((tok, idx) => {
     if (tok.type === 'code') {
       return <code key={idx} className="tf-md-inline-code">{tok.text}</code>;
     }
     if (tok.type === 'strong') {
-      return <strong key={idx}>{tok.text}</strong>;
+      return <strong key={idx}>{renderTokens(parsePlainUrlTokens(tok.text))}</strong>;
     }
     if (tok.type === 'link') {
       return (
-        <a key={idx} href={tok.href} target="_blank" rel="noreferrer noopener">
+        <a key={idx} className="tf-content-link" href={tok.href} target="_blank" rel="noreferrer noopener" onClick={event => event.stopPropagation()}>
           {tok.text}
         </a>
       );
     }
     return <React.Fragment key={idx}>{tok.text}</React.Fragment>;
   });
+}
+
+function renderInline(text: string) {
+  return renderTokens(parseInlineTokens(text));
+}
+
+export function LinkifiedText({ text }: { text: string }) {
+  return <>{renderTokens(parsePlainUrlTokens(text))}</>;
 }
 
 export const MarkdownPreview: React.FC<{ content: string; blocks?: MarkdownBlock[] }> = ({ content, blocks }) => {

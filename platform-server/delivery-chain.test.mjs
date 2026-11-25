@@ -101,7 +101,28 @@ test('delivery chain: breakdown review, verdict reports, chain report and list s
 
     const { statuses } = await expect('/api/chain-statuses?projectId=default', 'GET', undefined, token);
     assert.equal(statuses[parent.id].TASK_BREAKDOWN, 'CONDITIONAL');
-    assert.equal(statuses[child.id].PRD, 'MISSING');
+    assert.equal(statuses[child.id], undefined);
+    const childChain = (await expect(`/api/tasks/${child.id}/chain`, 'GET', undefined, token)).chain;
+    assert.equal(childChain.overall.status, 'NOT_REQUIRED');
+    assert.equal(childChain.parent.id, parent.id);
+    assert.deepEqual(childChain.links, []);
+    assert.equal(chain.children[0].links, null);
+
+    // Attaching the main task to Jira makes breakdown informational and preserves the old review.
+    app.db.prepare('UPDATE tasks SET jira_verified=1,external_ref=? WHERE id=?').run(JSON.stringify({ provider: 'jira', key: parent.jiraKey }), parent.id);
+    const linkedChain = (await expect(`/api/tasks/${parent.id}/chain`, 'GET', undefined, token)).chain;
+    assert.equal(linkedChain.links[1].status, 'LINKED');
+    assert.equal(linkedChain.links[1].statusLabel, '已关联');
+    assert.equal(linkedChain.links[1].next, null);
+    assert.equal(linkedChain.links[1].review, null);
+    assert.ok(!linkedChain.overall.blockers.some(item => item.linkId === 'BREAKDOWN'));
+    const rejected = await expect('/api/reviews', 'POST', { taskId: parent.id, stage: 'TASK_BREAKDOWN' }, token, 409);
+    assert.equal(rejected.error.code, 'JIRA_LINK_REVIEW_NOT_REQUIRED');
+    const historical = (await expect(`/api/jobs/${job.id}`, 'GET', undefined, token)).job;
+    assert.equal(historical.reviewRequired, false);
+    assert.equal(historical.report.score, 78);
+    assert.deepEqual((await expect('/api/jobs?projectId=default', 'GET', undefined, token)).jobs, []);
+    assert.equal((await expect(`/api/jobs?taskId=${parent.id}`, 'GET', undefined, token)).jobs[0].id, job.id);
   } finally { await app.close(); }
 });
 

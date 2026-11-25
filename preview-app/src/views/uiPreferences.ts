@@ -71,6 +71,14 @@ export function readStoredChoice<T extends string>(
   }
 }
 
+export function readStoredString(key: string, storage: MinimalStorage | null = defaultStorage()): string {
+  try {
+    return storage?.getItem(key) || '';
+  } catch {
+    return '';
+  }
+}
+
 export function writeStoredString(key: string, value: string, storage: MinimalStorage | null = defaultStorage()): void {
   if (!storage) return;
   try {

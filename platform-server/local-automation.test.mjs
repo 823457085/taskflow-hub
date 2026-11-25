@@ -121,6 +121,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
   const openedApps = [];
   let slowCancelSignal = null;
   const capturedReviewPrompts = [];
+  const readModel = 'test-model[reasoning=high]';
 
   // Mock loopback Jira server for testing Jira-as-PRD asset import
   const jiraServer = http.createServer((req, res) => {
@@ -156,7 +157,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     runsDir: join(tempRoot, 'runs'),
     repoScanRoots: [{ path: tempRoot, maxDepth: 2 }],
     appOpener: async info => { openedApps.push(info); },
-    runnerOverride: async ({ mode, repoPath, prompt, appendOutput, signal, customInstruction }) => {
+    runnerOverride: async ({ mode, model, repoPath, prompt, appendOutput, signal, customInstruction }) => {
       if (customInstruction === 'WAIT_FOR_STOP') {
         slowCancelSignal = signal;
         await new Promise(resolve => {
@@ -166,7 +167,7 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
       }
       if (mode === 'read') {
         appendOutput('正在读取任务与材料快照...\n');
-        return { exitCode: 0, output: '任务分析完成：核心改动在 example-web 通知模块。' };
+        return { exitCode: 0, output: '任务分析完成：核心改动在 example-web 通知模块。', effectiveModel: model === readModel ? 'test-model-2026' : null };
       }
       if (mode === 'develop') {
         appendOutput('正在修改业务仓库文件...\n');
@@ -326,11 +327,20 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     });
 
     // 3. 1-Click AI Read Analysis
-    const readStart = await browserCall(devCookie, `/api/tasks/${createdTask.id}/ai-runs`, {
-      method: 'POST', body: { mode: 'read', engine: 'codex' }, expectStatus: 201,
+    const path = `/api/tasks/${createdTask.id}/ai-runs`;
+    const invalidModel = await browserCall(devCookie, path, {
+      method: 'POST', body: { mode: 'read', engine: 'codex', model: '--config bad' }, expectStatus: 400,
     });
+    assert.equal(invalidModel.error.code, 'INVALID_AI_MODEL');
+    const readStart = await browserCall(devCookie, path, {
+      method: 'POST', body: { mode: 'read', engine: 'codex', model: readModel }, expectStatus: 201,
+    });
+    assert.equal(readStart.run.model, readModel);
+    assert.equal(readStart.run.effectiveModel, null);
     const readDone = await waitForRun(devCookie, createdTask.id, readStart.run.id);
     assert.equal(readDone.status, 'SUCCEEDED');
+    assert.equal(readDone.model, readModel);
+    assert.equal(readDone.effectiveModel, 'test-model-2026');
     assert.match(readDone.output, /任务分析完成/);
 
     // 4. 1-Click AI Develop with autoClaim: claims task, edits repo, commits, and syncs progress automatically!
@@ -386,6 +396,8 @@ test('full local automation flow: repo scan, open app, git diff CODE capture, Ji
     assert.equal(reviewDone.draft.findings.length, 1);
     assert.equal(capturedReviewPrompts.length, 1);
     assert.match(capturedReviewPrompts[0], /接口幂等与向下兼容契约核验 \[idempotency-contract-guard@1\.0\.0\]/);
+    assert.match(capturedReviewPrompts[0], /「问题：」「影响：」「建议：」/);
+    assert.match(capturedReviewPrompts[0], /P0 对应 CRITICAL.*P1 对应 WARN.*P2 对应 INFO/);
 
     const submittedJob = (await browserCall(adminCookie, `/api/jobs/${reviewStart.job.id}`)).job;
     assert.equal(submittedJob.status, 'REPORT_SUBMITTED');
@@ -632,6 +644,113 @@ cat
     const code = await new Promise(resolve => child.on('close', resolve));
     assert.equal(code, 0, stderr);
     assert.equal(stdout, 'Verify claude stdin prompt payload');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('antigravity engine places --mode/--add-dir before attached --print=<prompt> in review and develop modes', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-agy-args-'));
+  const repoDir = join(tempRoot, 'repo');
+  const runDir = join(tempRoot, 'run');
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  const fakeAgy = join(tempRoot, 'fake-agy.mjs');
+  writeFileSync(fakeAgy, `#!/usr/bin/env node
+process.stdout.write(JSON.stringify(process.argv.slice(2)));
+`, { mode: 0o755 });
+  const runCase = opts => new Promise((resolve, reject) => {
+    const { child } = spawnEngineProcess({
+      engineInfo: AI_ENGINES.find(e => e.id === 'antigravity'),
+      executable: fakeAgy,
+      ...opts,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    child.on('error', reject);
+    child.on('close', code => resolve({ code, stdout, stderr }));
+  });
+  try {
+    const reviewPrompt = '-- Leading dashes\nLine 2 with = equals';
+    const reviewRes = await runCase({
+      mode: 'review',
+      model: 'gemini-test',
+      prompt: reviewPrompt,
+      cwd: runDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    assert.equal(reviewRes.code, 0, reviewRes.stderr);
+    assert.deepEqual(JSON.parse(reviewRes.stdout), [
+      '--mode', 'plan',
+      '--model=gemini-test',
+      '--add-dir', repoDir,
+      `--print=${reviewPrompt}`,
+    ]);
+
+    const developPrompt = 'Implement offline door support';
+    const developRes = await runCase({
+      mode: 'develop',
+      prompt: developPrompt,
+      cwd: repoDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    assert.equal(developRes.code, 0, developRes.stderr);
+    assert.deepEqual(JSON.parse(developRes.stdout), [
+      '--mode', 'accept-edits',
+      '--add-dir', runDir,
+      `--print=${developPrompt}`,
+    ]);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('codex engine persists sessions without --ephemeral and attaches runDir when cwd is bound repository', async () => {
+  const tempRoot = mkdtempSync(join(tmpdir(), 'tf-codex-args-'));
+  const repoDir = join(tempRoot, 'repo');
+  const runDir = join(tempRoot, 'run');
+  mkdirSync(repoDir, { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  const fakeCodex = join(tempRoot, 'fake-codex.mjs');
+  writeFileSync(fakeCodex, `#!/usr/bin/env node
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2), prompt: Buffer.concat(chunks).toString('utf8') }));
+});
+`, { mode: 0o755 });
+  try {
+    const { child, lastMessageFile } = spawnEngineProcess({
+      engineInfo: AI_ENGINES.find(e => e.id === 'codex'),
+      executable: fakeCodex,
+      mode: 'review',
+      model: 'gpt-6.2-sol',
+      prompt: 'Review MR #647',
+      cwd: repoDir,
+      runDir,
+      repoAccessiblePath: repoDir,
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => { stdout += d.toString('utf8'); });
+    child.stderr.on('data', d => { stderr += d.toString('utf8'); });
+    const code = await new Promise(resolve => child.on('close', resolve));
+    assert.equal(code, 0, stderr);
+    const parsed = JSON.parse(stdout);
+    assert.ok(!parsed.args.includes('--ephemeral'));
+    assert.deepEqual(parsed.args, [
+      'exec', '--skip-git-repo-check', '--color', 'never',
+      '-s', 'read-only',
+      '--add-dir', runDir,
+      '--model', 'gpt-6.2-sol',
+      '-o', lastMessageFile,
+      '-',
+    ]);
+    assert.equal(parsed.prompt, 'Review MR #647');
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

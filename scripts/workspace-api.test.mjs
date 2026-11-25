@@ -41,3 +41,12 @@ test('createApiClient deduplicates GETs cleanly without unhandled rejections on 
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+test('preserves action-specific connector denial codes alongside the server message', async () => {
+  const api = createApiClient(async () => Response.json({
+    error: { code: 'CONNECTOR_FORBIDDEN', message: '当前角色无法读取此连接' },
+  }, { status: 403 }));
+  await assert.rejects(api('connectors/confluence/import', {}), {
+    status: 403, code: 'CONNECTOR_FORBIDDEN', message: '当前角色无法读取此连接',
+  });
+});

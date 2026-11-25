@@ -1,4 +1,4 @@
-import type { AssetKind, WorkTask } from './workspaceApi.ts';
+import type { AssetKind, ConnectorSummary, WorkTask } from './workspaceApi.ts';
 
 export interface LocalGitRepoInfo {
   name: string;
@@ -22,6 +22,18 @@ export interface RelatedJiraIssue {
   relation: 'parent' | 'mentioned';
   sameProject: boolean;
   url?: string;
+}
+
+export function canImportTaskMaterial(
+  connector: ConnectorSummary | undefined,
+  manageConnections: boolean,
+  reuseLocalCredentials: boolean,
+) {
+  if (!connector || connector.selectionUnavailable || connector.status === 'ACCOUNT_UNAVAILABLE') return false;
+  if (connector.status === 'UNCONFIGURED') {
+    return manageConnections && reuseLocalCredentials && connector.localProfileAvailable === true;
+  }
+  return connector.hasCredential === true && (manageConnections || !!connector.accountId);
 }
 
 export interface TaskSmartHints {
@@ -160,6 +172,23 @@ export function extractTaskSmartHints(task: Pick<WorkTask, 'jiraKey' | 'title' |
   }
 
   return { detectedLinks, relatedJira, repoHintNames, matchedRepos: matchedRepos.slice(0, 6) };
+}
+
+export function formatJiraDescriptionForDisplay(description: unknown): string {
+  return flattenDescription(description)
+    .split(/\r?\n/)
+    .filter(line => !/^(?:JIRA_DEV_REQUIREMENT_MARKER:[ \t]*jira-dev-requirement-[\w-]+|Repository ID:[ \t]*git-[\da-f]{64})[ \t]*$/i.test(line.trim()))
+    .map(line => line
+      .replace(/^\*([^*]+)\*[ \t]*$/, '**$1**')
+      .replace(/\[([^|\]]+)\|(https?:\/\/[^\s\]|]+)\]/g, (wikiLink, label: string, url: string) => {
+        const href = cleanExtractedUrl(url.replace(/\(/g, '%28').replace(/\)/g, '%29'));
+        if (!href) return wikiLink;
+        const host = new URL(href).hostname.replace(/^www\./, '');
+        const linkText = label === url ? (host === 'figma.com' ? 'Figma 设计稿' : classifyUrl(href).label) : label;
+        return `[${linkText}](${href})`;
+      }))
+    .join('\n')
+    .trim();
 }
 
 export function formatJiraTaskAsMarkdown(task: Pick<WorkTask, 'jiraKey' | 'title' | 'externalRef'>): string {

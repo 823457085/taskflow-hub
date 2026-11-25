@@ -27,6 +27,7 @@ async function fixture() {
       if (state.customSearch) value = state.customSearch(url);
       else {
         assert.equal(url.searchParams.get('maxResults'), '30');
+        assert.equal(url.searchParams.get('startAt'), null);
         value = { issues: state.response || [issue('TEST-1')], total: 1 };
       }
     } else if (url.pathname.startsWith('/rest/api/2/issue/')) value = state.response || issue(decodeURIComponent(url.pathname.split('/').at(-1)));
@@ -85,6 +86,31 @@ test('Jira intake reads a link or picker in a member project without connector-m
   assert.deepEqual(f.app.db.prepare('SELECT status,last_checked_at,version FROM connector_configs WHERE project_id=?').get(f.project.id), before);
   await f.call('/api/connectors/jira/read', { projectId: f.project.id, resource: 'jira_issue', issueKey: 'TEST-1' }, member, 403, 'CONNECTOR_FORBIDDEN');
   assert.ok(f.state.requests.every(request => request.method === 'GET'));
+});
+
+test('Jira requirement picker scopes and pages main issues without offering linked children', async t => {
+  const f = await fixture(); t.after(() => f.close()); const member = await f.member();
+  const parent = (await f.call('/api/jira/tasks/import', { reference: 'TEST-1' }, member)).data.task;
+  await f.call('/api/jira/tasks/import', { reference: 'TEST-2', parentTaskId: parent.id }, member);
+  const issue = (key, fields) => ({ ...f.issue(key), fields: { ...f.issue(key).fields, ...fields } });
+  const remoteChild = issue('TEST-3', { issuetype: { id: '10', name: '子任务', subtask: true }, parent: { key: 'TEST-1' } });
+  const linkedParent = issue('TEST-4', { parent: { key: 'TEST-1' } });
+  f.state.customSearch = url => {
+    assert.equal(url.searchParams.get('maxResults'), '8');
+    assert.equal(url.searchParams.get('startAt'), '8');
+    assert.equal(url.searchParams.get('jql'), 'project = 101 AND (summary ~ "Needle words" AND issuetype in standardIssueTypes()) ORDER BY updated DESC, key DESC');
+    return { issues: [f.issue('TEST-2'), remoteChild, linkedParent, f.issue('TEST-5')], total: 22 };
+  };
+  const path = '/api/jira/tasks/search';
+  const result = (await f.call(path, { projectId: f.project.id, requireMainTask: true, page: 2, query: 'Needle words' }, member)).data;
+  assert.deepEqual(result.items.map(item => item.key), ['TEST-5']);
+  assert.equal(result.project.id, f.project.id);
+  assert.deepEqual([result.page, result.pageSize, result.total], [2, 8, 22]);
+  const count = f.state.requests.length;
+  await f.call(path, { projectId: f.project.id, requireMainTask: 'true' }, member, 400, 'INVALID_INPUT');
+  await f.call(path, { projectId: f.project.id, requireMainTask: true, page: 0 }, member, 400, 'INVALID_INPUT');
+  await f.call(path, { projectId: f.project.id, requireMainTask: true, page: 10001 }, member, 400, 'INVALID_INPUT');
+  assert.equal(f.state.requests.length, count);
 });
 
 test('link admission rejects foreign sources, invisible projects, injected fields and anonymous connections before remote calls', async t => {
@@ -163,6 +189,70 @@ test('Jira intake infers a verified parent, rejects frozen parents, and never as
   assert.equal(adminImport.assigneeId, null);
 });
 
+test('Jira parent intake and scoped sync fetch direct children without replacing local work or main task context', async t => {
+  const f = await fixture(); t.after(() => f.close()); const member = await f.member();
+  const makeChild = (key, parentKey, status, statusCategory) => ({
+    ...f.issue(key), fields: {
+      ...f.issue(key).fields,
+      summary: `Jira ${key}`, parent: { key: parentKey }, issuetype: { id: '10', name: '子任务', subtask: true },
+      status: { name: status, statusCategory: { key: statusCategory } },
+    },
+  });
+  const old = (await f.call('/api/jira/tasks/import', { reference: 'TEST-2' }, member)).data.task;
+  const otherParent = (await f.call('/api/jira/tasks/import', { reference: 'TEST-9' }, member)).data.task;
+  const conflicting = (await f.call('/api/jira/tasks/import', { reference: 'TEST-4', parentTaskId: otherParent.id }, member)).data.task;
+  f.app.db.prepare("UPDATE tasks SET title='Local edited title',status='IN_PROGRESS' WHERE id=?").run(old.id);
+  await f.call(`/api/tasks/${old.id}/assets`, { kind: 'PRD', title: 'Local PRD', content: 'Keep history' }, member, 201);
+
+  const parent = f.issue('TEST-1');
+  f.state.issues.set(parent.key, { ...parent, fields: { ...parent.fields, subtasks: ['TEST-2', 'TEST-3', 'TEST-4', 'TEST-5'].map(key => ({ key })) } });
+  f.state.issues.set('TEST-2', makeChild('TEST-2', parent.key, '测试中', 'indeterminate'));
+  f.state.issues.set('TEST-3', makeChild('TEST-3', parent.key, '已完成', 'done'));
+  f.state.issues.set('TEST-4', makeChild('TEST-4', parent.key, '开发中', 'indeterminate'));
+  f.state.customSearch = url => {
+    const keys = [...url.searchParams.get('jql').matchAll(/"(TEST-[1-9]\d*)"/g)].map(match => match[1]);
+    const rows = keys.map(key => f.state.issues.get(key)).filter(Boolean);
+    return { issues: rows, total: rows.length };
+  };
+  const result = (await f.call('/api/jira/tasks/import', { reference: parent.key }, member)).data;
+  assert.deepEqual(result.linkedKeys, ['TEST-2', 'TEST-3']);
+  assert.deepEqual(result.skippedChildren, [
+    { jiraKey: 'TEST-4', reason: 'JIRA_SUBTASK_CONFLICT' },
+    { jiraKey: 'TEST-5', reason: 'JIRA_SUBTASK_UNAVAILABLE' },
+  ]);
+  assert.match(f.state.jql, /^project = 101 AND \(key in/);
+  const path = '/api/jira/tasks/sync-children';
+  const first = (await f.call(path, { taskId: result.task.id }, member)).data;
+  assert.equal(first.linkedCount, 0);
+  assert.equal(first.updatedCount, 0);
+  const [retained, completed] = first.children;
+  assert.equal(retained.id, old.id);
+  assert.equal(retained.assigneeId, member.user.id);
+  assert.equal(retained.title, 'Local edited title');
+  assert.equal(retained.status, 'IN_PROGRESS');
+  assert.equal(retained.externalRef.status, '测试中');
+  assert.equal(retained.externalRef.issueType.subtask, true);
+  assert.equal(completed.assigneeId, null);
+  assert.equal(completed.status, 'DONE');
+  assert.equal(f.app.db.prepare('SELECT parent_id FROM tasks WHERE id=?').get(conflicting.id).parent_id, otherParent.id);
+
+  // Absence from this read is not a request to remove local rows or assets.
+  f.state.issues.delete('TEST-3');
+  f.state.issues.set('TEST-2', makeChild('TEST-2', parent.key, '已完成', 'done'));
+  const after = (await f.call(path, { taskId: result.task.id }, member)).data;
+  assert.deepEqual(after.children.map(task => task.jiraKey), ['TEST-2', 'TEST-3']);
+  assert.equal(after.children[0].externalRef.status, '已完成');
+  assert.equal(after.children[0].status, 'IN_PROGRESS');
+  assert.equal(after.updatedCount, 1);
+  assert.equal(after.task.contextVersion, first.task.contextVersion);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM assets WHERE task_id=?').get(old.id).n, 1);
+  assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM jobs').get().n, 0);
+  await f.call(path, { taskId: old.id }, member, 409, 'JIRA_PARENT_REQUIRED');
+  const outsider = await f.member('other-project-user', f.other.id);
+  await f.call(path, { taskId: result.task.id }, outsider, 403, 'PROJECT_FORBIDDEN');
+  assert.ok(f.state.requests.every(request => request.method === 'GET'));
+});
+
 test('remote project mismatches and reflected credential text stay contained', async t => {
   const f = await fixture(); t.after(() => f.close()); const member = await f.member();
   f.state.response = f.issue('OTHER-1');
@@ -188,7 +278,10 @@ test('a task-scoped local device cannot reuse Jira account reads or imports', as
   await f.call('/api/device-authorizations/decision', { userCode: paired.userCode, decision: 'APPROVE', projectIds: [f.project.id] }, { cookie: member.cookie });
   const device = (await f.call('/api/device-authorizations/poll', { deviceCode: paired.deviceCode }, {})).data;
   const before = f.state.requests.length;
-  for (const action of ['lookup', 'search', 'import']) await f.call(`/api/jira/tasks/${action}`, action === 'search' ? { projectId: f.project.id } : { reference: 'TEST-1' }, device, 403, 'LOCAL_DEVICE_SCOPE');
+  for (const [action, body] of [
+    ['lookup', { reference: 'TEST-1' }], ['search', { projectId: f.project.id }],
+    ['import', { reference: 'TEST-1' }], ['sync-children', { taskId: 'not-checked' }],
+  ]) await f.call(`/api/jira/tasks/${action}`, body, device, 403, 'LOCAL_DEVICE_SCOPE');
   assert.equal(f.state.requests.length, before);
 });
 
@@ -250,28 +343,45 @@ test('sync-mine imports latest currentUser tasks, links parents, removes untouch
     ['TEST-12', makeIssue('TEST-12', { summary: 'Reassigned with local PRD', assigneeKey: 'other-user', assigneeName: 'liangshilong' })],
     ['TEST-20', makeIssue('TEST-20', { summary: 'Active parent', status: '开发中', statusCat: 'indeterminate' })],
     ['TEST-21', makeIssue('TEST-21', { summary: 'Active subtask', parentKey: 'TEST-20' })],
+    ['TEST-22', makeIssue('TEST-22', { summary: 'Completed subtask assigned to a teammate', parentKey: 'TEST-20', status: '已完成', statusCat: 'done', assigneeKey: 'teammate' })],
   ]);
+  liveByKey.get('TEST-20').fields.subtasks = [{ key: 'TEST-21' }, { key: 'TEST-22' }];
+  let childActive = true;
   f.state.customSearch = url => {
     const jql = url.searchParams.get('jql') || '';
-    if (jql.includes('assignee = currentUser()')) {
-      return { issues: [liveByKey.get('TEST-21'), liveByKey.get('TEST-20')], total: 2 };
-    }
-    return { issues: ['TEST-10', 'TEST-11', 'TEST-12'].map(k => liveByKey.get(k)), total: 3 };
+    const keys = jql.includes('assignee = currentUser()')
+      ? childActive ? ['TEST-21', 'TEST-20'] : ['TEST-20']
+      : [...jql.matchAll(/"(TEST-[1-9]\d*)"/g)].map(match => match[1]);
+    const issues = keys.map(key => liveByKey.get(key)).filter(Boolean);
+    return { issues, total: issues.length };
   };
 
   const syncRes = (await f.call('/api/jira/tasks/sync-mine', {}, member)).data;
-  assert.deepEqual(syncRes.importedKeys.sort(), ['TEST-20', 'TEST-21']);
+  assert.deepEqual(syncRes.importedKeys.sort(), ['TEST-20', 'TEST-21', 'TEST-22']);
   assert.deepEqual(syncRes.removedKeys.sort(), ['TEST-10', 'TEST-11']);
   assert.deepEqual(syncRes.unassignedKeys, ['TEST-12']);
 
   const remaining = (await f.call('/api/tasks', undefined, member)).data.tasks;
-  assert.deepEqual(remaining.map(r => r.jiraKey).sort(), ['TEST-12', 'TEST-20', 'TEST-21']);
+  assert.deepEqual(remaining.map(r => r.jiraKey).sort(), ['TEST-12', 'TEST-20', 'TEST-21', 'TEST-22']);
   const parentRow = remaining.find(r => r.jiraKey === 'TEST-20');
   const childRow = remaining.find(r => r.jiraKey === 'TEST-21');
   const unassignedRow = remaining.find(r => r.jiraKey === 'TEST-12');
   assert.equal(parentRow.status, 'IN_PROGRESS');
   assert.equal(childRow.parentId, parentRow.id);
   assert.equal(unassignedRow.assigneeId, null);
+  const sibling = remaining.find(r => r.jiraKey === 'TEST-22');
+  assert.equal(sibling.parentId, parentRow.id);
+  assert.equal(sibling.assigneeId, null);
+  assert.equal(sibling.externalRef.status, '已完成');
+
+  childActive = false;
+  liveByKey.set('TEST-21', makeIssue('TEST-21', { summary: 'Finished subtask', parentKey: 'TEST-20', status: '已完成', statusCat: 'done', assigneeKey: 'teammate' }));
+  const nextSync = (await f.call('/api/jira/tasks/sync-mine', {}, member)).data;
+  assert.ok(!nextSync.removedKeys.includes('TEST-21'));
+  const after = (await f.call(`/api/tasks/${childRow.id}`, undefined, member)).data.task;
+  assert.equal(after.parentId, parentRow.id);
+  assert.equal(after.assigneeId, member.user.id);
+  assert.equal(after.externalRef.status, '已完成');
 });
 
 test('sync-mine deduplicates concurrent requests and sync-projects preserves locally customized project names', async t => {

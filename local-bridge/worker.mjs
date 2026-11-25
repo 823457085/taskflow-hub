@@ -24,6 +24,7 @@ const UPDATE_EVERY_MS = 6 * 60 * 60_000;
 const CONFIG_KEYS = ['projects', 'executor', 'engines', 'allowDevelop', 'maxMinutes', 'delivery', 'deliverySync', 'skillSync', 'workbench', 'autoUpdate', 'remoteAgent'];
 const EXECUTORS = ['cli', 'delivery'];
 const ENGINE_BINARIES = { codex: 'codex', cursor: 'cursor-agent' };
+const isModelId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._/:@+,\[\]=\-]{0,119}$/.test(value);
 
 export function workerConfigTemplate() {
   return {
@@ -205,27 +206,37 @@ export function findBinary(name, override, env = process.env) {
 
 export function cliExecutor({ spawnImpl = spawn, env = process.env } = {}) {
   return {
-    async start({ engine, mode, prompt, cwd, runDir, repo, onOutput, config }) {
+    async start({ engine, mode, model, prompt, cwd, runDir, repo, onOutput, config }) {
       const binary = findBinary(ENGINE_BINARIES[engine], config.engines[engine], env);
       if (!binary) throw new Error(`本机未找到 ${ENGINE_BINARIES[engine]}，请安装或在 worker.json 的 engines 中指定绝对路径。`);
       const lastMessage = join(runDir, 'last-message.txt');
       const childEnv = { ...env, PATH: searchPath(env).join(':'), CI: '1', NO_COLOR: '1' };
+      if (model && !isModelId(model)) throw new Error('模型标识无效。');
+      const modelArgs = model ? ['--model', model] : [];
       const args = engine === 'codex'
-        ? ['exec', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '-s', mode === 'develop' ? 'workspace-write' : 'read-only',
-          ...(mode !== 'develop' && repo ? ['--add-dir', repo] : []), '-o', lastMessage, '-']
-        : ['--print', ...(mode === 'develop' ? ['--force'] : ['--plan']), prompt];
+        ? ['exec', '--skip-git-repo-check', '--color', 'never', '-s', mode === 'develop' ? 'workspace-write' : 'read-only',
+          ...(mode !== 'develop' && repo && repo !== cwd ? ['--add-dir', repo] : []),
+          ...(runDir && runDir !== cwd ? ['--add-dir', runDir] : []),
+          ...modelArgs, '-o', lastMessage, '-']
+        : ['--print', ...(mode === 'develop' ? ['--force'] : ['--plan']), ...modelArgs, prompt];
       const child = spawnImpl(binary, args, { cwd, env: childEnv, stdio: [engine === 'codex' ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
       if (engine === 'codex') child.stdin.end(prompt, 'utf8');
       let combined = '';
       const collect = chunk => { const text = chunk.toString('utf8'); combined = (combined + text).slice(-OUTPUT_MAX); onOutput(text); };
       child.stdout.on('data', collect);
-      child.stderr.on('data', collect);
+      let startup = '';
+      child.stderr.on('data', chunk => {
+        if (engine === 'codex' && startup.length < 8192) startup = (startup + chunk.toString('utf8')).slice(0, 8192);
+        collect(chunk);
+      });
       const wait = new Promise((resolve, reject) => {
         child.once('error', reject);
         child.once('close', async code => {
           let final = '';
           if (engine === 'codex') { try { final = (await readFile(lastMessage, 'utf8')).trim(); } catch { final = ''; } }
-          resolve({ exitCode: code, output: final || combined });
+          const banner = /^OpenAI Codex v[^\n]*\n-+\r?\nworkdir:[^\n]*\nmodel:[ \t]*([^\r\n]+)\r?\n/m.exec(startup);
+          const model = banner?.[1].trim();
+          resolve({ exitCode: code, output: final || combined, ...(isModelId(model) ? { effectiveModel: model } : {}) });
         });
       });
       return { wait, stop: () => { try { child.kill('SIGTERM'); } catch {} setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000).unref(); } };
@@ -233,8 +244,8 @@ export function cliExecutor({ spawnImpl = spawn, env = process.env } = {}) {
   };
 }
 
-export async function defaultConfirm({ title, repo, engine, dispatchedBy }, { input = process.stdin, output = process.stderr, platform = process.platform, execFileImpl = execFile } = {}) {
-  const message = `TaskFlow 请求在本机执行开发任务\n\n任务：${title}\n${dispatchedBy ? `派发人：${dispatchedBy}\n` : ''}仓库：${repo}\n引擎：${engine}\n\n允许后 AI 可修改该仓库文件（不会自动 push）。`;
+export async function defaultConfirm({ title, repo, engine, model, dispatchedBy }, { input = process.stdin, output = process.stderr, platform = process.platform, execFileImpl = execFile } = {}) {
+  const message = `TaskFlow 请求在本机执行开发任务\n\n任务：${title}\n${dispatchedBy ? `派发人：${dispatchedBy}\n` : ''}仓库：${repo}\n引擎：${engine}${model ? `\n模型：${model}` : ''}\n\n允许后 AI 可修改该仓库文件（不会自动 push）。`;
   if (input.isTTY) {
     const rl = createInterface({ input, output });
     try {
@@ -302,23 +313,28 @@ export async function runWorker(options = {}, deps = {}) {
     } catch (error) { log(`同步团队 Skill 失败：${error.message}`); }
   }
 
-  async function handleRun(summary) {
+  const availableModelEngines = () => config.executor === 'cli'
+    ? Object.keys(ENGINE_BINARIES).filter(engine => findBinary(ENGINE_BINARIES[engine], config.engines[engine]))
+    : [];
+
+  async function handleRun(summary, modelEngines) {
     let claim;
-    try { claim = await call(`/api/bridge/runs/${encodeURIComponent(summary.id)}/claim`, {}); }
+    try { claim = await call(`/api/bridge/runs/${encodeURIComponent(summary.id)}/claim`, modelEngines.includes(summary.engine) ? { supportsModel: true } : {}); }
     catch (error) { log(`领取派发 ${summary.id} 失败：${error.message}`); return; }
     const { run, payload, placeholders } = claim;
-    const finish = async (status, output = '', error, exitCode) => {
+    const finish = async (status, output = '', error, exitCode, effectiveModel) => {
       try {
-        await call(`/api/bridge/runs/${encodeURIComponent(run.id)}/result`, { status, output: output.slice(-OUTPUT_MAX), ...(error ? { error: error.slice(0, 1000) } : {}), ...(Number.isInteger(exitCode) ? { exitCode } : {}) });
+        await call(`/api/bridge/runs/${encodeURIComponent(run.id)}/result`, { status, output: output.slice(-OUTPUT_MAX), ...(error ? { error: error.slice(0, 1000) } : {}), ...(Number.isInteger(exitCode) ? { exitCode } : {}), ...(isModelId(effectiveModel) ? { effectiveModel } : {}) });
         log(`派发 ${run.id}（${payload.title}）结束：${status}${error ? `，${error}` : ''}`);
       } catch (reportError) { log(`回传派发 ${run.id} 结果失败：${reportError.message}`); }
     };
     log(`领取派发 ${run.id}：${payload.title} · ${run.mode} · ${run.engine}${payload.dispatchedBy ? ` · 派发人 ${payload.dispatchedBy}` : ''}`);
+    if (run.model && !modelEngines.includes(run.engine)) return finish('FAILED', '', '本机 Bridge 暂不支持指定模型');
     const repo = config.projects[run.projectId] || null;
     if (run.mode === 'develop') {
       if (!config.allowDevelop) return finish('FAILED', '', '本机 Bridge 未开启开发类任务（worker.json 中 allowDevelop 为 false）');
       if (!repo) return finish('FAILED', '', '本机未映射该项目的代码仓库，请在 worker.json 的 projects 中配置');
-      if (!await confirm({ title: payload.title, mode: run.mode, repo, engine: run.engine, ...(payload.dispatchedBy ? { dispatchedBy: payload.dispatchedBy } : {}) })) return finish('CANCELLED', '', '本机用户拒绝或未在 2 分钟内确认开发任务');
+      if (!await confirm({ title: payload.title, mode: run.mode, repo, engine: run.engine, ...(run.model ? { model: run.model } : {}), ...(payload.dispatchedBy ? { dispatchedBy: payload.dispatchedBy } : {}) })) return finish('CANCELLED', '', '本机用户拒绝或未在 2 分钟内确认开发任务');
     }
     const runDir = join(stateDir, 'runs', run.id);
     await mkdir(runDir, { recursive: true, mode: 0o700 });
@@ -335,7 +351,7 @@ export async function runWorker(options = {}, deps = {}) {
     let handle;
     try {
       handle = await executor.start({
-        engine: run.engine, mode: run.mode, prompt, cwd: run.mode === 'develop' ? repo : runDir, runDir, repo, config,
+        engine: run.engine, mode: run.mode, model: run.model, prompt, cwd: run.mode === 'develop' ? repo : runDir, runDir, repo, config,
         title: payload.title, taskFlowUrl: payload.taskFlowUrl, runId: run.id,
         onOutput: text => { tail = (tail + text).slice(-OUTPUT_MAX); },
       });
@@ -361,10 +377,10 @@ export async function runWorker(options = {}, deps = {}) {
     await rm(runDir, { recursive: true, force: true });
     const output = outcome.output || tail;
     if (stopReason === 'CLOSED') return log(`派发 ${run.id} 已在平台侧结束，已停止本机执行`);
-    if (stopReason === 'CANCELLED') return finish('CANCELLED', output, '已按网页请求停止');
-    if (stopReason === 'TIMEOUT') return finish('FAILED', output, `超过 ${config.maxMinutes} 分钟未完成，已停止`);
-    if (outcome.exitCode === 0) return finish('SUCCEEDED', output, undefined, 0);
-    return finish('FAILED', output, outcome.error || `执行器退出码 ${outcome.exitCode}`, outcome.exitCode);
+    if (stopReason === 'CANCELLED') return finish('CANCELLED', output, '已按网页请求停止', undefined, outcome.effectiveModel);
+    if (stopReason === 'TIMEOUT') return finish('FAILED', output, `超过 ${config.maxMinutes} 分钟未完成，已停止`, undefined, outcome.effectiveModel);
+    if (outcome.exitCode === 0) return finish('SUCCEEDED', output, undefined, 0, outcome.effectiveModel);
+    return finish('FAILED', output, outcome.error || `执行器退出码 ${outcome.exitCode}`, outcome.exitCode, outcome.effectiveModel);
   }
 
   for (;;) {
@@ -372,8 +388,11 @@ export async function runWorker(options = {}, deps = {}) {
     if (await maybeUpdate()) { log('Bridge 已更新，正在重启以加载新版本'); return { restart: true }; }
     await maybeSync();
     await maybeSyncSkills();
+    const modelEngines = availableModelEngines();
+    const query = new URLSearchParams({ wait: waitSeconds });
+    for (const engine of modelEngines) query.append('modelEngine', engine);
     let next;
-    try { next = await call(`/api/bridge/runs/next?wait=${waitSeconds}`, undefined, (waitSeconds + 15) * 1000); }
+    try { next = await call(`/api/bridge/runs/next?${query}`, undefined, (waitSeconds + 15) * 1000); }
     catch (error) {
       if (error.status === 401) throw new Error('设备会话已失效或已被撤销，请运行 logout 后重新 pair 配对。');
       log(`连接平台失败：${error.message}，${RETRY_MS / 1000} 秒后重试`);
@@ -381,7 +400,7 @@ export async function runWorker(options = {}, deps = {}) {
       await sleep(RETRY_MS);
       continue;
     }
-    if (next?.run) await handleRun(next.run);
+    if (next?.run) await handleRun(next.run, modelEngines);
     if (options.once) return;
   }
 }

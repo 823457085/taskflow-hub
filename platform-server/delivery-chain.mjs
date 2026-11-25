@@ -5,6 +5,7 @@ import { existsSync, lstatSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { CHAIN_STAGES, taskRow } from './common.mjs';
 import { CHAIN_LINKS } from './review-rubrics.mjs';
+import { isSubtask, jiraLinkStage } from './workflow.mjs';
 
 const KIND_LABEL = { PRD: '需求文档', TECH_SPEC: '技术方案', CODE: '代码改动', TEST_CASE: '测试用例', RELEASE_PLAN: '上线计划', SUBTASKS: '研发子任务' };
 const STAGE_KIND = { PRD: 'PRD', TASK_BREAKDOWN: null, TECH_SPEC: 'TECH_SPEC', CODE_REVIEW: 'CODE', TEST_CASE: 'TEST_CASE', RELEASE: 'RELEASE_PLAN' };
@@ -76,7 +77,7 @@ export function computeAssetDelta(prevAsset, currAsset) {
 }
 export const LINK_STATUS_LABEL = {
   MISSING: '缺资料', READY: '待 AI 审核', REVIEWING: '审核中', AWAITING_DECISION: '待确认',
-  PASS: '通过', CONDITIONAL: '有条件通过', CHANGES_REQUESTED: '退回修改', BLOCKED: '阻断', STALE: '需重审',
+  LINKED: '已关联', PASS: '通过', CONDITIONAL: '有条件通过', CHANGES_REQUESTED: '退回修改', BLOCKED: '阻断', STALE: '需重审',
 };
 const VERDICT_LABEL = { PASS: '通过', CONDITIONAL: '有条件通过', FAIL: '不通过' };
 const RESULT_MARK = { PASS: '✅', WARN: '⚠️', FAIL: '❌', NA: '➖' };
@@ -211,14 +212,14 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
   const gatesFor = (task, memo) => {
     const five = workflow.gates(task, memo).gates;
     const byStage = Object.fromEntries(five.map(item => [item.stage, item]));
-    byStage.TASK_BREAKDOWN = workflow.gate(task, 'TASK_BREAKDOWN', undefined, memo);
+    if (!jiraLinkStage(task, 'TASK_BREAKDOWN')) byStage.TASK_BREAKDOWN = workflow.gate(task, 'TASK_BREAKDOWN', undefined, memo);
     return byStage;
   };
 
   // Compact per-task statuses, used for child rows and the task list "链路进度" column.
   function statusesFor(task, memo = workflow.createMemo()) {
     const gates = gatesFor(task, memo);
-    return Object.fromEntries(CHAIN_STAGES.map(stage => [stage, linkStatus(gates[stage], gates[stage]?.jobId ? { report: reportLite(gates[stage].jobId) } : null)]));
+    return Object.fromEntries(CHAIN_STAGES.map(stage => [stage, jiraLinkStage(task, stage) ? 'LINKED' : linkStatus(gates[stage], gates[stage]?.jobId ? { report: reportLite(gates[stage].jobId) } : null)]));
   }
   const reportLite = jobId => {
     const row = db.prepare('SELECT verdict FROM reports WHERE job_id=?').get(jobId);
@@ -230,6 +231,26 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     const ref = task.externalRef || {};
     const baseUrl = ref.baseUrl || null;
     const jiraUrl = key => (baseUrl ? `${baseUrl.replace(/\/+$/, '')}/browse/${key}` : null);
+    const children = db.prepare('SELECT * FROM tasks WHERE parent_id=? ORDER BY jira_key').all(task.id).map(taskRow);
+    const parent = task.parentId ? taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(task.parentId)) : null;
+    const childRows = children.map(child => ({
+      id: child.id, jiraKey: child.jiraKey, title: child.title, status: child.status,
+      jiraStatus: child.externalRef?.status || null, assignee: child.externalRef?.assignee?.displayName || child.externalRef?.assignee?.name || userName(child.assigneeId),
+      url: child.externalRef?.baseUrl ? `${child.externalRef.baseUrl.replace(/\/+$/, '')}/browse/${child.jiraKey}` : jiraUrl(child.jiraKey),
+      links: null,
+    }));
+    const chainContext = {
+      generatedAt: new Date().toISOString(),
+      task: { id: task.id, jiraKey: task.jiraKey, title: task.title, url: jiraUrl(task.jiraKey), status: task.status, jiraStatus: ref.status || null, assignee: userName(task.assigneeId), projectId: task.projectId, fixVersions: (ref.fixVersions || []).map(item => item.name) },
+      parent: parent ? { id: parent.id, jiraKey: parent.jiraKey, title: parent.title } : null,
+      requirementKeys: requirementKeys(task),
+      children: childRows,
+    };
+    if (isSubtask(task)) return {
+      ...chainContext,
+      overall: { status: 'NOT_REQUIRED', passed: 0, total: 0, score: null, currentLinkId: null, blockers: [] },
+      links: [], traceability: [], deltas: [], analysis: null,
+    };
     const allAssets = workflow.assetsFor(task.id);
     memo.assets.set(task.id, allAssets);
     const assets = latestAssets(allAssets);
@@ -248,10 +269,8 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
       }
     }
     const imports = importsFor(task.id);
-    const children = db.prepare('SELECT * FROM tasks WHERE parent_id=? ORDER BY jira_key').all(task.id).map(taskRow);
-    const parent = task.parentId ? taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(task.parentId)) : null;
     const gates = gatesFor(task, memo);
-    const reqKeys = requirementKeys(task);
+    const reqKeys = chainContext.requirementKeys;
     const declaredKeys = declaredDeliverableKeys(task);
     const knownKeys = new Set([...children.map(child => child.jiraKey), ...(parent ? [parent.jiraKey] : [])]);
     const notLinked = declaredKeys.filter(key => !knownKeys.has(key));
@@ -302,7 +321,7 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
       BREAKDOWN: () => ({
         objects: [
           { type: 'jira', label: `研发任务 ${task.jiraKey}`, url: jiraUrl(task.jiraKey), key: task.jiraKey, meta: ref.status || null },
-          ...children.map(child => ({ type: 'task', label: `${child.jiraKey} ${child.title}`, taskId: child.id, url: jiraUrl(child.jiraKey), meta: child.externalRef?.status || child.status, assignee: userName(child.assigneeId) })),
+          ...childRows.map(child => ({ type: 'task', label: `${child.jiraKey} ${child.title}`, taskId: child.id, url: child.url, meta: child.jiraStatus || child.status, assignee: child.assignee })),
           ...notLinked.map(key => ({ type: 'jira-unlinked', label: `${key}（描述中声明，未导入）`, url: jiraUrl(key), key })),
         ],
         checks: [
@@ -359,8 +378,13 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
 
     const links = CHAIN_LINKS.map((link, index) => {
       const gate = gates[link.stage];
-      const job = jobFor(task, gate, link.stage, memo);
       const { objects, checks: baseChecks } = linkDefs[link.id]();
+      if (jiraLinkStage(task, link.stage)) return {
+        id: link.id, index: index + 1, stage: link.stage, title: link.title, purpose: '读取 Jira 子任务的关联和最新已同步状态', focus: [],
+        advisory: true, status: 'LINKED', statusLabel: children.length ? '已关联' : '暂无子任务', gateReason: '',
+        missing: [], objects, checks: baseChecks.map(check => ({ ...check, level: 'advice' })), review: null, next: null,
+      };
+      const job = jobFor(task, gate, link.stage, memo);
       const checks = [...baseChecks, ...pluginChecksFor(link.stage, job)];
       const missing = gate?.status === 'MISSING_INPUT' ? workflow.inputs(task, link.stage, undefined, memo).missing : [];
       const status = linkStatus(gate, job && gate?.jobId ? job : null);
@@ -384,9 +408,8 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     }
     const overallStatus = gating.every(link => link.status === 'PASS' || link.status === 'CONDITIONAL') ? 'PASS'
       : links.some(link => ['CHANGES_REQUESTED', 'BLOCKED'].includes(link.status)) ? 'BLOCKED' : 'IN_PROGRESS';
-    const current = links.find(link => !['PASS', 'CONDITIONAL'].includes(link.status)) || null;
+    const current = links.find(link => !['PASS', 'CONDITIONAL', 'LINKED'].includes(link.status)) || null;
 
-    const childRows = children.map(child => ({ id: child.id, jiraKey: child.jiraKey, title: child.title, status: child.status, jiraStatus: child.externalRef?.status || null, assignee: userName(child.assigneeId), url: jiraUrl(child.jiraKey), links: statusesFor(child, memo) }));
     const breakdown = links.find(link => link.id === 'BREAKDOWN');
     const checklist = breakdown.review?.checklist || [];
     const reqPoints = checklist.filter(item => /PRD|需求点|验收|\bAC\b|§/i.test(item.item));
@@ -494,12 +517,9 @@ export function createDeliveryChain({ db, workflow, workspaceFor }) {
     };
 
     return {
-      generatedAt: new Date().toISOString(),
-      task: { id: task.id, jiraKey: task.jiraKey, title: task.title, url: jiraUrl(task.jiraKey), status: task.status, jiraStatus: ref.status || null, assignee: userName(task.assigneeId), projectId: task.projectId, fixVersions: (ref.fixVersions || []).map(item => item.name) },
-      parent: parent ? { id: parent.id, jiraKey: parent.jiraKey, title: parent.title } : null,
-      requirementKeys: reqKeys,
+      ...chainContext,
       overall: { status: overallStatus, passed: gating.filter(link => link.status === 'PASS' || link.status === 'CONDITIONAL').length, total: gating.length, score: scores.length ? Math.round(scores.reduce((sum, value) => sum + value, 0) / scores.length) : null, currentLinkId: current?.id || null, blockers },
-      links, children: childRows, traceability, deltas, analysis,
+      links, traceability, deltas, analysis,
     };
   }
 
@@ -510,9 +530,9 @@ const cell = value => String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n+/
 
 export function chainReportMarkdown(chain) {
   const out = [];
-  const overallLabel = { PASS: '✅ 全链路通过', BLOCKED: '⛔ 存在阻断', IN_PROGRESS: '🔄 推进中' }[chain.overall.status];
+  const overallLabel = { PASS: '✅ 全链路通过', BLOCKED: '⛔ 存在阻断', IN_PROGRESS: '🔄 推进中', NOT_REQUIRED: '随主任务评审' }[chain.overall.status];
   out.push(`# 交付链路审核报告 · ${chain.task.jiraKey} ${chain.task.title}`, '');
-  out.push(`- 结论：**${overallLabel}**（门禁环节 ${chain.overall.passed}/${chain.overall.total} 通过${chain.overall.score !== null ? `，AI 平均评分 ${chain.overall.score}` : ''}）`);
+  out.push(chain.overall.status === 'NOT_REQUIRED' ? `- 结论：**${overallLabel}**` : `- 结论：**${overallLabel}**（门禁环节 ${chain.overall.passed}/${chain.overall.total} 通过${chain.overall.score !== null ? `，AI 平均评分 ${chain.overall.score}` : ''}）`);
   if (chain.requirementKeys.length) out.push(`- 需求单：${chain.requirementKeys.join('、')}`);
   if (chain.task.fixVersions.length) out.push(`- Fix Version：${chain.task.fixVersions.join(' / ')}`);
   if (chain.parent) out.push(`- 父任务：${chain.parent.jiraKey} ${chain.parent.title}`);
@@ -568,7 +588,7 @@ export function chainReportMarkdown(chain) {
       if (review.checklist.length) { out.push('', '| 检查项 | 结果 | 依据 |', '|---|---|---|'); for (const item of review.checklist) out.push(`| ${cell(item.item)} | ${RESULT_MARK[item.result] || item.result} | ${cell(item.note)}${item.ref ? `（${cell(item.ref)}）` : ''} |`); }
       if (review.findings.items.length) { out.push(''); for (const item of review.findings.items) out.push(`- \`${item.severity}\`${item.category ? ` \`${item.category}\`` : ''}${Number.isInteger(item.confidence) ? ` (置信度 ${item.confidence}/10)` : ''}${item.waived ? '（已豁免）' : ''} ${item.title}：${cell(item.detail)}${item.location ? `（${cell(item.location)}）` : ''}`); }
       out.push('');
-    } else out.push('_尚未进行 AI 审核_', '');
+    } else if (link.status !== 'LINKED') out.push('_尚未进行 AI 审核_', '');
   }
   if (chain.traceability.length) {
     out.push('## 追溯矩阵（需求点 → 子任务）', '', '| 需求点 | 覆盖 | 承接子任务 | 说明 |', '|---|---|---|---|');
@@ -576,9 +596,11 @@ export function chainReportMarkdown(chain) {
     out.push('');
   }
   if (chain.children.length) {
-    const short = { PRD: '需求', TASK_BREAKDOWN: '拆分', TECH_SPEC: '方案', CODE_REVIEW: '代码', TEST_CASE: '测试', RELEASE: '上线' };
-    out.push('## 子任务链路', '', `| 子任务 | 受理人 | Jira 状态 | ${CHAIN_STAGES.map(stage => short[stage]).join(' | ')} |`, `|---|---|---|${CHAIN_STAGES.map(() => '---').join('|')}|`);
-    for (const child of chain.children) out.push(`| ${child.jiraKey} ${cell(child.title)} | ${child.assignee || '—'} | ${child.jiraStatus || '—'} | ${CHAIN_STAGES.map(stage => LINK_STATUS_LABEL[child.links[stage]]).join(' | ')} |`);
+    out.push('## 关联子任务', '', '| 子任务 | 受理人 | Jira 状态 |', '|---|---|---|');
+    for (const child of chain.children) {
+      const key = child.url ? `[${child.jiraKey}](${child.url})` : child.jiraKey;
+      out.push(`| ${key} ${cell(child.title)} | ${cell(child.assignee || '—')} | ${cell(child.jiraStatus || '—')} |`);
+    }
     out.push('');
   }
   return out.join('\n');

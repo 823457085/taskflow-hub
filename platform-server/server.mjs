@@ -4,8 +4,9 @@ import { promisify } from 'node:util';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStorage } from './storage.mjs';
-import { createWorkflow } from './workflow.mjs';
+import { createWorkflow, isSubtask, reviewRequired } from './workflow.mjs';
 import { createDeliveryChain, chainReportMarkdown } from './delivery-chain.mjs';
+import { discoverReviewMrs } from './review-mr-discovery.mjs';
 import { createConnectors } from './connectors.mjs';
 import { createLocalDevices } from './local-devices.mjs';
 import { createLocalAutomation } from './local-automation.mjs';
@@ -18,6 +19,12 @@ import { createDeployments } from './deployments.mjs';
 import { createKnowledge } from './knowledge.mjs';
 import { createTeamSkills } from './team-skills.mjs';
 import { createAccounts } from './accounts.mjs';
+import { createImNotifications } from './im-notifications.mjs';
+import { createMrWriteback } from './mr-writeback.mjs';
+import { createCloudAi } from './cloud-ai.mjs';
+import { createWebhooks } from './webhooks.mjs';
+import { createApiSpecRoutes } from './api-spec.mjs';
+import { normalizePluginManifest } from './policy-runner.mjs';
 import { createWorkbenchGateway, workbenchPublicUrl } from './workbench-gateway.mjs';
 import { createRemoteBroker } from './remote-broker.mjs';
 import { createWorkbenchInstances } from './workbench-instances.mjs';
@@ -25,6 +32,8 @@ import { globalPermissions, projectPermissions, canEditMemberRole, assertMemberR
 import { ApiError, ROLES, PROJECT_ROLES, STAGES, CHAIN_STAGES, RULE_ENFORCEMENTS, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
 const scrypt = promisify(scryptCallback);
 const SESSION_MS = 8 * 60 * 60 * 1000;
+const mainTaskSql = "t.parent_id IS NULL AND json_type(t.external_ref, '$.issueType.subtask') IS NOT 'true'";
+const activeReviewSql = `${mainTaskSql} AND (j.stage <> 'TASK_BREAKDOWN' OR json_extract(t.external_ref, '$.provider') IS NOT 'jira')`;
 function credentials(body) {
   const username = textField(body.username, 'username', { min: 3, max: 64 });
   if (!/^[a-zA-Z0-9_.-]+$/.test(username)) fail(400, 'INVALID_INPUT', 'username仅支持字母、数字和_.-');
@@ -36,10 +45,10 @@ function newPasswordField(value) {
   return value;
 }
 async function passwordHash(password, salt = randomBytes(16).toString('hex')) { return { salt, hash: Buffer.from(await scrypt(password, salt, 64)).toString('hex') }; }
-async function readBody(req) {
+async function readBody(req, { maxBytes = 131_072 } = {}) {
   if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) fail(415, 'JSON_REQUIRED', '请使用application/json');
   let size = 0; const chunks = [];
-  for await (const chunk of req) { size += chunk.length; if (size > 131_072) fail(413, 'BODY_TOO_LARGE', '请求内容过大'); chunks.push(chunk); }
+  for await (const chunk of req) { size += chunk.length; if (size > maxBytes) fail(413, 'BODY_TOO_LARGE', '请求内容过大'); chunks.push(chunk); }
   let value;
   try { value = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { fail(400, 'INVALID_JSON', 'JSON格式不正确'); }
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'INVALID_INPUT', '请求体必须为对象');
@@ -69,7 +78,8 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   const db = openStorage(dbPath);
   const transaction = fn => { db.exec('BEGIN IMMEDIATE'); try { const value = fn(); db.exec('COMMIT'); return value; } catch (error) { db.exec('ROLLBACK'); throw error; } };
   const audit = (actorId, action, targetId, projectId = null) => db.prepare('INSERT INTO audit (id,actor_id,action,target_id,created_at,project_id) VALUES (?,?,?,?,?,?)').run(randomUUID(), actorId, action, targetId, new Date().toISOString(), projectId);
-  const workflow = createWorkflow(db, audit, transaction);
+  let cloudAi = null;
+  const workflow = createWorkflow(db, audit, transaction, { getCloudExecutor: projectId => cloudAi?.getCloudExecutor(projectId) || null });
   const authAttempts = new Map();
   const requireRole = (role, roles) => { if (!roles.includes(role)) fail(403, 'FORBIDDEN', '当前角色无权执行此操作'); };
   const projectRole = (user, id) => {
@@ -97,20 +107,25 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   const assertWritable = (task, user) => { if (task.status === 'DONE') fail(409, 'TASK_DONE', '任务已完成，请先重开任务'); assertAncestorsOpen(task, user); };
   const accounts = createAccounts({ db, dbPath, transaction, audit, projectRole, visibleProjects, key: connectorKey, allowLoopbackHttp: allowConnectorLoopbackHttp });
   const connectors = createConnectors({ db, dbPath, transaction, audit, projectRole, visibleProjects, getTask, assertWritable, accounts, workflow, key: connectorKey, profiles: connectorProfiles, profileReader: connectorProfileReader, allowLoopbackHttp: allowConnectorLoopbackHttp });
+  const imNotifications = createImNotifications({ db, dbPath, transaction, audit, projectRole, key: connectorKey, allowLoopbackHttp: allowConnectorLoopbackHttp });
+  const mrWriteback = createMrWriteback({ db, transaction, audit, getTask, projectRole, workflow, connectorsInternal: connectors.internal, imNotifications });
+  cloudAi = createCloudAi({ db, dbPath, transaction, audit, projectRole, getTask, workflow, key: connectorKey, allowLoopbackHttp: allowConnectorLoopbackHttp, imNotifications, mrWriteback });
+  const webhooks = createWebhooks({ db, dbPath, transaction, audit, projectRole, workflow, connectorsInternal: connectors.internal, cloudAi, imNotifications, key: connectorKey });
+  const apiSpecRoutes = createApiSpecRoutes({ db, transaction, audit, getTask, taskRole, assertWritable, workflow, allowLoopbackHttp: allowConnectorLoopbackHttp });
   const todos = createTodos({ db, transaction, audit, projectRole, visibleProjects });
   const workReports = createWorkReports({ db, projectRole });
   const agentSessions = createAgentSessions({ db, transaction, audit, projectRole });
   const deployments = createDeployments({ db, transaction, audit, projectRole });
   const knowledge = createKnowledge({ db, transaction, audit, projectRole });
-  const teamSkills = createTeamSkills({ db, transaction, audit, projectRole });
-  const localDevices = createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now: deviceClock, hostBridgeStateDir, hostBridgeApiUrl, clientIp, sessionMs: deviceSessionMs });
   const workspaceFor = (userId, projectId) => db.prepare('SELECT project_id AS projectId,repo_path AS repoPath,default_target AS defaultTarget,updated_at AS updatedAt FROM project_workspaces WHERE user_id=? AND project_id=?').get(userId, projectId) || null;
+  const teamSkills = createTeamSkills({ db, transaction, audit, projectRole, visibleProjects, workspaceFor, serverMode });
+  const localDevices = createLocalDevices({ db, transaction, audit, projectRole, visibleProjects, now: deviceClock, hostBridgeStateDir, hostBridgeApiUrl, clientIp, sessionMs: deviceSessionMs });
   const deliveryChain = createDeliveryChain({ db, workflow, workspaceFor });
   const workbenchBridge = serverMode ? null : createWorkbenchBridge(workbenchUrl, workbenchTaskUrl);
   const localAutomation = serverMode ? null : createLocalAutomation({
     db, transaction, audit, projectRole, visibleProjects, getTask, taskRole, assertWritable, assertAncestorsOpen,
     workflow, workspaceFor, hostBridgeStateDir, hostBridgeApiUrl, runsDir, localReposFile, repoScanRoots, runnerOverride, appOpener,
-    workbenchBridge, canUseHostBridge: localDevices.canUseHostBridge,
+    workbenchBridge, canUseHostBridge: localDevices.canUseHostBridge, resolveActiveSkills: teamSkills.resolveActiveSkills,
   });
   const bridgeDispatch = serverMode ? createBridgeDispatch({ db, transaction, audit, projectRole, getTask, taskRole, assertWritable, assertAncestorsOpen, workflow, allowedModes: bridgeModes, now: deviceClock }) : null;
   let workbenchInstances = null;
@@ -146,8 +161,9 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
     const send = (status, value, headers = {}) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', ...headers }); res.end(value === undefined ? undefined : JSON.stringify(value)); };
     try {
       const url = new URL(req.url, 'http://localhost'); const path = url.pathname; const method = req.method;
-      if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 5, deployment });
+      if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 7, deployment });
       if (remoteBroker && await remoteBroker.instanceRoutes(req, res, path, method)) return;
+      if (await webhooks.handleInbound({ req, path, send })) return;
       if (!['GET', 'HEAD'].includes(method) && req.headers.origin) {
         let origin; try { origin = new URL(req.headers.origin); } catch { fail(403, 'ORIGIN_REJECTED', '请求来源不受支持'); }
         if (origin.host !== req.headers.host || !['http:', 'https:'].includes(origin.protocol)) fail(403, 'ORIGIN_REJECTED', '请求来源不受支持');
@@ -190,7 +206,12 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (workbenchGateway && await workbenchGateway.tunnelRoutes({ req, res, method, path, url, user, send })) return;
       if (remoteBroker && await remoteBroker.bridgeRoutes({ req, res, method, path, url, user })) return;
       // Resolve mutable resources only after reading the body, so concurrent writes check current versions and membership.
-      const requestBody = ['POST', 'PATCH', 'PUT'].includes(method) && path !== '/api/logout' ? await readBody(req) : null;
+      const maxBodyBytes = /^\/api\/skills\/(?:parse-zip|import|library\/import)$/.test(path)
+        ? 8 * 1024 * 1024
+        : /^\/api\/skills(?:\/[^/]+)?$/.test(path) || /\/import-api-spec$/.test(path)
+          ? 524_288
+          : 131_072;
+      const requestBody = ['POST', 'PATCH', 'PUT'].includes(method) && path !== '/api/logout' ? await readBody(req, { maxBytes: maxBodyBytes }) : null;
       if (requestBody) user = auth(req);
       localDevices.authorizeRequest({ method, path, body: requestBody, user });
       if (localDevices.authenticatedRoutes({ req, path, method, body: requestBody, user, send })) return;
@@ -204,6 +225,11 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (deployments({ method, path, url, user, body: requestBody, send })) return;
       if (knowledge({ method, path, url, user, body: requestBody, send })) return;
       if (teamSkills({ method, path, url, user, body: requestBody, send })) return;
+      if (await imNotifications.handle({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (await cloudAi.handle({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (await webhooks.handle({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (await mrWriteback.routes({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
+      if (await apiSpecRoutes({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       if (await connectors({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       user = auth(req);
       if (method === 'GET' && path === '/api/me') return send(200, { user: publicUser(user), permissions: globalPermissions(user), workbench: { enabled: Boolean(workbenchGateway && !user.localDevice), mode: workbenchGateway && !user.localDevice ? workbenchMode : null }, ...(user.localDevice ? { authorization: { kind: 'LOCAL_DEVICE', deviceId: user.localDevice.id, projectIds: JSON.parse(user.localDevice.project_ids), expiresAt: new Date(user.localDevice.expires_at).toISOString() } } : {}) });
@@ -283,20 +309,100 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       const projectItemRoute = path.match(/^\/api\/projects\/([^/]+)$/);
       if (projectItemRoute) {
         const projectId = projectItemRoute[1]; const role = projectRole(user, projectId);
-        if (method !== 'PATCH') fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持PATCH');
-        if (!['ADMIN', 'LEAD'].includes(role) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权修改项目名称');
-        const body = requestBody;
-        if (Object.keys(body).some(key => key !== 'name')) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
-        const name = textField(body.name, 'name', { max: 100 });
-        transaction(() => {
-          user = auth(req); const currentRole = projectRole(user, projectId);
-          if (!['ADMIN', 'LEAD'].includes(currentRole) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权修改项目名称');
-          const updated = db.prepare('UPDATE projects SET name=? WHERE id=?').run(name, projectId);
-          if (updated.changes !== 1) fail(404, 'PROJECT_NOT_FOUND', '项目不存在');
-          audit(user.id, 'PROJECT_RENAME', projectId, projectId);
-        });
-        const row = db.prepare('SELECT * FROM projects WHERE id=?').get(projectId);
-        return send(200, { project: projectMetadata({ ...row, role }, user) });
+        if (method === 'PATCH') {
+          if (!['ADMIN', 'LEAD'].includes(role) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权修改项目名称');
+          const body = requestBody;
+          if (Object.keys(body).some(key => key !== 'name')) fail(400, 'INVALID_INPUT', '请求包含不支持的字段');
+          const name = textField(body.name, 'name', { max: 100 });
+          transaction(() => {
+            user = auth(req); const currentRole = projectRole(user, projectId);
+            if (!['ADMIN', 'LEAD'].includes(currentRole) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权修改项目名称');
+            const updated = db.prepare('UPDATE projects SET name=? WHERE id=?').run(name, projectId);
+            if (updated.changes !== 1) fail(404, 'PROJECT_NOT_FOUND', '项目不存在');
+            audit(user.id, 'PROJECT_RENAME', projectId, projectId);
+          });
+          const row = db.prepare('SELECT * FROM projects WHERE id=?').get(projectId);
+          return send(200, { project: projectMetadata({ ...row, role }, user) });
+        }
+        if (method === 'DELETE') {
+          if (user.authTransport === 'COOKIE' && !req.headers.origin) fail(403, 'ORIGIN_REQUIRED', '请在已登录的平台网页中执行删除操作');
+          if (user.localDevice) fail(403, 'FORBIDDEN', '本地设备令牌无权删除项目');
+          if (!['ADMIN', 'LEAD'].includes(role) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权删除项目');
+          if (projectId === 'default') fail(409, 'DEFAULT_PROJECT_PROTECTED', '默认项目不可删除');
+          const cascade = ['1', 'true'].includes(url.searchParams.get('cascade') || '');
+          let result;
+          transaction(() => {
+            user = auth(req); const currentRole = projectRole(user, projectId);
+            if (!['ADMIN', 'LEAD'].includes(currentRole) && user.role !== 'ADMIN') fail(403, 'FORBIDDEN', '当前角色无权删除项目');
+            const projectRow = db.prepare('SELECT id,key,name FROM projects WHERE id=?').get(projectId);
+            if (!projectRow) fail(404, 'PROJECT_NOT_FOUND', '项目不存在');
+            if (db.prepare("SELECT 1 FROM local_ai_runs WHERE project_id=? AND status='RUNNING' LIMIT 1").get(projectId)) {
+              fail(409, 'AI_RUN_ACTIVE', '项目存在正在运行的本地 AI 执行，请先停止后再删除');
+            }
+            const taskIds = db.prepare('SELECT id FROM tasks WHERE project_id=?').all(projectId).map(item => item.id);
+            if (taskIds.length && !cascade) {
+              fail(409, 'PROJECT_HAS_TASKS', `该项目下仍有 ${taskIds.length} 项任务，请确认连同本地任务和评审记录一并删除`);
+            }
+            const jobRows = taskIds.length
+              ? db.prepare(`SELECT id FROM jobs WHERE project_id=? OR task_id IN (${taskIds.map(() => '?').join(',')})`).all(projectId, ...taskIds)
+              : db.prepare('SELECT id FROM jobs WHERE project_id=?').all(projectId);
+            const jobIds = jobRows.map(item => item.id);
+            if (jobIds.length) {
+              const jph = jobIds.map(() => '?').join(',');
+              db.prepare(`DELETE FROM waivers WHERE finding_id IN (SELECT id FROM findings WHERE job_id IN (${jph}))`).run(...jobIds);
+              db.prepare(`DELETE FROM findings WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM decisions WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM reports WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM mr_writebacks WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM local_ai_runs WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM jobs WHERE id IN (${jph})`).run(...jobIds);
+            }
+            db.prepare('DELETE FROM mr_writebacks WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM local_ai_runs WHERE project_id=?').run(projectId);
+            if (taskIds.length) {
+              const ph = taskIds.map(() => '?').join(',');
+              db.prepare(`DELETE FROM mr_writebacks WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`DELETE FROM local_ai_runs WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`DELETE FROM external_imports WHERE task_id IN (${ph}) OR local_id IN (SELECT id FROM assets WHERE task_id IN (${ph}))`).run(...taskIds, ...taskIds);
+              db.prepare(`DELETE FROM account_external_imports WHERE task_id IN (${ph}) OR local_id IN (SELECT id FROM assets WHERE task_id IN (${ph}))`).run(...taskIds, ...taskIds);
+              db.prepare(`UPDATE todos SET project_id=NULL, task_id=NULL WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`UPDATE agent_sessions SET project_id=NULL, task_id=NULL WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`DELETE FROM assets WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`DELETE FROM progress_events WHERE task_id IN (${ph})`).run(...taskIds);
+              db.prepare(`DELETE FROM devices WHERE task_id IN (${ph})`).run(...taskIds);
+            }
+            db.prepare('DELETE FROM external_imports WHERE connector_id IN (SELECT id FROM connector_configs WHERE project_id=?) OR local_id IN (SELECT id FROM assets WHERE project_id=?)').run(projectId, projectId);
+            db.prepare('DELETE FROM account_external_imports WHERE account_id IN (SELECT id FROM external_accounts WHERE project_id=?) OR local_id IN (SELECT id FROM assets WHERE project_id=?)').run(projectId, projectId);
+            db.prepare('DELETE FROM assets WHERE project_id=?').run(projectId);
+            db.prepare('UPDATE todos SET project_id=NULL WHERE project_id=?').run(projectId);
+            db.prepare('UPDATE agent_sessions SET project_id=NULL WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM tasks WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM knowledge_revisions WHERE doc_id IN (SELECT id FROM knowledge_docs WHERE project_id=?)').run(projectId);
+            db.prepare('DELETE FROM knowledge_docs WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM team_skill_revisions WHERE skill_id IN (SELECT id FROM team_skills WHERE project_id=?)').run(projectId);
+            db.prepare('DELETE FROM team_skills WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM personal_skills WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM deployments WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM cloud_ai_configs WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM webhook_events WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM project_webhooks WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM im_notification_logs WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM project_im_webhooks WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM account_preferences WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM external_accounts WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM connector_configs WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM jira_project_bindings WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM project_workspaces WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM plugins WHERE project_id=?').run(projectId);
+            db.prepare('DELETE FROM project_members WHERE project_id=?').run(projectId);
+            const deleted = db.prepare('DELETE FROM projects WHERE id=?').run(projectId);
+            if (deleted.changes !== 1) fail(404, 'PROJECT_NOT_FOUND', '项目不存在');
+            audit(user.id, 'PROJECT_DELETE', projectRow.key, projectId);
+            result = { deletedProjectId: projectId, deletedKey: projectRow.key, deletedTasks: taskIds.length };
+          });
+          return send(200, result);
+        }
+        fail(405, 'METHOD_NOT_ALLOWED', '该操作仅支持PATCH或DELETE');
       }
       const workspaceRoute = path.match(/^\/api\/projects\/([^/]+)\/workspace$/);
       if (workspaceRoute) {
@@ -349,7 +455,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         projectRole(user, projectId);
         const memo = workflow.createMemo();
         const statuses = {};
-        for (const row of db.prepare('SELECT * FROM tasks WHERE project_id=?').all(projectId)) statuses[row.id] = deliveryChain.statusesFor(taskRow(row), memo);
+        for (const row of db.prepare(`SELECT t.* FROM tasks t WHERE t.project_id=? AND ${mainTaskSql}`).all(projectId)) statuses[row.id] = deliveryChain.statusesFor(taskRow(row), memo);
         return send(200, { statuses });
       }
       if (path === '/api/tasks') {
@@ -383,11 +489,16 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           return send(201, { task: getTask(id, user) });
         }
       }
-      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle|chain|chain-report|chain-analyze))?$/);
+      const taskRoute = path.match(/^\/api\/tasks\/([^/]+)(?:\/(context|progress|assets|gates|claim|heartbeat|bundle|chain|chain-report|chain-analyze|review-mrs))?$/);
       if (taskRoute) {
         const task = getTask(taskRoute[1], user); const role = taskRole(task, user); const action = taskRoute[2];
         if (method === 'GET' && !action) return send(200, { task });
         if (method === 'GET' && action === 'chain') return send(200, { chain: deliveryChain.chainFor(task, user) });
+        if (method === 'GET' && action === 'review-mrs') {
+          return send(200, await discoverReviewMrs({ db, task, user,
+            repoPath: serverMode ? null : workspaceFor(user.id, task.projectId)?.repoPath,
+            connectorsInternal: connectors.internal, projectRole, reauthorize: () => auth(req) }));
+        }
         if (method === 'GET' && action === 'chain-report') return send(200, { markdown: chainReportMarkdown(deliveryChain.chainFor(task, user)) });
         if (method === 'GET' && action === 'chain-analyze') {
           const chain = deliveryChain.chainFor(task, user);
@@ -434,9 +545,11 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
               db.prepare(`DELETE FROM findings WHERE job_id IN (${jph})`).run(...jobIds);
               db.prepare(`DELETE FROM decisions WHERE job_id IN (${jph})`).run(...jobIds);
               db.prepare(`DELETE FROM reports WHERE job_id IN (${jph})`).run(...jobIds);
+              db.prepare(`DELETE FROM mr_writebacks WHERE job_id IN (${jph})`).run(...jobIds);
               db.prepare(`DELETE FROM local_ai_runs WHERE job_id IN (${jph})`).run(...jobIds);
               db.prepare(`DELETE FROM jobs WHERE id IN (${jph})`).run(...jobIds);
             }
+            db.prepare(`DELETE FROM mr_writebacks WHERE task_id IN (${ph})`).run(...targetIds);
             db.prepare(`DELETE FROM local_ai_runs WHERE task_id IN (${ph})`).run(...targetIds);
             db.prepare(`DELETE FROM external_imports WHERE task_id IN (${ph}) OR local_id IN (SELECT id FROM assets WHERE task_id IN (${ph}))`).run(...targetIds, ...targetIds);
             db.prepare(`DELETE FROM account_external_imports WHERE task_id IN (${ph}) OR local_id IN (SELECT id FROM assets WHERE task_id IN (${ph}))`).run(...targetIds, ...targetIds);
@@ -459,10 +572,9 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           if (body.assigneeId !== undefined) { if (!projectPermissions(user, role).assignTasks) fail(403, 'FORBIDDEN', '当前角色无权分配任务'); assertMember(task.projectId, assigneeId); }
           const status = body.status === undefined ? task.status : body.status;
           if (!['OPEN', 'IN_PROGRESS', 'IN_REVIEW', 'DONE'].includes(status)) fail(400, 'INVALID_STATUS', '任务状态不受支持');
-          if (status === 'DONE') {
+          if (status === 'DONE' && !isSubtask(task)) {
             if (title !== task.title || assigneeId !== task.assigneeId) fail(409, 'REVIEW_INPUT_CHANGED', '请先保存任务变更并重新评审');
             if (workflow.gates(task).overall !== 'PASS') fail(409, 'GATES_BLOCKED', '全部五项门禁通过后才能完成任务');
-            if (db.prepare('SELECT * FROM tasks WHERE parent_id=?').all(task.id).some(row => row.status !== 'DONE' || workflow.gates(taskRow(row)).overall !== 'PASS')) fail(409, 'CHILD_TASKS_OPEN', '子任务状态与门禁尚未全部完成');
           }
           transaction(() => { const current = getTask(task.id, user); requireVersion(current, body.expectedVersion); if (current.assigneeId !== user.id && !projectPermissions(user, taskRole(current, user)).assignTasks) fail(403, 'FORBIDDEN', '当前角色仅可编辑自己受理的任务'); const changed = db.prepare('UPDATE tasks SET title=?,assignee_id=?,status=?,version=version+1,context_version=context_version+?,updated_at=? WHERE id=? AND version=?').run(title, assigneeId, status, title !== task.title || assigneeId !== task.assigneeId || (task.status === 'DONE' && status !== 'DONE') ? 1 : 0, new Date().toISOString(), task.id, body.expectedVersion); if (changed.changes !== 1) fail(409, 'VERSION_CONFLICT', '任务已被其他操作更新，请刷新后重试'); audit(user.id, 'TASK_UPDATE', task.id, task.projectId); });
           return send(200, { task: getTask(task.id, user) });
@@ -533,11 +645,11 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         const projectIds = projectId ? [projectId] : visibleProjects(user).map(project => project.id);
         if (!projectIds.length) return send(200, { reviewCount: 0, assetCount: 0, openBlockersCount: 0, stageBreakdown: {}, flowTelemetry: emptyFlowTelemetry, pendingJobs: [] });
         const ph = projectIds.map(() => '?').join(',');
-        const reviewCount = db.prepare(`SELECT COUNT(*) AS count FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id WHERE j.project_id IN (${ph})`).get(...projectIds).count;
+        const reviewCount = db.prepare(`SELECT COUNT(*) AS count FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id WHERE j.project_id IN (${ph}) AND ${activeReviewSql}`).get(...projectIds).count;
         const assetCount = db.prepare(`SELECT COUNT(*) AS count FROM assets a JOIN tasks t ON t.id=a.task_id AND t.project_id=a.project_id WHERE a.project_id IN (${ph})`).get(...projectIds).count;
-        const openBlockersCount = db.prepare(`SELECT COUNT(*) AS count FROM findings f JOIN jobs j ON j.id=f.job_id JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id LEFT JOIN waivers w ON w.finding_id=f.id LEFT JOIN decisions d ON d.job_id=j.id WHERE j.project_id IN (${ph}) AND j.rowid=(SELECT MAX(j2.rowid) FROM jobs j2 WHERE j2.task_id=j.task_id AND j2.stage=j.stage) AND t.status!='DONE' AND f.severity='CRITICAL' AND w.finding_id IS NULL AND (d.decision IS NULL OR d.decision!='APPROVE')`).get(...projectIds).count;
+        const openBlockersCount = db.prepare(`SELECT COUNT(*) AS count FROM findings f JOIN jobs j ON j.id=f.job_id JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id LEFT JOIN waivers w ON w.finding_id=f.id LEFT JOIN decisions d ON d.job_id=j.id WHERE j.project_id IN (${ph}) AND j.rowid=(SELECT MAX(j2.rowid) FROM jobs j2 WHERE j2.task_id=j.task_id AND j2.stage=j.stage) AND ${activeReviewSql} AND t.status!='DONE' AND f.severity='CRITICAL' AND w.finding_id IS NULL AND (d.decision IS NULL OR d.decision!='APPROVE')`).get(...projectIds).count;
         const stageBreakdown = {};
-        for (const row of db.prepare(`SELECT j.stage, SUM(CASE WHEN d.decision='APPROVE' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN r.job_id IS NOT NULL AND d.job_id IS NULL THEN 1 ELSE 0 END) AS pendingApproval, SUM(CASE WHEN r.job_id IS NULL AND d.job_id IS NULL THEN 1 ELSE 0 END) AS awaitingReport, SUM(CASE WHEN d.decision='REQUEST_CHANGES' THEN 1 ELSE 0 END) AS changesRequested FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id LEFT JOIN reports r ON r.job_id=j.id LEFT JOIN decisions d ON d.job_id=j.id WHERE j.project_id IN (${ph}) AND j.rowid=(SELECT MAX(j2.rowid) FROM jobs j2 WHERE j2.task_id=j.task_id AND j2.stage=j.stage) GROUP BY j.stage`).all(...projectIds)) {
+        for (const row of db.prepare(`SELECT j.stage, SUM(CASE WHEN d.decision='APPROVE' THEN 1 ELSE 0 END) AS approved, SUM(CASE WHEN r.job_id IS NOT NULL AND d.job_id IS NULL THEN 1 ELSE 0 END) AS pendingApproval, SUM(CASE WHEN r.job_id IS NULL AND d.job_id IS NULL THEN 1 ELSE 0 END) AS awaitingReport, SUM(CASE WHEN d.decision='REQUEST_CHANGES' THEN 1 ELSE 0 END) AS changesRequested FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id LEFT JOIN reports r ON r.job_id=j.id LEFT JOIN decisions d ON d.job_id=j.id WHERE j.project_id IN (${ph}) AND ${activeReviewSql} AND j.rowid=(SELECT MAX(j2.rowid) FROM jobs j2 WHERE j2.task_id=j.task_id AND j2.stage=j.stage) GROUP BY j.stage`).all(...projectIds)) {
           stageBreakdown[row.stage] = {
             approved: Number(row.approved || 0),
             pendingApproval: Number(row.pendingApproval || 0),
@@ -555,7 +667,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           })
           .filter(v => v !== null)
           .sort((a, b) => a - b);
-        const decisionRows = db.prepare(`SELECT j.created_at AS job_created, d.decision, d.created_at AS dec_created FROM decisions d JOIN jobs j ON j.id=d.job_id JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id WHERE j.project_id IN (${ph})`).all(...projectIds);
+        const decisionRows = db.prepare(`SELECT j.created_at AS job_created, d.decision, d.created_at AS dec_created FROM decisions d JOIN jobs j ON j.id=d.job_id JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id WHERE j.project_id IN (${ph}) AND ${activeReviewSql}`).all(...projectIds);
         const turnaroundHoursList = decisionRows
           .map(r => {
             const c = Date.parse(r.job_created);
@@ -584,7 +696,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
             assetsVersioned: Number(assetsVersioned7d || 0),
           },
         };
-        const pendingRows = db.prepare(`SELECT j.* FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id JOIN reports r ON r.job_id=j.id LEFT JOIN decisions d ON d.job_id=j.id WHERE d.job_id IS NULL AND j.project_id IN (${ph}) ORDER BY j.rowid DESC`).all(...projectIds);
+        const pendingRows = db.prepare(`SELECT j.* FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.project_id=j.project_id JOIN reports r ON r.job_id=j.id LEFT JOIN decisions d ON d.job_id=j.id WHERE d.job_id IS NULL AND j.project_id IN (${ph}) AND ${activeReviewSql} ORDER BY j.rowid DESC`).all(...projectIds);
         const summaryTaskCache = new Map();
         const memo = workflow.createMemo();
         const pendingJobs = pendingRows.map(row => {
@@ -650,9 +762,18 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           if (!taskCache.has(id)) taskCache.set(id, getTask(id, user));
           return taskCache.get(id);
         };
+        if (!taskId) rows = rows.filter(row => reviewRequired(getCachedTask(row.task_id), row.stage));
         return send(200, { jobs: rows.map(row => workflow.jobRow(row, getCachedTask(row.task_id), memo)) });
       }
-      if (method === 'POST' && path === '/api/reviews') { const body = requestBody; const task = getTask(textField(body.taskId, 'taskId', { max: 64 }), user); assertWritable(task, user); const result = workflow.createReview(task, user, taskRole(task, user), body); return send(result.status, { job: result.job }); }
+      if (method === 'POST' && path === '/api/reviews') {
+        const body = requestBody; const task = getTask(textField(body.taskId, 'taskId', { max: 64 }), user); assertWritable(task, user);
+        const result = workflow.createReview(task, user, taskRole(task, user), body);
+        if (body.autoExecute === true && result.job.executionMode === 'CLOUD_AI' && !result.job.report && cloudAi.getCloudExecutor(task.projectId)) {
+          const exec = await cloudAi.executeJob({ jobId: result.job.id, actorId: user.id, user });
+          return send(result.status, { job: exec.job, precheck: exec.precheck, writeback: exec.writeback });
+        }
+        return send(result.status, { job: result.job });
+      }
       const jobRoute = path.match(/^\/api\/jobs\/([^/]+)(?:\/(report|decision|findings\/([^/]+)\/waiver))?$/);
       if (jobRoute) {
         const row = db.prepare('SELECT * FROM jobs WHERE id=?').get(jobRoute[1]); if (!row) fail(404, 'JOB_NOT_FOUND', '评审任务不存在');
@@ -661,9 +782,37 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
         if (method === 'POST' && jobRoute[2]) {
           assertWritable(task, user);
           const body = requestBody; let job;
-          if (jobRoute[2] === 'report') job = workflow.submitReport(row, task, user, role, body);
-          else if (jobRoute[2] === 'decision') job = workflow.decide(row, task, user, role, body);
-          else job = workflow.waive(row, task, jobRoute[3], user, role, body);
+          if (jobRoute[2] === 'report') {
+            job = workflow.submitReport(row, task, user, role, body);
+            const criticalCount = job.findings.filter(f => f.severity === 'CRITICAL' && !f.waiver).length;
+            const warnCount = job.findings.filter(f => f.severity === 'WARN').length;
+            const eventType = criticalCount > 0 ? 'CRITICAL_BLOCKER' : 'REPORT_SUBMITTED';
+            void imNotifications.emitProjectEvent({
+              projectId: task.projectId,
+              eventType,
+              taskId: task.id,
+              jobId: job.id,
+              title: `${criticalCount > 0 ? '🚨 存在阻断问题 · ' : ''}${task.jiraKey} ${job.stage} 评审报告已提交`,
+              markdownBody: `**任务**：${task.jiraKey} · ${task.title}\n**提交人**：${user.username}\n**问题统计**：阻断 ${criticalCount} / 风险 ${warnCount} / 总计 ${job.findings.length}\n**摘要**：${job.report.summary.slice(0, 240)}`,
+              rawEvent: { eventType, taskId: task.id, jobId: job.id, hasCritical: criticalCount > 0 },
+            });
+            if (job.stage === 'CODE_REVIEW' && cloudAi.getCloudExecutor(task.projectId)?.autoWritebackMr) {
+              void mrWriteback.writeback({ taskId: task.id, jobId: job.id, actorId: user.id, mode: 'AUTO' }).catch(() => {});
+            }
+          } else if (jobRoute[2] === 'decision') {
+            job = workflow.decide(row, task, user, role, body);
+            void imNotifications.emitProjectEvent({
+              projectId: task.projectId,
+              eventType: 'DECISION_MADE',
+              taskId: task.id,
+              jobId: job.id,
+              title: `${job.decision?.decision === 'APPROVE' ? '✅ 门禁已通过' : '↩️ 门禁退回修改'} · ${task.jiraKey} ${job.stage}`,
+              markdownBody: `**任务**：${task.jiraKey} · ${task.title}\n**审批人**：${user.username}\n**结论**：${job.decision?.decision}\n**意见**：${job.decision?.reason || ''}`,
+              rawEvent: { eventType: 'DECISION_MADE', taskId: task.id, jobId: job.id, decision: job.decision?.decision },
+            });
+          } else {
+            job = workflow.waive(row, task, jobRoute[3], user, role, body);
+          }
           return send(201, { job });
         }
       }
@@ -676,7 +825,8 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
           const rawRule = body.rule ?? body.description;
           const rule = typeof rawRule === 'string' && rawRule.trim() ? textField(rawRule, 'rule', { max: 1000, preserve: true }).trim() : '';
           const enforcement = body.enforcement === undefined ? 'WARN' : RULE_ENFORCEMENTS.includes(body.enforcement) ? body.enforcement : fail(400, 'INVALID_PLUGIN', '规则强度仅支持 WARN 或 BLOCK');
-          const plugin = { id, name, version, stages: [...new Set(body.stages)], status: 'REGISTERED_NOT_EXECUTABLE', ...(rule ? { rule } : {}), ...(body.enforcement !== undefined || rule ? { enforcement } : {}) };
+          const normalized = normalizePluginManifest(body, body.stages);
+          const plugin = { id, name, version, ...normalized, ...(rule ? { rule } : {}), ...(body.enforcement !== undefined || rule ? { enforcement } : {}) };
           transaction(() => { if (db.prepare('SELECT id FROM plugins WHERE id=?').get(id)) fail(409, 'PLUGIN_EXISTS', '该插件已登记'); db.prepare('INSERT INTO plugins (id,manifest,created_by,project_id) VALUES (?,?,?,?)').run(id, JSON.stringify(plugin), user.id, projectId); audit(user.id, 'PLUGIN_REGISTER', id, projectId); });
           return send(201, { plugin: { ...plugin, projectId } });
         }

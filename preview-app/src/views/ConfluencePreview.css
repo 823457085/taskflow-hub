@@ -1,0 +1,13 @@
+.tf-confluence-preview { min-width: 0; overflow-wrap: anywhere; }
+.tf-confluence-preview :where(p, ul, ol, dl, blockquote, pre) { margin: 0; }
+.tf-confluence-preview :where(div, li, td, th) > :where(p, ul, ol, dl, blockquote) + :where(p, ul, ol, dl, blockquote) { margin-top: 6px; }
+.tf-confluence-preview :where(ul, ol) { padding-inline-start: 1.5em; }
+.tf-confluence-preview ul { list-style: disc; }
+.tf-confluence-preview ol { list-style: decimal; }
+.tf-confluence-preview .tf-confluence-heading { margin: 8px 0 0; font-weight: 640; line-height: 1.5; }
+.tf-confluence-preview h3.tf-confluence-heading { font-size: 17px; }
+.tf-confluence-preview :where(h4, h5, h6).tf-confluence-heading { font-size: 14px; }
+.tf-confluence-preview .tf-md-table { min-width: min(100%, 420px); }
+.tf-confluence-preview .tf-md-table :where(th, td) { min-width: 6em; }
+.tf-confluence-preview > hr { border: 0; border-top: 1px solid var(--tf-divider); margin: 4px 0; }
+.tf-confluence-reference { color: var(--tf-muted); font-size: 12px; }

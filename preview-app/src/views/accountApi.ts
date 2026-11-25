@@ -1,6 +1,6 @@
 import { api } from './workspaceApi';
 
-export type AccountProvider = 'jira' | 'confluence' | 'gitlab' | 'jenkins' | 'yunxiao' | 'openai' | 'anthropic' | 'custom-ai';
+export type AccountProvider = 'jira' | 'confluence' | 'gitlab' | 'github' | 'jenkins' | 'yunxiao' | 'openai' | 'anthropic' | 'custom-ai';
 export type AccountAuthMode = 'BEARER' | 'BASIC' | 'PRIVATE_TOKEN' | 'NONE';
 export interface ExternalAccount {
   id: string; provider: string; name: string; scope: 'PERSONAL' | 'PROJECT';
@@ -16,10 +16,12 @@ export interface AccountDraft {
   name: string; provider: AccountProvider; scope: 'PERSONAL' | 'PROJECT'; projectId?: string;
   baseUrl: string; authMode: AccountAuthMode; username?: string; token?: string; organizationId?: string;
 }
+export const GITHUB_API_ORIGIN = 'https://api.github.com';
 export const ACCOUNT_PROVIDERS: { value: AccountProvider; label: string; authMode: AccountAuthMode; ai?: boolean; defaultUrl?: string }[] = [
   { value: 'jira', label: 'Jira', authMode: 'BEARER' },
   { value: 'confluence', label: 'Confluence', authMode: 'BEARER' },
   { value: 'gitlab', label: 'GitLab', authMode: 'PRIVATE_TOKEN' },
+  { value: 'github', label: 'GitHub', authMode: 'BEARER', defaultUrl: GITHUB_API_ORIGIN },
   { value: 'jenkins', label: 'Jenkins', authMode: 'BASIC' },
   { value: 'yunxiao', label: '云效', authMode: 'PRIVATE_TOKEN' },
   { value: 'openai', label: 'OpenAI API', authMode: 'BEARER', ai: true, defaultUrl: 'https://api.openai.com' },
