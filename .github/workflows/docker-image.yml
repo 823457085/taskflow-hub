@@ -31,8 +31,8 @@ jobs:
           cache: npm
           cache-dependency-path: preview-app/package-lock.json
 
-      - name: Install preview-app dependencies
-        run: npm --prefix preview-app ci
+      - name: Install dependencies
+        run: npm --prefix preview-app ci && npm --prefix local-bridge ci
 
       - name: Build web assets & pack bridge
         run: npm run build && npm run pack:bridge
