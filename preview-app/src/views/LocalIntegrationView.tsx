@@ -9,7 +9,7 @@ import { CustomClientAdapters } from './CustomClientAdapters';
 import type { ClientAdapterManifest } from '../../../shared/local-client-adapter.mjs';
 import { navigateWorkspace } from './workspaceNavigation';
 import { localBridgePortFromHash, suggestedLocalProjects, suggestRepoPathForProject, withoutLocalBridgePort } from './localBridgeHandoff';
-import { LOCAL_TASK_TARGETS, LocalTaskTarget } from './localTaskWorkflowPrompt';
+import { LOCAL_TASK_TARGETS, LocalTaskTarget, validRepoPath } from './localTaskWorkflowPrompt';
 import { formatLocalDoctorMarkdown, type LocalDoctorResult } from './localDoctorReport';
 import { readTogether } from './readTogether';
 import { StatusBadge } from '../components/Primitives';
@@ -44,7 +44,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const [hostBridge, setHostBridge] = useState<HostBridgeStatus | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [workspaces, setWorkspaces] = useState<ProjectWorkspace[]>([]);
-  const [repositories, setRepositories] = useState<LocalGitRepo[]>([]);
+  const [repositoryScan, setRepositoryScan] = useState<{ projectId?: string; items: LocalGitRepo[] }>({ items: [] });
   const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
   const [loadingBridge, setLoadingBridge] = useState(true);
   const [authorizingBridge, setAuthorizingBridge] = useState(false);
@@ -53,6 +53,9 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const [doctorResult, setDoctorResult] = useState<LocalDoctorResult | null>(null);
   const [runningDoctor, setRunningDoctor] = useState(false);
   const selectedBridgeProjects = Form.useWatch('projectIds', bridgeForm);
+  const workspaceProjectId = Form.useWatch('projectId', workspaceForm);
+  const serverMode = capabilities?.deployment === 'server';
+  const repositories = !serverMode || repositoryScan.projectId === workspaceProjectId ? repositoryScan.items : [];
   const seenHandoff = useRef('');
   const copySequence = useRef(0);
   const bridgeSequence = useRef(0);
@@ -75,14 +78,13 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       setHostBridge(bridgeData);
       setProjects(projectData.projects);
       setWorkspaces(workspaceData.workspaces);
-      void Promise.allSettled([
-        api<{ repositories: LocalGitRepo[] }>('local-git/repositories'),
-        api<LocalAutomationCapabilities>('local-automation/capabilities'),
-      ]).then(([repoRes, capRes]) => {
+      void api<LocalAutomationCapabilities>('local-automation/capabilities').then(async capability => {
         if (!alive.current || seq !== bridgeSequence.current) return;
-        if (repoRes.status === 'fulfilled') {
-          const scanned = repoRes.value.repositories || [];
-          setRepositories(scanned);
+        setCapabilities(capability);
+        if (capability.deployment !== 'server') {
+          const { repositories: scanned } = await api<{ repositories: LocalGitRepo[] }>('local-git/repositories');
+          if (!alive.current || seq !== bridgeSequence.current) return;
+          setRepositoryScan({ items: scanned });
           const curProjId = workspaceForm.getFieldValue('projectId');
           const curRepoPath = workspaceForm.getFieldValue('repoPath');
           if (curProjId && !curRepoPath) {
@@ -93,8 +95,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
             }
           }
         }
-        if (capRes.status === 'fulfilled') setCapabilities(capRes.value);
-      });
+      }).catch(() => {});
       if (resetSelection || !bridgeScopeInitialized.current) {
         bridgeScopeInitialized.current = true;
         bridgeForm.setFieldsValue({
@@ -195,23 +196,28 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   };
 
   const rescanRepositories = async () => {
-    if (rescanningRepos) return;
+    const projectId = serverMode ? workspaceForm.getFieldValue('projectId') : undefined;
+    if (rescanningRepos || (serverMode && !projectId)) return;
+    const params = new URLSearchParams({ refresh: '1' });
+    if (projectId) params.set('projectId', projectId);
+    const isCurrent = () => alive.current && (!projectId || workspaceForm.getFieldValue('projectId') === projectId);
     setRescanningRepos(true);
     try {
-      const res = await api<{ repositories: LocalGitRepo[] }>('local-git/repositories?refresh=1');
-      if (!alive.current) return;
-      const scanned = res.repositories || [];
-      setRepositories(scanned);
+      const { repositories: scanned, tccProtected } = await api<{ repositories: LocalGitRepo[]; tccProtected?: boolean }>('local-git/repositories?' + params);
+      if (!isCurrent()) return;
+      setRepositoryScan({ projectId, items: scanned });
       const curProjId = workspaceForm.getFieldValue('projectId');
       const curRepoPath = workspaceForm.getFieldValue('repoPath');
       if (curProjId && !curRepoPath && !workspaces.some(item => item.projectId === curProjId)) {
         const guessed = suggestRepoPathForProject(projects.find(p => p.id === curProjId), scanned);
         if (guessed) workspaceForm.setFieldValue('repoPath', guessed);
       }
-      void message.success(`已重新扫描本机目录，发现 ${scanned.length} 个 Git 仓库。`);
+      if (scanned.length) void message.success(`发现 ${scanned.length} 个 Git 仓库。`);
+      else void message.info(tccProtected ? '部分目录无法访问，可手动填写仓库路径。' : '已扫描的目录中没有 Git 仓库，可手动填写路径。');
     } catch (error) {
-      if (!alive.current) return;
-      void message.error(error instanceof Error ? error.message : '扫描本机 Git 仓库失败。');
+      if (!isCurrent()) return;
+      if (error instanceof ApiError && error.status === 401) onUnauthorized?.();
+      else void message.error(error instanceof Error ? error.message : '扫描本机 Git 仓库失败。');
     } finally {
       if (alive.current) setRescanningRepos(false);
     }
@@ -260,17 +266,16 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const changeStep = (next: number) => { if (step === 2 && next !== 2) clearPaths(); setStep(next); clearCopy(); };
   const closeGuide = () => { if (handoffPort !== undefined) clearHandoffRoute(handoffPort); seenHandoff.current = ''; setHandoffPort(undefined); clearPaths(); setCopied(''); setGuideOpen(false); };
   const selectClient = (key: string) => { clearPaths(); setClient(key); setCustomAdapter(null); setStep(0); setCopied(''); };
-  const serverMode = capabilities?.deployment === 'server';
   const pairCommand = `node local-bridge/rd.mjs ${serverMode ? 'pair' : 'connect'} --url ${hubApiUrl()} --web-url ${location.origin} --name ${shellQuote(customAdapter?.name || '我的开发电脑')} --tool ${activeClient.tool}`;
   const backupLogin = `node local-bridge/rd.mjs login --url ${hubApiUrl()} --username ${shellQuote(user.username)}`;
   const pathsReady = absoluteProjectPath(projectPath) && (!customAdapter || (absoluteProjectPath(adapterPath) && /\.json$/i.test(adapterPath)));
   const adapterOption = customAdapter ? `--adapter ${shellQuote(adapterPath)}` : `--client ${activeClient.key}`;
   const installCommand = pathsReady ? `node local-bridge/rd.mjs install-mcp ${adapterOption} --project ${shellQuote(projectPath)}` : '';
   const doctorCommand = pathsReady ? `node local-bridge/rd.mjs doctor ${customAdapter ? `--adapter ${shellQuote(adapterPath)} ` : ''}--project ${shellQuote(projectPath)}` : '';
-  const copy = async (key: string, command: string) => {
+  const copy = async (key: string, value: string, label = '命令') => {
     const sequence = ++copySequence.current;
-    try { await navigator.clipboard.writeText(command); if (sequence !== copySequence.current) return; setCopied(key); void message.success('命令已复制。'); }
-    catch { if (sequence !== copySequence.current) return; setCopied(''); void message.warning('复制未完成，请手动选择命令文本。'); }
+    try { await navigator.clipboard.writeText(value); if (sequence !== copySequence.current) return; setCopied(key); void message.success(`${label}已复制。`); }
+    catch { if (sequence !== copySequence.current) return; setCopied(''); void message.warning(`复制未完成，请手动选择${label}文本。`); }
   };
   const commandBlock = (key: string, command: string, label: string) => <div className="tf-local-command">
     <pre><code>{command}</code></pre><Button size="small" icon={copied === key ? <Check size={14} /> : <Copy size={14} />} aria-label={`复制${label}命令`} onClick={() => void copy(key, command)}>{copied === key ? '已复制' : '复制'}</Button>
@@ -538,11 +543,12 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
         <Space size={6} wrap>
           {repositories.length > 0 && <Tag className="tf-local-protocol">已发现 {repositories.length} 个本地库</Tag>}
           <Tag className="tf-local-protocol">已绑定 {workspaces.length} 项</Tag>
-          <Button size="small" icon={<RefreshCw size={13} />} loading={rescanningRepos} onClick={() => void rescanRepositories()}>重新扫描</Button>
+          <Button size="small" icon={<RefreshCw size={13} />} disabled={!capabilities || loadingBridge || (serverMode && !workspaceProjectId)} loading={rescanningRepos} onClick={() => void rescanRepositories()}>{serverMode ? '扫描设备仓库' : '重新扫描'}</Button>
         </Space>
       }
     >
       <Flex vertical gap={16}>
+        {serverMode && <Typography.Text type="secondary">可扫描已授权当前项目的本机 Bridge，也可手动填写仓库路径。网页绑定用于本地协作，Bridge 自动开发使用设备上的仓库映射。</Typography.Text>}
         {repositories.length > 0 && (
           <div className="tf-repo-quick-picker">
             <Typography.Text className="tf-field-caption">从本机已扫描的 Git 仓库快速填入路径</Typography.Text>
@@ -567,7 +573,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
           onValuesChange={changed => {
             if ('projectId' in changed && changed.projectId) {
               const existing = workspaces.find(item => item.projectId === changed.projectId);
-              const guessed = existing?.repoPath || suggestRepoPathForProject(projects.find(p => p.id === changed.projectId), repositories);
+              const guessed = existing?.repoPath || (serverMode ? '' : suggestRepoPathForProject(projects.find(p => p.id === changed.projectId), repositories));
               workspaceForm.setFieldsValue({
                 repoPath: guessed,
                 defaultTarget: (existing?.defaultTarget as LocalTaskTarget) || 'workbench',
@@ -584,7 +590,13 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                 options={projects.map(project => ({ value: project.id, label: `${project.key} · ${project.name}` }))}
               />
             </Form.Item>
-            <Form.Item name="repoPath" label="本机业务仓库绝对路径" rules={[{ required: true, message: '请输入绝对路径' }, { validator: (_, value) => typeof value === 'string' && absoluteProjectPath(value) ? Promise.resolve() : Promise.reject(new Error('请输入以 / 开头的本机绝对路径')) }]}>
+            <Form.Item name="repoPath" label="本机业务仓库绝对路径" required rules={[{
+              validator: (_, value) => {
+                const path = typeof value === 'string' ? value.trim() : '';
+                if (validRepoPath(path)) return Promise.resolve();
+                return Promise.reject(new Error(path ? '请输入有效的本机仓库绝对路径。' : '请输入本机仓库的绝对路径。'));
+              },
+            }]}>
               <Input placeholder="/Users/you/workspace/service-repo" autoComplete="off" />
             </Form.Item>
             <Form.Item name="defaultTarget" label="默认本地工具">
@@ -614,9 +626,11 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
                       <span className="tf-bound-target-pill">{targetLabel}</span>
                     </div>
                     <Space size={8} wrap className="tf-bound-workspace-actions">
-                      <Button size="small" type="text" icon={<FolderOpen size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'finder', repoPath: item.repoPath }).then(() => message.success('已在 Finder 中打开文件夹。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Finder</Button>
-                      <Button size="small" type="text" onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'cursor', repoPath: item.repoPath }).then(() => message.success('已在 Cursor 中打开。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Cursor</Button>
-                      <Button size="small" type="text" icon={<Terminal size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'terminal', repoPath: item.repoPath }).then(() => message.success('已在终端中打开仓库目录。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>终端</Button>
+                      {capabilities && !serverMode ? <>
+                        <Button size="small" type="text" icon={<FolderOpen size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'finder', repoPath: item.repoPath }).then(() => message.success('已在 Finder 中打开文件夹。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Finder</Button>
+                        <Button size="small" type="text" onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'cursor', repoPath: item.repoPath }).then(() => message.success('已在 Cursor 中打开。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>Cursor</Button>
+                        <Button size="small" type="text" icon={<Terminal size={13} />} onClick={() => void api('local-git/open', { projectId: item.projectId, app: 'terminal', repoPath: item.repoPath }).then(() => message.success('已在终端中打开仓库目录。')).catch(err => message.error(err instanceof Error ? err.message : '打开失败。'))}>终端</Button>
+                      </> : <Button size="small" type="text" icon={<Copy size={13} />} onClick={() => void copy(`repo-${item.projectId}`, item.repoPath, '仓库路径')}>复制路径</Button>}
                       <Button size="small" type="text" onClick={() => workspaceForm.setFieldsValue({ projectId: item.projectId, repoPath: item.repoPath, defaultTarget: (item.defaultTarget as LocalTaskTarget) || 'workbench' })}>编辑</Button>
                       <Button size="small" type="text" danger icon={<Trash2 size={13} />} onClick={() => void removeProjectWorkspace(item.projectId)}>解除</Button>
                     </Space>

@@ -188,10 +188,24 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   }
   const workbenchGateway = serverMode && workbenchHost ? createWorkbenchGateway({ db, audit, host: workbenchHost, publicOrigin, now: deviceClock, logger, instances: workbenchInstances }) : null;
   const serverAutomation = async context => {
-    const { method, path, send } = context;
+    const { method, path, send, url, user, reauthorize } = context;
     if (await bridgeDispatch.handle(context)) return true;
     if (!LOCAL_ONLY_ROUTES.some(pattern => pattern.test(path))) return false;
-    if (method === 'GET' && path === '/api/local-git/repositories') { send(200, { repositories: [], tccProtected: false }); return true; }
+    if (method === 'GET' && path === '/api/local-git/repositories') {
+      const projectId = url.searchParams.get('projectId');
+      if (projectId === null || url.searchParams.get('refresh') !== '1') {
+        send(200, { repositories: [], tccProtected: false });
+        return true;
+      }
+      if (user.localDevice || user.authTransport !== 'COOKIE') fail(403, 'BROWSER_SESSION_REQUIRED', '请在已登录的平台网页中扫描本机仓库。');
+      projectRole(user, projectId);
+      const result = await remoteBroker.scanRepositories(user.id, projectId);
+      const current = reauthorize();
+      if (current.id !== user.id) fail(401, 'SESSION_CHANGED', '当前登录已变更，请刷新页面后重试。');
+      projectRole(current, projectId);
+      send(200, result);
+      return true;
+    }
     fail(403, 'LOCAL_ONLY_ENDPOINT', '服务器部署不提供本机执行与本机目录访问，请通过已配对的本机 Bridge 执行');
   };
   const requireAssignee = (task, user) => { if (task.assigneeId !== user.id) requireRole(taskRole(task, user), ['ADMIN', 'LEAD']); };

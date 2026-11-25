@@ -134,9 +134,9 @@
 
 .tf-workspace-bind-grid {
   display: grid;
-  grid-template-columns: minmax(170px, 1.1fr) minmax(240px, 2fr) minmax(160px, 1fr) auto;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 2fr) minmax(0, 1fr);
   gap: 12px;
-  align-items: end;
+  align-items: start;
 }
 
 .tf-workspace-bind-grid .ant-form-item {
@@ -145,7 +145,8 @@
 
 .tf-workspace-bind-submit {
   display: flex;
-  align-items: flex-end;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
 }
 
 .tf-bound-workspaces {

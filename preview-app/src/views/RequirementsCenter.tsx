@@ -167,12 +167,14 @@ export function RequirementsCenter({
   const runner = serverMode ? 'bridge' : supportsWorkbench ? preferredRunner : 'local';
   const devices = (capabilities?.devices || []).filter(device => activeProjectId && device.projectIds.includes(activeProjectId));
   const device = devices.find(item => item.id === preferredDevice) || devices.find(item => item.online) || devices[0];
+  const bridgeReviewEnabled = capabilities?.bridgeModes?.includes('review') === true;
+  const needsBridgeAuthorization = serverMode && bridgeReviewEnabled && !device;
   const engine = runner === 'workbench'
     ? enginePreference === 'cursor' ? 'cursor' : 'codex'
     : capabilities ? availableAiEngine(capabilities, enginePreference) : enginePreference;
   const model = useAiModelSelection(capabilities, engine, runner, device?.modelEngines, device?.id);
   const available = !!capabilities?.supported && !model.invalid && (
-    runner === 'bridge' ? !!device && !!capabilities.bridgeModes?.includes('review')
+    runner === 'bridge' ? !!device && bridgeReviewEnabled
       : runner === 'workbench' ? supportsWorkbench : capabilities.engines.some(item => item.id === engine && item.available)
   );
   const executor: RequirementReviewExecutor = {
@@ -184,6 +186,11 @@ export function RequirementsCenter({
   const jiraUrl = current?.externalRef?.provider === 'jira' && /^https?:\/\//i.test(current.externalRef.url) ? current.externalRef.url : '';
   const linkedChildren = current ? childCount(current) : 0;
   const fixVersions = current?.externalRef?.fixVersions?.map(version => version.name).filter(Boolean) || [];
+
+  function openLocalIntegration() {
+    setSettingsOpen(false);
+    navigateWorkspace('local');
+  }
 
   function updateSearch(value: string) {
     setQuery(value);
@@ -265,6 +272,7 @@ export function RequirementsCenter({
             {activeProject && <RequirementStageReview
               task={activeBundle?.task || current} stage={reviewStage} user={user} role={activeProject.role}
               bundle={activeBundle} available={available} executor={executor} relatedTasks={relatedTasks}
+              onAuthorizeDevice={needsBridgeAuthorization ? openLocalIntegration : undefined}
               onConfigure={() => setSettingsOpen(true)} onUnauthorized={onUnauthorized} onForbidden={onForbidden}
               onChanged={async () => { await Promise.all([readBundle(), onChanged()]); }}
             />}
@@ -276,10 +284,10 @@ export function RequirementsCenter({
       footer={<Button type="primary" onClick={() => setSettingsOpen(false)}>完成</Button>}
     >
       {!capabilities ? <Skeleton active paragraph={{ rows: 2 }} /> : <div className="tf-requirements-settings">
-        <label>
+        {serverMode ? <span className="tf-requirements-execution-label">执行位置 · 本机 Bridge</span> : <label>
           执行位置
-          <Select value={runner} disabled={serverMode} aria-label="执行位置"
-            options={serverMode ? [{ value: 'bridge', label: '本机 Bridge' }] : [
+          <Select value={runner} aria-label="执行位置"
+            options={[
               { value: 'local', label: '本机 CLI' },
               ...(supportsWorkbench ? [{ value: 'workbench', label: '本地工作台' }] : []),
             ]}
@@ -287,25 +295,27 @@ export function RequirementsCenter({
               if (value === 'local' || value === 'workbench') { setRunnerChoice({ key: runnerKey, value }); writeStoredString(runnerKey, value); }
             }}
           />
-        </label>
-        {serverMode && <label>
+        </label>}
+        {serverMode && bridgeReviewEnabled && device && <label>
           执行设备
-          <Select value={device?.id} aria-label="执行设备" placeholder="未连接设备"
+          <Select value={device.id} aria-label="执行设备"
             options={devices.map(item => ({ value: item.id, label: item.deviceName + (item.online ? '' : ' · 离线') }))}
             onChange={value => { setDeviceChoice({ key: deviceKey, value }); writeStoredString(deviceKey, value); }}
           />
         </label>}
-        {serverMode && !devices.length && <span className="tf-requirements-execution-label">
-          当前项目暂无已授权的 Bridge 设备。请前往
-          <Button type="link" size="small" onClick={() => { setSettingsOpen(false); navigateWorkspace('local'); }}>本地 AI 接入</Button>
-          为设备授权本项目。
+        {needsBridgeAuthorization && <span className="tf-requirements-execution-label">
+          {activeProject?.key} 项目暂无已授权的 Bridge 设备。请前往
+          <Button type="link" size="small" onClick={openLocalIntegration}>本地 AI 接入</Button>
+          ，配对时勾选本项目。
         </span>}
+        {serverMode && !bridgeReviewEnabled && <span className="tf-requirements-execution-label">此站点尚未启用本机 Bridge 评审。</span>}
         {!serverMode && runner === 'workbench' && !workbenchAuthorized && <span className="tf-requirements-execution-label">
           当前账号尚未授权本项目接入本地工作台，请先前往
-          <Button type="link" size="small" onClick={() => { setSettingsOpen(false); navigateWorkspace('local'); }}>本地 AI 接入</Button>
+          <Button type="link" size="small" onClick={openLocalIntegration}>本地 AI 接入</Button>
           完成授权。
         </span>}
-        <LocalAiExecutionFields capabilities={capabilities} engine={engine} onEngineChange={setEnginePreference} model={model} runner={runner} />
+        {(!serverMode || (bridgeReviewEnabled && device)) &&
+          <LocalAiExecutionFields capabilities={capabilities} engine={engine} onEngineChange={setEnginePreference} model={model} runner={runner} />}
         {available && <span className="tf-requirements-execution-label">{executionLabel}{configuredModel ? ` · ${configuredModel}` : ''}</span>}
       </div>}
     </Modal>

@@ -11,7 +11,7 @@ export const LOCAL_TASK_TARGETS: { value: LocalTaskTarget; label: string }[] = [
 ];
 interface LocalTaskAccess { frozen: boolean; allowedStages: readonly Stage[] }
 const validId = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value);
-const validRepoPath = (value: unknown): value is string => {
+export const validRepoPath = (value: unknown): value is string => {
   if (typeof value !== 'string' || value.length < 2 || value.length > 1024 || !value.startsWith('/') || /[\r\n\t\x00\x7f]/.test(value)) return false;
   const segments = value.split('/');
   return !segments.includes('..') && !segments.includes('.git');

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { basename, dirname, join } from 'node:path/posix';
 import { fail } from './common.mjs';
 
 const PING_MS = 15_000;
@@ -9,6 +10,14 @@ const BODY_MAX = 96 * 1024 * 1024;
 const HTTP_BODY_MAX = 32 * 1024 * 1024;
 const RESULTS_MAX = 512;
 const USER_CALLS_MAX = 256;
+const REPO_SCAN_TIMEOUT_MS = 10_000;
+const REPO_SCAN_DIR_LIMIT = 96;
+const REPO_SCAN_BATCH_SIZE = 6;
+const REPO_SCAN_ROOTS = [
+  ['Desktop/工作', 2], ['Desktop/工作台', 2], ['workspace', 2], ['projects', 2],
+  ['workplace', 2], ['code', 2], ['Developer', 2], ['Documents/Codex', 4],
+];
+const REPO_SCAN_SKIP = new Set(['node_modules', 'dist', 'build', 'target', 'vendor']);
 
 const isLoopback = req => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '') && !req.headers['x-forwarded-for'] && !req.headers['x-real-ip'];
 const json = (res, status, value) => { if (res.headersSent || res.destroyed) return; res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(value)); };
@@ -36,13 +45,14 @@ export function createRemoteBroker({ db, now = Date.now, logger = console, insta
   const agents = new Map();
   const calls = new Map();
 
-  const liveDevice = device => db.prepare(`SELECT d.id FROM local_device_sessions d JOIN sessions s ON s.token_hash=d.token_hash
+  const liveDevice = device => db.prepare(`SELECT d.id,d.project_ids FROM local_device_sessions d JOIN sessions s ON s.token_hash=d.token_hash
     WHERE d.id=? AND d.user_id=? AND d.revoked_at IS NULL AND d.expires_at>? AND s.expires_at>?`).get(device.id, device.user_id, now(), now());
-  const agentFor = userId => {
+  const agentFor = (userId, projectId) => {
     const list = [...agents.values()].filter(agent => agent.userId === userId).sort((a, b) => b.connectedAt - a.connectedAt);
     for (const agent of list) {
-      if (liveDevice({ id: agent.deviceId, user_id: userId })) return agent;
-      agent.res.destroy();
+      const device = liveDevice({ id: agent.deviceId, user_id: userId });
+      if (!device) agent.res.destroy();
+      else if (!agent.res.destroyed && (projectId === undefined || JSON.parse(device.project_ids).includes(projectId))) return agent;
     }
     return null;
   };
@@ -129,16 +139,84 @@ export function createRemoteBroker({ db, now = Date.now, logger = console, insta
     fail(404, 'NOT_FOUND', '接口不存在');
   }
 
-  function fsCall(userId, op, args) {
-    const agent = agentFor(userId);
-    if (!agent) return Promise.reject(hostDown('你的电脑未连接'));
-    if (userCalls(userId) >= USER_CALLS_MAX) return Promise.reject(Object.assign(new Error('同时进行的电脑端操作过多'), { code: 'EAGAIN' }));
+  function fsCallOn(agent, op, args, timeoutMs = FS_TIMEOUT_MS) {
+    if (!agent || agent.res.destroyed || agents.get(agent.deviceId) !== agent) return Promise.reject(hostDown('你的电脑未连接'));
+    if (userCalls(agent.userId) >= USER_CALLS_MAX) return Promise.reject(Object.assign(new Error('同时进行的电脑端操作过多'), { code: 'EAGAIN' }));
     return new Promise((resolve, reject) => {
-      const call = { id: randomUUID(), kind: 'fs', userId, deviceId: agent.deviceId, resolve, reject, done: false };
-      call.timer = setTimeout(() => settle(call, Object.assign(new Error('电脑端操作超时'), { code: 'ETIMEDOUT' })), FS_TIMEOUT_MS);
+      const call = { id: randomUUID(), kind: 'fs', userId: agent.userId, deviceId: agent.deviceId, resolve, reject, done: false };
+      call.timer = setTimeout(() => settle(call, Object.assign(new Error('电脑端操作超时'), { code: 'ETIMEDOUT' })), timeoutMs);
       calls.set(call.id, call);
       push(agent, { type: 'fs', id: call.id, op, args });
     });
+  }
+
+  async function scanRepositories(userId, projectId) {
+    const agent = agentFor(userId, projectId);
+    const unavailable = () => fail(409, 'BRIDGE_REPO_SCAN_UNAVAILABLE', '当前项目没有已连接且获授权的本机 Bridge，可手动填写仓库路径。');
+    if (!agent) unavailable();
+    const verifyAgent = () => {
+      const device = liveDevice({ id: agent.deviceId, user_id: userId });
+      if (!device || !JSON.parse(device.project_ids).includes(projectId) || agent.res.destroyed || agents.get(agent.deviceId) !== agent) unavailable();
+    };
+    const timedOut = () => fail(504, 'BRIDGE_REPO_SCAN_TIMEOUT', '扫描本机仓库超时，请重试或直接填写路径。');
+    const deadline = Date.now() + REPO_SCAN_TIMEOUT_MS;
+    const cachedEntries = new Map();
+    let tccProtected = false;
+    const readEntries = async path => {
+      verifyAgent();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) timedOut();
+      let entries;
+      try {
+        entries = await fsCallOn(agent, 'readdir', [path, { withFileTypes: true }], remainingMs);
+      } catch (error) {
+        if (['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR'].includes(error.code)) {
+          if (error.code === 'EACCES' || error.code === 'EPERM') tccProtected = true;
+          return [];
+        }
+        if (error.code === 'EHOSTDOWN') unavailable();
+        if (error.code === 'ETIMEDOUT') timedOut();
+        if (error.code === 'EAGAIN') fail(429, 'BRIDGE_REPO_SCAN_BUSY', '本机正在处理较多请求，请稍后重试。');
+        fail(502, 'BRIDGE_REPO_SCAN_FAILED', '本机目录读取失败，请重试。');
+      }
+      if (!Array.isArray(entries)) fail(502, 'BRIDGE_REPO_SCAN_FAILED', '本机返回的目录数据无效，请重试。');
+      return entries;
+    };
+    // Resolve the fixed roots through real directory entries so symlinked roots are skipped as well.
+    const roots = await Promise.all(REPO_SCAN_ROOTS.map(async ([relativePath, depth]) => {
+      let path = agent.home;
+      for (const name of relativePath.split('/')) {
+        if (!cachedEntries.has(path)) cachedEntries.set(path, readEntries(path));
+        const entries = await cachedEntries.get(path);
+        if (!entries.some(entry => entry?.name === name && entry.kind === 'dir')) return null;
+        path = join(path, name);
+      }
+      return { path, depth };
+    }));
+    const queue = roots.filter(Boolean);
+    const scheduled = new Set(queue.map(entry => entry.path));
+    const repositories = [];
+    while (queue.length) {
+      await Promise.all(queue.splice(0, REPO_SCAN_BATCH_SIZE).map(async ({ path, depth }) => {
+        const entries = await readEntries(path);
+        if (entries.some(entry => entry?.name === '.git' && ['dir', 'file'].includes(entry.kind))) {
+          repositories.push({ name: basename(path), path, group: basename(dirname(path)) });
+          return;
+        }
+        if (!depth) return;
+        for (const entry of entries) {
+          if (scheduled.size >= REPO_SCAN_DIR_LIMIT) break;
+          if (entry?.kind !== 'dir' || typeof entry.name !== 'string' || !entry.name ||
+              entry.name.startsWith('.') || /[\/\x00-\x1f\x7f]/.test(entry.name) || REPO_SCAN_SKIP.has(entry.name)) continue;
+          const child = join(path, entry.name);
+          if (child.length > 1024 || scheduled.has(child)) continue;
+          scheduled.add(child);
+          queue.push({ path: child, depth: depth - 1 });
+        }
+      }));
+    }
+    verifyAgent();
+    return { repositories: repositories.sort((a, b) => a.path.localeCompare(b.path)), tccProtected };
   }
 
   function httpCall(userId, request) {
@@ -195,7 +273,7 @@ export function createRemoteBroker({ db, now = Date.now, logger = console, insta
       let request;
       try { request = parseJson(await readBody(req)); } catch (error) { return json(res, error.status || 400, { ok: false, error: { code: 'EINVAL', message: error.message } }), true; }
       if (!request || typeof request.op !== 'string' || !Array.isArray(request.args)) return json(res, 400, { ok: false, error: { code: 'EINVAL', message: '参数不正确' } }), true;
-      try { json(res, 200, { ok: true, value: await fsCall(userId, request.op, request.args) }); }
+      try { json(res, 200, { ok: true, value: await fsCallOn(agentFor(userId), request.op, request.args) }); }
       catch (error) { json(res, 200, { ok: false, error: { ...(error.remote || {}), code: error.code || 'EIO', message: error.message } }); }
       return true;
     }
@@ -224,7 +302,7 @@ export function createRemoteBroker({ db, now = Date.now, logger = console, insta
   }
 
   return {
-    bridgeRoutes, instanceRoutes,
+    bridgeRoutes, instanceRoutes, scanRepositories,
     active: userId => userCalls(userId) > 0,
     status: userId => { const agent = agentFor(userId); return agent ? { online: true, home: agent.home, platform: agent.platform } : { online: false }; },
     close: () => { for (const call of [...calls.values()]) settle(call, hostDown('服务正在重启')); for (const agent of agents.values()) agent.res.destroy(); },
