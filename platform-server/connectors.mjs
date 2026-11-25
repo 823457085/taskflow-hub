@@ -323,6 +323,9 @@ export function createConnectors({ db, dbPath, transaction, audit, projectRole, 
           db.prepare('INSERT INTO projects(id,key,name,created_at) VALUES(?,?,?,?)').run(projectId, item.key, item.name, now);
           db.prepare('INSERT INTO project_members(project_id,user_id,role) VALUES(?,?,?)').run(projectId, user.id, 'LEAD');
           db.prepare('INSERT INTO jira_project_bindings VALUES(?,?,?,?,?,?,?,?)').run(projectId, row.base_url, item.id, item.key, item.name, item.projectTypeKey, category, now); created++;
+          if (row.account?.scope === 'PERSONAL' && row.account.owner_id === user.id) {
+            db.prepare("INSERT INTO account_preferences (user_id,project_id,provider,account_id,updated_at) VALUES (?,?,'jira',?,?)").run(user.id, projectId, row.account.id, now);
+          }
         } else {
           const changed = binding.remote_key !== item.key || binding.remote_name !== item.name || binding.project_type_key !== item.projectTypeKey || binding.category !== category;
           if (changed) {

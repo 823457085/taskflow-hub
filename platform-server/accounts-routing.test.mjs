@@ -152,17 +152,23 @@ test('Jira lookup and search identify the account actually used and import can p
 
 test('Jira project sync using a personal or scoped shared account creates no legacy credential copies', async t => {
   const f = await fixture(); t.after(() => f.close());
+  const existingChoice = await f.account(f.admin, 'existing-jira-choice');
+  await f.select(f.admin, 'jira', existingChoice.id);
+  const selectedJiraAccount = async projectId => f.expect(await f.call(`/api/accounts?projectId=${projectId}&provider=jira`)).selectedAccountId;
   for (const [index, scope] of ['PERSONAL', 'PROJECT'].entries()) {
     const selected = await f.account(f.admin, `directory-${scope.toLowerCase()}`, 'jira', scope === 'PROJECT' ? { scope, projectId: f.project.id } : { scope });
     const remoteId = String(103 + index); const remoteKey = scope === 'PERSONAL' ? 'PRIVATE' : 'SHARED';
     f.state.catalog.push({ id: remoteId, key: remoteKey, name: `L_${remoteKey}_PROJECT` });
-    const response = f.expect(await f.call('/api/connectors/jira/sync-projects', 'POST', { projectId: f.project.id, accountId: selected.id, projectIds: [remoteId] }));
+    const response = f.expect(await f.call('/api/connectors/jira/sync-projects', 'POST', { projectId: f.project.id, accountId: selected.id, projectIds: [remoteId, '101', '102'] }));
     const created = response.projects.find(project => project.key === remoteKey);
     assert.ok(created, 'Selected Jira project must be synchronized'); assert.equal(response.created, 1);
     const connector = f.app.db.prepare('SELECT auth_mode,credential,base_url FROM connector_configs WHERE project_id=? AND provider=?').get(created.id, 'jira');
     assert.ok(connector, 'New project retains a service-address placeholder');
     assert.equal(connector.auth_mode, 'NONE'); assert.equal(connector.base_url, f.upstream);
     assert.ok(connector.credential === null, 'Directory sync must not copy a private or scoped shared credential into a legacy connector');
+    assert.equal(await selectedJiraAccount(created.id), scope === 'PERSONAL' ? selected.id : null, 'Only the operator’s personal account may be selected on the new project');
+    assert.equal(await selectedJiraAccount(f.project.id), existingChoice.id, 'Re-sync must preserve an existing account preference');
+    assert.equal(await selectedJiraAccount(f.other.id), null, 'Re-sync must leave existing projects on their default connection');
     const before = f.state.requests.length;
     const uncredentialed = await f.call('/api/jira/tasks/lookup', 'POST', { projectId: created.id, reference: `${remoteKey}-1`, accountId: null });
     assert.equal(uncredentialed.status, 409); assert.equal(uncredentialed.data.error.code, 'REMOTE_AUTH_REQUIRED');
@@ -256,17 +262,27 @@ test('rotated credentials, revoked membership and expired sessions invalidate de
   });
 });
 
-test('member asset imports use selected Confluence and GitLab accounts and a changed preference cannot finish an old import', async t => {
+test('members reuse personal Confluence and GitLab accounts across projects and stale preferences cannot finish imports', async t => {
   const f = await fixture(); t.after(() => f.close()); const owner = await f.member();
+  f.expect(await f.call(`/api/projects/${f.other.id}/members`, 'POST', { userId: owner.user.id, role: 'DEV' }));
   const task = f.expect(await f.call('/api/tasks', 'POST', { projectId: f.project.id, jiraKey: 'TEST-20', title: 'Local fixture task' }, owner), 201).task;
-  for (const provider of ['confluence', 'gitlab']) await f.configure(provider);
+  const otherTask = f.expect(await f.call('/api/tasks', 'POST', { projectId: f.other.id, jiraKey: 'OTHER-20', title: 'Second project fixture task' }, owner), 201).task;
   const docs = await f.account(owner, 'private-docs', 'confluence'); const code = await f.account(owner, 'private-code', 'gitlab');
-  await f.select(owner, 'confluence', docs.id); await f.select(owner, 'gitlab', code.id);
-  const importedDoc = f.expect(await f.call('/api/connectors/confluence/import', 'POST', { projectId: f.project.id, resource: 'confluence_page', pageId: '123', taskId: task.id, kind: 'TECH_SPEC' }, owner));
-  assert.equal(importedDoc.asset.content, '<p>L_DOC_private-docs</p>');
-  const importedCode = f.expect(await f.call('/api/connectors/gitlab/import', 'POST', { projectId: f.project.id, resource: 'gitlab_mr', repositoryId: 'team/repo', mrIid: '7', taskId: task.id, kind: 'CODE' }, owner));
-  assert.match(importedCode.asset.content, /L_CODE_private-code/);
-  assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM assets').get().n, 2);
+  for (const currentTask of [task, otherTask]) {
+    const { id: taskId, projectId } = currentTask;
+    for (const account of [docs, code]) {
+      f.expect(await f.call('/api/accounts/select', 'POST', { projectId, provider: account.provider, accountId: account.id }, owner));
+    }
+    const { connectors } = f.expect(await f.call(`/api/connectors?projectId=${projectId}`, 'GET', undefined, owner));
+    assert.equal(connectors.find(connector => connector.provider === 'confluence').accountId, docs.id);
+    assert.equal(connectors.find(connector => connector.provider === 'gitlab').accountId, code.id);
+    const importedDoc = f.expect(await f.call('/api/connectors/confluence/import', 'POST', { projectId, resource: 'confluence_page', pageId: '123', taskId, kind: 'TECH_SPEC' }, owner));
+    assert.equal(importedDoc.asset.content, '<p>L_DOC_private-docs</p>');
+    const importedCode = f.expect(await f.call('/api/connectors/gitlab/import', 'POST', { projectId, resource: 'gitlab_mr', repositoryId: 'team/repo', mrIid: '7', taskId, kind: 'CODE' }, owner));
+    assert.match(importedCode.asset.content, /L_CODE_private-code/);
+  }
+  assert.equal(f.app.db.prepare("SELECT count(*) AS n FROM connector_configs WHERE provider IN ('confluence', 'gitlab')").get().n, 0);
+  assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM assets').get().n, 4);
   assert.equal(f.app.db.prepare('SELECT count(*) AS n FROM external_imports').get().n, 0);
   assert.deepEqual(new Set(f.app.db.prepare('SELECT account_id FROM account_external_imports').all().map(row => row.account_id)), new Set([docs.id, code.id]));
   assert.deepEqual(f.app.db.prepare('PRAGMA foreign_key_check').all(), []);

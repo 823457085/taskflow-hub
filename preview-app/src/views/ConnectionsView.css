@@ -42,7 +42,6 @@
 }
 .tf-connection-automation { scroll-margin-top: 16px; }
 .tf-connection-source-section { display: grid; gap: 8px; min-width: 0; }
-.tf-connection-form-wrap,
 .tf-connection-resource-form,
 .tf-connection-account {
   width: 100%;

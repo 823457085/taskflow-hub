@@ -91,7 +91,7 @@ export const ConnectionsAutomationPanel: React.FC<{
           baseUrl: 'https://api.deepseek.com',
           model: 'deepseek-chat',
           difyMode: 'workflow',
-          enabled: true,
+          enabled: false,
           autoStages: ['PRD', 'TECH_SPEC', 'CODE_REVIEW'],
           autoWritebackMr: false,
           timeoutMs: 60000,
@@ -386,7 +386,7 @@ export const ConnectionsAutomationPanel: React.FC<{
     <Flex vertical gap={20}>
       <Card
         loading={loading}
-        title={<Space size={8}><Bot size={18} /><span>云端评审</span>{cloudConfig?.enabled ? <Badge status="success" text="已启用" /> : <Badge status="default" text="未启用" />}</Space>}
+        title={<Space size={8}><Bot size={18} /><span>云端评审（可选）</span>{cloudConfig?.enabled ? <Badge status="success" text="已启用" /> : <Badge status="default" text="未启用" />}</Space>}
         extra={<Space size={8}>
           <Button size="small" icon={<RefreshCw size={14} />} onClick={() => void loadAll()}>刷新</Button>
           {canManage && cloudConfig && (
@@ -395,6 +395,7 @@ export const ConnectionsAutomationPanel: React.FC<{
         </Space>}
       >
         <Flex vertical gap={14}>
+          <Typography.Text type="secondary">任务内的本机 Bridge 评审无需此处的 API Key。由服务器执行的评审和 Webhook 自动评审使用此配置。</Typography.Text>
           {cloudConfig?.lastCheckedAt && (
             <Descriptions size="small" column={{ xs: 1, sm: 2 }} items={[
               { key: 'checked', label: '最近测试', children: timeText(cloudConfig.lastCheckedAt) },
