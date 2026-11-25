@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+**/node_modules
+preview-app/dist
+preview-app/dist-single
+platform-server/.data
+.data
+.local
+.env
+.env.*
+*.log
+*.tgz
+.DS_Store
+._*

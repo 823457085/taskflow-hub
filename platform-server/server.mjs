@@ -1,7 +1,9 @@
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
-import { resolve } from 'node:path';
+import { extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openStorage } from './storage.mjs';
 import { createWorkflow, isSubtask, reviewRequired } from './workflow.mjs';
@@ -28,6 +30,7 @@ import { normalizePluginManifest } from './policy-runner.mjs';
 import { createWorkbenchGateway, workbenchPublicUrl } from './workbench-gateway.mjs';
 import { createRemoteBroker } from './remote-broker.mjs';
 import { createWorkbenchInstances } from './workbench-instances.mjs';
+import { openrcControl } from './workbench-openrc.mjs';
 import { globalPermissions, projectPermissions, canEditMemberRole, assertMemberRoleChange } from './permissions.mjs';
 import { ApiError, ROLES, PROJECT_ROLES, STAGES, CHAIN_STAGES, RULE_ENFORCEMENTS, KINDS, TOOLS, ASSET_ROLES, fail, sha, textField, publicUser, taskRow, bumpParentContexts } from './common.mjs';
 const scrypt = promisify(scryptCallback);
@@ -63,7 +66,55 @@ function repoPathField(value) {
 }
 const LOOPBACK = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
 const LOCAL_ONLY_ROUTES = [/^\/api\/local-automation\//, /^\/api\/local-git\//, /^\/api\/projects\/[^/]+\/git-status$/, /^\/api\/tasks\/[^/]+\/assets\/from-git$/, /^\/api\/tasks\/[^/]+\/ai-runs$/, /^\/api\/ai-runs\//];
-export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186', deployment = 'local', trustProxy = false, cookieSecure = false, deviceSessionMs, setupToken = '', bridgeModes = ['read', 'review'], workbenchHost = '', publicOrigin = '', workbenchMode = 'relay', workbenchInstanceOptions = {} } = {}) {
+const STATIC_MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+  '.sh': 'text/x-shellscript; charset=utf-8',
+  '.tgz': 'application/gzip',
+  '.gz': 'application/gzip',
+  '.pem': 'application/x-pem-file',
+  '.txt': 'text/plain; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+};
+export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/platform.sqlite'), logger = console, connectorKey, connectorProfiles, connectorProfileReader, allowConnectorLoopbackHttp = false, deviceClock = Date.now, hostBridgeStateDir = null, hostBridgeApiUrl = 'http://127.0.0.1:5187', runsDir = null, localReposFile = null, repoScanRoots = null, runnerOverride = null, appOpener = null, workbenchUrl = 'http://127.0.0.1:5288', workbenchTaskUrl = 'http://127.0.0.1:5186', deployment = 'local', trustProxy = false, cookieSecure = false, deviceSessionMs, setupToken = '', bridgeModes = ['read', 'review'], workbenchHost = '', publicOrigin = '', workbenchMode = 'relay', workbenchInstanceOptions = {}, webDir = null } = {}) {
+  const staticWebDir = webDir ? resolve(webDir) : null;
+  const serveStaticWeb = async (req, res, rawPathname) => {
+    let pathname;
+    try { pathname = decodeURIComponent(rawPathname); } catch { res.writeHead(400); res.end('Bad Request'); return; }
+    const rel = pathname === '/' ? '/index.html' : pathname;
+    let target = resolve(staticWebDir, `.${rel}`);
+    if (!target.startsWith(staticWebDir + sep)) { res.writeHead(403); res.end('Forbidden'); return; }
+    let info = await stat(target).catch(() => null);
+    if (!info?.isFile()) {
+      if (!extname(pathname)) {
+        target = resolve(staticWebDir, 'index.html');
+        info = await stat(target).catch(() => null);
+      }
+      if (!info?.isFile()) { res.writeHead(404); res.end('Not Found'); return; }
+    }
+    const ext = extname(target).toLowerCase();
+    const immutableAsset = pathname.startsWith('/assets/') && ext !== '.html';
+    const cacheControl = immutableAsset ? 'public, max-age=2592000, immutable' : 'no-cache';
+    res.writeHead(200, {
+      'Content-Type': STATIC_MIME[ext] || 'application/octet-stream',
+      'Content-Length': info.size,
+      'Cache-Control': cacheControl,
+      'X-Content-Type-Options': 'nosniff',
+    });
+    if (req.method === 'HEAD') res.end();
+    else createReadStream(target).on('error', () => res.destroy()).pipe(res);
+  };
   if (!['local', 'server'].includes(deployment)) throw new Error('deployment must be local or server');
   const serverMode = deployment === 'server';
   // Behind a reverse proxy every socket is loopback, so loopback-gated local features must not exist in server mode.
@@ -164,6 +215,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (method === 'GET' && path === '/health') return send(200, { status: 'ok', service: 'taskflow-platform', integrations: 'READ_ONLY_CONNECTORS', schemaVersion: 7, deployment });
       if (remoteBroker && await remoteBroker.instanceRoutes(req, res, path, method)) return;
       if (await webhooks.handleInbound({ req, path, send })) return;
+      if (staticWebDir && ['GET', 'HEAD'].includes(method) && !path.startsWith('/api/')) { await serveStaticWeb(req, res, path); return; }
       if (!['GET', 'HEAD'].includes(method) && req.headers.origin) {
         let origin; try { origin = new URL(req.headers.origin); } catch { fail(403, 'ORIGIN_REJECTED', '请求来源不受支持'); }
         if (origin.host !== req.headers.host || !['http:', 'https:'].includes(origin.protocol)) fail(403, 'ORIGIN_REJECTED', '请求来源不受支持');
@@ -889,15 +941,17 @@ export function runtimeOptions(env = process.env) {
   const workbenchMode = env.TASKFLOW_WORKBENCH_MODE || 'relay';
   if (!['relay', 'server'].includes(workbenchMode)) throw new Error('TASKFLOW_WORKBENCH_MODE must be relay or server');
   const workbenchInstanceOptions = {
+    ...(env.TASKFLOW_WORKBENCH_SUPERVISOR === 'openrc' ? { control: openrcControl() } : {}),
     apiUrl: `http://127.0.0.1:${port}`,
     envDir: env.TASKFLOW_WORKBENCH_ENV_DIR || '/var/lib/taskflow/wb-env',
-    stateRoot: env.TASKFLOW_WORKBENCH_STATE_ROOT || '/var/lib/taskflow-wb',    maxSlots: Number(env.TASKFLOW_WORKBENCH_MAX_INSTANCES || 8),
+    stateRoot: env.TASKFLOW_WORKBENCH_STATE_ROOT || '/var/lib/taskflow-wb',
+    maxSlots: Number(env.TASKFLOW_WORKBENCH_MAX_INSTANCES || 8),
   };
   return { workbenchMode, workbenchInstanceOptions, workbenchHost, workbenchPort, publicOrigin: env.TASKFLOW_PUBLIC_ORIGIN || '', port, host: env.TASKFLOW_HOST || '127.0.0.1', deployment, trustProxy: flag('TASKFLOW_TRUST_PROXY', false), cookieSecure: flag('TASKFLOW_COOKIE_SECURE', deployment === 'server'), deviceSessionMs: hours && hours * 3_600_000, bridgeModes };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { port, host, deployment, trustProxy, cookieSecure, deviceSessionMs, bridgeModes, workbenchHost, workbenchPort, publicOrigin, workbenchMode, workbenchInstanceOptions } = runtimeOptions();
-  const setupToken = process.env.TASKFLOW_SETUP_TOKEN || ''; delete process.env.TASKFLOW_SETUP_TOKEN; const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined, deployment, trustProxy, cookieSecure, deviceSessionMs, setupToken, bridgeModes, workbenchHost, publicOrigin, workbenchMode, workbenchInstanceOptions });
+  const setupToken = process.env.TASKFLOW_SETUP_TOKEN || ''; delete process.env.TASKFLOW_SETUP_TOKEN; const platform = createPlatform({ dbPath: process.env.TASKFLOW_DB_PATH || undefined, hostBridgeStateDir: process.env.TASKFLOW_HOST_BRIDGE_STATE_DIR || null, hostBridgeApiUrl: process.env.TASKFLOW_PUBLIC_API_URL || `http://${host}:${port}`, runsDir: process.env.TASKFLOW_RUNS_DIR || null, localReposFile: process.env.TASKFLOW_LOCAL_REPOS_FILE || null, workbenchUrl: process.env.TASKFLOW_WORKBENCH_URL || undefined, workbenchTaskUrl: process.env.TASKFLOW_WEB_ORIGIN || undefined, deployment, trustProxy, cookieSecure, deviceSessionMs, setupToken, bridgeModes, workbenchHost, publicOrigin, workbenchMode, workbenchInstanceOptions, webDir: process.env.TASKFLOW_WEB_DIR ? resolve(process.env.TASKFLOW_WEB_DIR) : null });
   platform.server.once('error', error => { console.error(`TaskFlow API 启动失败 (${error.code || 'LISTEN_ERROR'})`); platform.db.close(); process.exitCode = 1; });
   platform.server.listen(port, host, () => console.log(`TaskFlow API http://${host}:${port}`));
   platform.workbenchServer?.listen(workbenchPort, host, () => console.log(`TaskFlow 工作台网关 http://${host}:${workbenchPort} → https://${workbenchHost}`));
