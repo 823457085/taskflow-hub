@@ -37,8 +37,11 @@ jobs:
       - name: Build web assets & pack bridge
         run: npm run build && npm run pack:bridge
 
-      - name: Run test suite
-        run: npm test
+      - name: Run server & bridge test suite
+        run: |
+          node --test scripts/*.test.mjs
+          npm --prefix platform-server test
+          node --test local-bridge/rd.test.mjs local-bridge/mcp.test.mjs local-bridge/browser-handoff.test.mjs local-bridge/worker.test.mjs local-bridge/service.test.mjs local-bridge/delivery-sync.test.mjs local-bridge/skills-sync.test.mjs local-bridge/updater.test.mjs local-bridge/remote-agent.test.mjs
 
   docker:
     name: Build & Push Multi-Arch Image
