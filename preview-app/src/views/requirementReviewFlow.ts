@@ -3,6 +3,9 @@ import { parseSourceReference, type SourceProvider } from './sourceReference';
 import { extractTaskSmartHints, formatJiraDescriptionForDisplay, formatJiraTaskAsMarkdown } from './taskSmartLinks';
 import { parseJiraReference, jiraReferenceMatchesSource } from '../../../platform-server/jira-reference.mjs';
 import { readReviewCaseFile } from './reviewCaseFile';
+import { isDesignLink, parseReviewSourceLinks, safeReviewLink } from './reviewSourceLinks';
+
+export { isDesignLink, parseReviewSourceLinks };
 
 export type RequirementReviewStage = 'PRD' | 'TECH_SPEC' | 'TEST_CASE' | 'CODE_REVIEW';
 export type RequirementReviewExecutor = { runner: LocalAiRunner; engine: LocalAiEngineId; model?: string; deviceId?: string };
@@ -29,13 +32,7 @@ type Connection = { provider: Provider; baseUrl?: string; accountId?: string; se
 type Reference = { provider: Provider; parameters: Record<string, unknown> };
 
 function safeLink(value: string): URL {
-  const url = new URL(value);
-  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password ||
-      [...url.searchParams.keys()].some(key => /token|password|secret|auth|api[-_]?key|credential|signature|^sig$/i.test(key)) ||
-      /(?:^|[?&#])(?:access_token|token|password|secret|authorization|auth|api[-_]?key|credential|signature|sig)=/i.test(url.hash)) {
-    throw new Error('请输入不带账号或访问令牌的网页链接。');
-  }
-  return url;
+  return safeReviewLink(value);
 }
 
 export function materialSourceIdentity(value: string) {
@@ -84,10 +81,6 @@ function isMergeRequest(url: string | null) {
       parsed.hostname === 'codeup.aliyun.com' && /\/(?:change|merge_requests?)\/[1-9]\d*/.test(parsed.pathname) ||
       parsed.hostname === 'github.com' && /\/pull\/[1-9]\d*/.test(parsed.pathname);
   } catch { return false; }
-}
-
-function isDesignLink(value: string) {
-  try { return /(^|\.)(figma\.com|axure\.cloud|pixso\.cn|js\.design)$/.test(safeLink(value).hostname); } catch { return false; }
 }
 
 function hasMergeDiff(asset: Asset) {
@@ -143,11 +136,12 @@ async function readLinkedCases(url: URL) {
 }
 
 export async function startRequirementReview({
-  task, stage, sourceUrl, caseFile, executor, relatedTasks = [], isCurrent = () => true,
+  task, stage, sourceUrl, sourceUrls, caseFile, executor, relatedTasks = [], isCurrent = () => true,
 }: {
   task: WorkTask;
   stage: RequirementReviewStage;
   sourceUrl?: string;
+  sourceUrls?: readonly string[];
   caseFile?: { name: string; content: string };
   executor: RequirementReviewExecutor;
   relatedTasks?: readonly WorkTask[];
@@ -202,7 +196,9 @@ export async function startRequirementReview({
       return save({ kind: 'TEST_CASE', title: file.name, content: file.content, sourceUrl: url.href, logicalKey: 'review:cases:' + file.name.slice(0, 80) });
     }
     if (!reference || (['PRD', 'TECH_SPEC'].includes(assetKind) && reference.provider !== 'jira' && reference.provider !== 'confluence')) {
-      throw new Error('请使用已关联的 Jira 或 Confluence 文档链接。');
+      throw new Error(assetKind === 'PRD'
+        ? '请使用已关联的 Jira / Confluence 文档链接，或 Figma / 墨刀 / 蓝湖 / Pixso / 即时设计原型链接。'
+        : '请使用已关联的 Jira 或 Confluence 文档链接。');
     }
     // Older manual entries may already represent the same Confluence page.
     // Keep their version history in one logical document.
@@ -219,10 +215,23 @@ export async function startRequirementReview({
     return importReference(reference, assetKind);
   };
 
-  const explicitDesign = stage === 'PRD' && !!sourceUrl && isDesignLink(sourceUrl);
-  let selectedSource = sourceUrl && !explicitDesign ? await importLink(sourceUrl, kind) : undefined;
+  const rawSources = sourceUrls?.length ? [...sourceUrls] : sourceUrl ? [sourceUrl] : [];
+  const parsedSources = parseReviewSourceLinks(rawSources.join('\n'));
+  if (parsedSources.error) throw new Error(parsedSources.error);
+  const suppliedLinks = parsedSources.links;
+  if (stage === 'CODE_REVIEW' && suppliedLinks.length > 1) {
+    throw new Error('代码审核每次请只填写一个合并请求（MR）链接。');
+  }
+  const explicitDesignLinks = stage === 'PRD' ? suppliedLinks.filter(isDesignLink) : [];
+  const explicitDocLinks = stage === 'PRD' ? suppliedLinks.filter(link => !isDesignLink(link)) : suppliedLinks;
+  const dedupedDocLinks = [...new Map(explicitDocLinks.map(link => [materialSourceIdentity(link), link])).values()];
+  const selectedSources: Asset[] = [];
+  for (const link of dedupedDocLinks) {
+    selectedSources.push(await importLink(link, kind));
+  }
+  let selectedSource: Asset | undefined = selectedSources[selectedSources.length - 1];
   if (caseFile) selectedSource = await save({ kind: 'TEST_CASE', title: caseFile.name, content: caseFile.content, logicalKey: 'review:cases:' + caseFile.name.slice(0, 80) });
-  if (stage === 'CODE_REVIEW' && !sourceUrl) {
+  if (stage === 'CODE_REVIEW' && !suppliedLinks.length) {
     const scan = await discoverRequirementMergeRequests(task.id);
     checkContext();
     const taskIds = requirementTaskIds(task, relatedTasks);
@@ -274,7 +283,7 @@ export async function startRequirementReview({
     ...task, externalRef: task.externalRef ? { ...task.externalRef, description } : null,
   }).detectedLinks.map(link => link.url);
   const linkedSources = [...new Set(jiraDescriptions.flatMap(extractLinks))];
-  if (stage === 'PRD' && (!sourceUrl || explicitDesign)) {
+  if (stage === 'PRD' && !dedupedDocLinks.length) {
     const confluenceLink = (link: string) => {
       try { return referenceFor(link, connectors)?.provider === 'confluence'; } catch { return false; }
     };
@@ -300,13 +309,13 @@ export async function startRequirementReview({
     warnings.push('需求依据为工作台记录的 Jira 描述。');
   }
   const designLinks = stage === 'PRD' ? [...new Set([
-    ...(explicitDesign && sourceUrl ? [sourceUrl] : []),
+    ...explicitDesignLinks,
     ...linkedSources.filter(isDesignLink),
     ...assets.filter(asset => asset.logicalKey === 'review:design-references').slice(0, 1)
       .flatMap(asset => asset.content.match(/^https?:\/\/[^\s]+|^\- (https?:\/\/[^\s]+)/gm) || [])
       .map(line => line.replace(/^- /, '')).filter(isDesignLink),
   ])] : [];
-  if (designLinks.length && assets.some(asset => asset.kind === 'PRD')) {
+  if (designLinks.length && (explicitDesignLinks.length > 0 || assets.some(asset => asset.kind === 'PRD'))) {
     await save({ kind: 'PRD', title: '关联设计稿与原型', logicalKey: 'review:design-references',
       content: ['# 关联设计稿与原型', ...designLinks.map(link => '- ' + link)].join('\n') });
     warnings.push('已附上设计稿或原型链接，读取结果以报告中的证据为准。');

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeConfluenceTinyId, parseSourceReference } from '../preview-app/src/views/sourceReference.ts';
+import { isDesignLink, parseReviewSourceLinks } from '../preview-app/src/views/reviewSourceLinks.ts';
 import {
   buildAssetTemplate, buildClipboardGitCommand, detectPastedReference,
   extractTaskSmartHints, formatJiraDescriptionForDisplay, formatJiraTaskAsMarkdown,
@@ -123,4 +124,34 @@ test('in-task smart material helpers classify pasted links/keys and safely quote
   const clipCmd = buildClipboardGitCommand("/Users/demo/O'Reilly/repo", 'working');
   assert.ok(clipCmd.includes("'/Users/demo/O'\\''Reilly/repo'"));
   assert.ok(clipCmd.endsWith('| pbcopy'));
+});
+
+test('reviewSourceLinks splits multiple comma/whitespace links and recognizes figma.site prototypes safely', () => {
+  const mixed = parseReviewSourceLinks(
+    'https://linen-dawn-06160935.figma.site, https://confluence.hahabianli.com/spaces/PRD/pages/57533222/%E3%80%90%E6%9C%8D%E5%8A%A1%E7%90%86%E8%B5%94%E3%80%91',
+  );
+  assert.equal(mixed.error, undefined);
+  assert.deepEqual(mixed.links, [
+    'https://linen-dawn-06160935.figma.site/',
+    'https://confluence.hahabianli.com/spaces/PRD/pages/57533222/%E3%80%90%E6%9C%8D%E5%8A%A1%E7%90%86%E8%B5%94%E3%80%91',
+  ]);
+
+  const noSpace = parseReviewSourceLinks('https://demo.figma.site/,https://docs.example/spaces/PRD/pages/101/Spec，\nhttps://docs.example/a,b');
+  assert.equal(noSpace.error, undefined);
+  assert.deepEqual(noSpace.links, [
+    'https://demo.figma.site/',
+    'https://docs.example/spaces/PRD/pages/101/Spec',
+    'https://docs.example/a,b',
+  ]);
+
+  assert.equal(isDesignLink('https://linen-dawn-06160935.figma.site'), true);
+  assert.equal(isDesignLink('https://www.figma.com/design/abc'), true);
+  assert.equal(isDesignLink('https://modao.cc/proto/123'), true);
+  assert.equal(isDesignLink('https://evilfigma.site/fake'), false);
+  assert.equal(isDesignLink('https://confluence.hahabianli.com/spaces/PRD/pages/57533222'), false);
+
+  assert.ok(parseReviewSourceLinks('https://user:pass@docs.example/page').error);
+  assert.ok(parseReviewSourceLinks('https://docs.example/page?token=abc').error);
+  assert.ok(parseReviewSourceLinks('not-a-url').error);
+  assert.deepEqual(parseReviewSourceLinks('   '), { links: [] });
 });

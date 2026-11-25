@@ -184,7 +184,7 @@ export function formatJiraDescriptionForDisplay(description: unknown): string {
         const href = cleanExtractedUrl(url.replace(/\(/g, '%28').replace(/\)/g, '%29'));
         if (!href) return wikiLink;
         const host = new URL(href).hostname.replace(/^www\./, '');
-        const linkText = label === url ? (host === 'figma.com' ? 'Figma 设计稿' : classifyUrl(href).label) : label;
+        const linkText = label === url ? (/(^|\.)figma\.(?:com|site)$/i.test(host) ? 'Figma 设计稿' : classifyUrl(href).label) : label;
         return `[${linkText}](${href})`;
       }))
     .join('\n')

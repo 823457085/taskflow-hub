@@ -7,7 +7,7 @@ import { aiRunStatusLabel, reviewStatusLabel, runLocationLabel, SEVERITY_OPTIONS
 import { plainReviewText, ReviewFindingContent, sortReviewFindings } from './ReviewFindingContent';
 import { ReviewExportActions } from './ReviewExportActions';
 import { readReviewCaseFile } from './reviewCaseFile';
-import { discoverRequirementMergeRequests, materialSourceIdentity, REQUIREMENT_REVIEW_KINDS, startRequirementReview, type RequirementMergeRequestDiscovery, type RequirementReviewExecutor, type RequirementReviewStage } from './requirementReviewFlow';
+import { discoverRequirementMergeRequests, materialSourceIdentity, parseReviewSourceLinks, REQUIREMENT_REVIEW_KINDS, startRequirementReview, type RequirementMergeRequestDiscovery, type RequirementReviewExecutor, type RequirementReviewStage } from './requirementReviewFlow';
 import { currentAiReviews } from './reviewQueueSla';
 import { extractTaskSmartHints } from './taskSmartLinks';
 import { displayWorkspaceSection, navigateWorkspace, openTaskRoute } from './workspaceNavigation';
@@ -29,7 +29,7 @@ interface RequirementStageReviewProps {
 }
 
 const STAGE_PLACEHOLDERS: Record<RequirementReviewStage, string> = {
-  PRD: '可补充 PRD 或原型链接',
+  PRD: '可补充 PRD 或原型链接（支持逗号或空格分隔多个）',
   TECH_SPEC: '粘贴技术方案链接',
   TEST_CASE: '粘贴测试用例链接，或上传 XLSX',
   CODE_REVIEW: '补充合并请求（MR）链接',
@@ -166,9 +166,13 @@ export function RequirementStageReview({
 
   const launch = async () => {
     if (!mayReview || available === false || inFlight.current || isRunning || isLoadingRun || missingMr) return;
-    const link = webUrl(reviewSource);
-    if (reviewSource.trim() && !link) {
-      void message.warning('请输入有效的 HTTP 或 HTTPS 链接。');
+    const parsedLinks = parseReviewSourceLinks(reviewSource);
+    if (parsedLinks.error) {
+      void message.warning(parsedLinks.error);
+      return;
+    }
+    if (isCodeReview && parsedLinks.links.length > 1) {
+      void message.warning('代码审核每次请只填写一个合并请求（MR）链接。');
       return;
     }
     const tab = executor.runner === 'workbench' ? window.open('about:blank', '_blank') : null;
@@ -180,7 +184,7 @@ export function RequirementStageReview({
     try {
       const file = caseFile && stage === 'TEST_CASE' ? { name: caseFile.name, content: await readReviewCaseFile(caseFile) } : undefined;
       if (!mounted.current) return;
-      const result = await startRequirementReview({ task, relatedTasks, stage, sourceUrl: link, caseFile: file, executor, isCurrent: () => mounted.current });
+      const result = await startRequirementReview({ task, relatedTasks, stage, sourceUrls: parsedLinks.links, caseFile: file, executor, isCurrent: () => mounted.current });
       if (!mounted.current) return;
       setRun(result.run);
       setWarnings(result.warnings || []);
@@ -243,7 +247,7 @@ export function RequirementStageReview({
       : link.suggestedKinds.includes(kind) || stage === 'CODE_REVIEW' && gitHub;
     const identity = materialSourceIdentity(link.url);
     if (relevant && !linkedInputs.has(identity)) {
-      const label = /(^|\.)figma\.com$/i.test(parsed.hostname) ? 'Figma 设计稿' : gitHub ? 'GitHub PR ' + parsed.pathname.split('/')[4] : link.label;
+      const label = /(^|\.)figma\.(?:com|site)$/i.test(parsed.hostname) ? 'Figma 设计稿' : gitHub ? 'GitHub PR ' + parsed.pathname.split('/')[4] : link.label;
       linkedInputs.set(identity, { url: link.url, label, registered: false });
     }
   }
