@@ -10,7 +10,6 @@ import { extractTaskSmartHints } from './taskSmartLinks';
 import { aiRunModeLabel, aiRunStatusLabel, runLocationLabel, severityLabel, stageLabel, taskStatusLabel } from './displayLabels';
 import { isSubmitShortcut, readStoredBool, writeStoredBool } from './uiPreferences';
 import { StatusBadge } from '../components/Primitives';
-import { bridgeInstallCommand } from './bridgeInstall';
 import { ChecklistTable, draftExtras, VerdictTag } from './ChainReportBits';
 import { MarkdownPreview } from './MarkdownPreview';
 import { plainReviewText, ReviewFindingContent, sortReviewFindings } from './ReviewFindingContent';
@@ -171,7 +170,6 @@ export const LocalTaskWorkflow: React.FC<{
     hasReviewDraft: activeRun.mode === 'review' && !!activeRun.draft,
   }) : null;
   const workbench = !serverMode && runner === 'workbench';
-  const bridgeCommand = bridgeInstallCommand(location.origin);
   const selectedEngine = workbench && engine !== 'cursor' ? 'codex' : engine;
   const executionRunner = serverMode ? 'bridge' : workbench ? 'workbench' : 'local';
   const model = useAiModelSelection(capabilities, selectedEngine, executionRunner, selectedDevice?.modelEngines, selectedDevice?.id);
@@ -682,10 +680,7 @@ export const LocalTaskWorkflow: React.FC<{
           showIcon
           title="尚未连接本机 Bridge"
           description={
-            <Flex gap={8} align="center" style={{ marginTop: 4 }}>
-              <Input size="small" readOnly value={bridgeCommand} style={{ fontFamily: 'var(--font-mono, ui-monospace, monospace)', fontSize: 12 }} />
-              <Button size="small" icon={<Copy size={13} />} onClick={() => { void navigator.clipboard.writeText(bridgeCommand).then(() => message.success('命令已复制。')); }}>复制</Button>
-            </Flex>
+            <Button type="link" size="small" onClick={() => navigateWorkspace('local', { bridgeProjectId: task.projectId })}>一键配对</Button>
           }
         />
       )}

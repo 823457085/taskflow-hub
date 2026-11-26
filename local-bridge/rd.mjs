@@ -21,7 +21,7 @@ const allowed = {
   heartbeat: ['task', 'tool', 'status'],
   start: ['task', 'tool', 'repo', 'mode', 'claim'],
   pair: ['url', 'web-url', 'name', 'tool'], doctor: ['project', 'adapter'],
-  connect: ['url', 'web-url', 'name', 'tool', 'projects'],
+  connect: ['url', 'web-url', 'name', 'tool', 'projects', 'replace'],
   'install-mcp': ['client', 'adapter', 'project'], 'adapter-template': [], 'export-mcp': ['adapter'],
   worker: ['config', 'once'], 'worker-init': ['config', 'preset'], service: ['action', 'config'],
   workbench: ['action', 'port', 'service'], update: [],
@@ -32,7 +32,7 @@ export const TOOLS = ['codex', 'codex-cli', 'claude-code', 'cursor', 'antigravit
 const HEARTBEAT_STATUSES = ['IDLE', 'WORKING', 'WAITING', 'OFFLINE'];
 const MAX_REPORT_BYTES = 65_536;
 const usage = `TaskFlow 本地进度桥接（Node.js 24）
-  connect --name <设备名称> --tool <codex|codex-cli|claude-code|cursor|custom> [--url <API地址>] [--web-url <网页地址>] [--projects <建议项目ID,ID>]  打开日常Chrome读取配对申请并确认
+  connect --name <设备名称> --tool <codex|codex-cli|claude-code|cursor|custom> [--url <API地址>] [--web-url <网页地址>] [--projects <建议项目ID,ID>] [--replace <yes|no>]  打开日常Chrome确认接入或换绑
   pair --url http://127.0.0.1:5187 --web-url http://127.0.0.1:5186 --name <设备名称> --tool <codex|codex-cli|claude-code|cursor|custom>
   login --url http://127.0.0.1:5187 --username <用户名>  密码从隐藏输入或 stdin 读取
   doctor [--project <项目目录>] [--adapter <适配器JSON文件>]
@@ -81,6 +81,7 @@ export function parseArgs(args) {
     if (!options.name?.trim() || options.name.length > 80 || /[\x00-\x1f\x7f]/.test(options.name)) fail('需要 1 至 80 字符的 --name 设备名称。');
     options.name = options.name.trim();
     if (!TOOLS.includes(options.tool)) fail('需要支持的 --tool。');
+    if (options.replace !== undefined && !['yes', 'no'].includes(options.replace)) fail('--replace 必须是 yes 或 no。');
     if (options.projects !== undefined) {
       const ids = options.projects.split(',');
       if (!ids.length || ids.length > 100 || ids.some(id => !/^[A-Za-z0-9_-]{1,80}$/.test(id))) fail('--projects 需要1至100个有效项目ID，以逗号分隔。');

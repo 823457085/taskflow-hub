@@ -57,6 +57,7 @@ export function RequirementsCenter({
   const [bundle, setBundle] = useState<TaskDetailBundle>();
   const [bundleLoading, setBundleLoading] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [pairingBridge, setPairingBridge] = useState(false);
   const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
   const [runnerChoice, setRunnerChoice] = useState<{ key: string; value: 'local' | 'workbench' }>();
   const [deviceChoice, setDeviceChoice] = useState<{ key: string; value: string }>();
@@ -189,7 +190,28 @@ export function RequirementsCenter({
 
   function openLocalIntegration() {
     setSettingsOpen(false);
-    navigateWorkspace('local');
+    navigateWorkspace('local', { bridgeProjectId: activeProjectId || undefined });
+  }
+
+  async function pairBridgeForProject() {
+    if (pairingBridge) return;
+    const online = (capabilities?.devices || []).filter(item => item.online);
+    if (!activeProjectId || online.length !== 1) { openLocalIntegration(); return; }
+    setPairingBridge(true);
+    try {
+      const result = await api<{ device: { id: string; projectIds: string[] } }>(
+        `local-devices/${encodeURIComponent(online[0].id)}/projects`, { projectIds: [activeProjectId] }, 'PATCH',
+      );
+      setCapabilities(current => current ? {
+        ...current, devices: current.devices?.map(item => item.id === result.device.id ? { ...item, projectIds: result.device.projectIds } : item),
+      } : current);
+      void message.success('本机 AI 已连接到当前项目。');
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) feedback.current.onUnauthorized();
+      else if (error instanceof Error) void feedback.current.message.error(error.message);
+    } finally {
+      setPairingBridge(false);
+    }
   }
 
   function updateSearch(value: string) {
@@ -272,7 +294,8 @@ export function RequirementsCenter({
             {activeProject && <RequirementStageReview
               task={activeBundle?.task || current} stage={reviewStage} user={user} role={activeProject.role}
               bundle={activeBundle} available={available} executor={executor} relatedTasks={relatedTasks}
-              onAuthorizeDevice={needsBridgeAuthorization ? openLocalIntegration : undefined}
+              onAuthorizeDevice={needsBridgeAuthorization ? pairBridgeForProject : undefined}
+              pairingDevice={pairingBridge}
               onConfigure={() => setSettingsOpen(true)} onUnauthorized={onUnauthorized} onForbidden={onForbidden}
               onChanged={async () => { await Promise.all([readBundle(), onChanged()]); }}
             />}
@@ -304,9 +327,8 @@ export function RequirementsCenter({
           />
         </label>}
         {needsBridgeAuthorization && <span className="tf-requirements-execution-label">
-          {activeProject?.key} 项目暂无已授权的 Bridge 设备。请前往
-          <Button type="link" size="small" onClick={openLocalIntegration}>本地 AI 接入</Button>
-          ，配对时勾选本项目。
+          {activeProject?.key} 项目还未连接本机 AI。
+          <Button type="link" size="small" loading={pairingBridge} onClick={() => void pairBridgeForProject()}>一键配对</Button>
         </span>}
         {serverMode && !bridgeReviewEnabled && <span className="tf-requirements-execution-label">此站点尚未启用本机 Bridge 评审。</span>}
         {!serverMode && runner === 'workbench' && !workbenchAuthorized && <span className="tf-requirements-execution-label">

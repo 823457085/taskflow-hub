@@ -20,8 +20,8 @@ async function fixture({ persistent = false, hostBridge = false } = {}) {
     base = `http://127.0.0.1:${app.server.address().port}`;
   };
   await start();
-  const request = async (path, { method = 'GET', body, bearer, cookie, origin, contentType = 'application/json' } = {}) => {
-    const response = await fetch(base + path, { method, headers: { ...(body === undefined ? {} : { 'Content-Type': contentType }), ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(origin === true ? { Origin: base } : origin ? { Origin: origin } : {}) }, ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }) });
+  const request = async (path, { method = 'GET', body, bearer, cookie, origin, contentType = 'application/json', headers = {} } = {}) => {
+    const response = await fetch(base + path, { method, headers: { ...(body === undefined ? {} : { 'Content-Type': contentType }), ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...(cookie ? { Cookie: cookie } : {}), ...(origin === true ? { Origin: base } : origin ? { Origin: origin } : {}), ...headers }, ...(body === undefined ? {} : { body: typeof body === 'string' ? body : JSON.stringify(body) }) });
     const text = await response.text();
     return { status: response.status, data: text ? JSON.parse(text) : null, headers: response.headers, text };
   };
@@ -149,6 +149,48 @@ test('device scope follows current membership and role, including after approval
     f.app.db.prepare('DELETE FROM project_members WHERE user_id=? AND project_id=?').run(member.user.id, 'default');
     await f.poll(pending, 403, 'PROJECT_FORBIDDEN');
     assert.equal(f.app.db.prepare('SELECT COUNT(*) AS n FROM local_device_sessions').get().n, 1);
+  } finally { await f.close(); }
+});
+
+test('only the browser owner can add accessible projects without rotating the active device or expanding team sharing', async () => {
+  const f = await fixture();
+  try {
+    const admin = await f.account();
+    const member = await f.account('developer', 'DEV', admin);
+    const other = (await f.expect('/api/projects', {
+      method: 'POST', bearer: admin.token, body: { key: 'OTHER', name: 'Additional project' },
+    }, 201)).data.project;
+    const pair = await f.begin();
+    await f.decision(pair, member);
+    const device = (await f.poll(pair)).data;
+    const devicePath = `/api/local-devices/${device.deviceId}`;
+    const path = `${devicePath}/projects`;
+    const update = { method: 'PATCH', cookie: member.cookie, origin: true, body: { projectIds: [other.id] } };
+    await f.expect(path, { ...update, origin: undefined }, 403, 'BROWSER_SESSION_REQUIRED');
+    await f.expect(path, { ...update, origin: 'https://untrusted.invalid' }, 403, 'ORIGIN_REJECTED');
+    await f.expect(path, { ...update, bearer: member.token }, 403, 'BROWSER_SESSION_REQUIRED');
+    await f.expect(path, { ...update, bearer: device.token }, 403, 'LOCAL_DEVICE_SCOPE');
+    await f.expect(path, { ...update, cookie: admin.cookie }, 404, 'DEVICE_NOT_FOUND');
+    await f.expect(path, { ...update, body: { projectIds: [] } }, 400, 'PROJECT_SCOPE_REQUIRED');
+    await f.expect(path, { ...update, body: { ...update.body, teamDispatch: false } }, 400, 'INVALID_INPUT');
+    await f.expect(path, update, 403, 'PROJECT_FORBIDDEN');
+    f.app.db.prepare('INSERT INTO project_members VALUES (?,?,?)').run(other.id, member.user.id, 'DEV');
+    await f.expect(devicePath, { ...update, body: { teamDispatch: true } });
+    await f.expect(path, { ...update, body: { projectIds: ['default'] } });
+    await f.expect(path, update, 409, 'BRIDGE_TEAM_DISPATCH_SCOPE_CONFLICT');
+    assert.deepEqual((await f.expect('/api/me', { bearer: device.token })).data.authorization.projectIds, ['default']);
+    await f.expect(devicePath, { ...update, body: { teamDispatch: false } });
+
+    const expected = { id: device.deviceId, projectIds: ['default', other.id], teamDispatch: false };
+    for (let attempt = 0; attempt < 2; attempt++) assert.deepEqual((await f.expect(path, update)).data.device, expected);
+    const authorization = (await f.expect('/api/me', { bearer: device.token })).data.authorization;
+    assert.equal(authorization.deviceId, device.deviceId);
+    assert.equal(authorization.expiresAt, device.expiresAt);
+    assert.deepEqual(authorization.projectIds, expected.projectIds);
+    assert.deepEqual((await f.expect('/api/projects', { bearer: device.token })).data.projects.map(p => p.id), expected.projectIds);
+    assert.equal(f.app.db.prepare('SELECT COUNT(*) AS count FROM local_device_sessions').get().count, 1);
+    await f.expect(devicePath, { method: 'DELETE', cookie: member.cookie, origin: true }, 204);
+    await f.expect(path, update, 404, 'DEVICE_NOT_FOUND');
   } finally { await f.close(); }
 });
 
@@ -307,5 +349,101 @@ test('project workspace bindings persist per user, expose in task context, and b
 
     await f.expect('/api/projects/default/workspace', { method: 'DELETE', cookie: admin.cookie, origin: true }, 204);
     assert.equal((await f.expect('/api/projects/default/workspace', { cookie: admin.cookie })).data.workspace, null);
+  } finally { await f.close(); }
+});
+
+test('host bridge switches accounts only after exact local confirmation and preserves the active binding on failure', async () => {
+  const f = await fixture({ hostBridge: true });
+  try {
+    const first = await f.account();
+    const next = await f.account('next-developer', 'DEV', first);
+    const { project: outside } = (await f.expect('/api/projects', {
+      method: 'POST', bearer: first.token, body: { key: 'OUTSIDE', name: 'Outside project' },
+    }, 201)).data;
+    const route = '/api/local-devices/host-bridge';
+    const sessionFile = join(f.hostBridgeStateDir, 'session.json');
+    const projectIds = ['default'];
+    const bind = ({ cookie }, body = {}, extra = {}) => f.request(route, {
+      method: 'POST', origin: true, cookie, body: { projectIds, ...body }, ...extra,
+    });
+    const status = ({ cookie }, headers) => f.expect(route, { cookie, headers });
+    assert.equal((await bind(first)).status, 201);
+    const original = JSON.parse(readFileSync(sessionFile, 'utf8'));
+    const occupied = (await status(next)).data;
+    assert.equal(occupied.status, 'OTHER_USER');
+    assert.match(occupied.bindingRevision, /^[a-f0-9]{64}$/);
+    assert.equal(occupied.device, null);
+    assert.ok(!JSON.stringify(occupied).includes(original.deviceId));
+    assert.ok(!JSON.stringify(occupied).includes(sha(original.token)));
+    assert.equal((await bind(next)).data.error.code, 'HOST_BRIDGE_OCCUPIED');
+    const forwarding = { 'X-Forwarded-For': '198.51.100.1' };
+    const proxied = (await status(next, forwarding)).data;
+    assert.equal(proxied.supported, false);
+    assert.equal(proxied.bindingRevision, undefined);
+    assert.equal((await bind(next, { replaceBindingRevision: occupied.bindingRevision }, { headers: forwarding })).data.error.code, 'HOST_BRIDGE_UNAVAILABLE');
+    assert.equal((await bind(next, { replaceBindingRevision: '0'.repeat(64) })).data.error.code, 'HOST_BRIDGE_BINDING_CHANGED');
+    const body = { replaceBindingRevision: occupied.bindingRevision };
+    assert.equal((await bind(next, { ...body, projectIds: [outside.id] })).status, 403);
+
+    const db = f.app.db;
+    const exec = db.exec;
+    db.exec = function (sql) {
+      if (sql === 'COMMIT') throw new Error('fixture commit failure');
+      return exec.call(this, sql);
+    };
+    try {
+      assert.equal((await bind(next, body)).status, 500);
+    } finally {
+      db.exec = exec;
+    }
+    assert.equal(JSON.parse(readFileSync(sessionFile, 'utf8')).deviceId, original.deviceId);
+    await f.expect('/api/me', { bearer: original.token });
+    assert.equal((await status(next)).data.bindingRevision, occupied.bindingRevision);
+
+    const replaced = await bind(next, body);
+    assert.equal(replaced.status, 201);
+    assert.equal(replaced.data.replaced, true);
+    const installed = JSON.parse(readFileSync(sessionFile, 'utf8'));
+    assert.notEqual(installed.deviceId, original.deviceId);
+    assert.equal(installed.deviceId, replaced.data.device.id);
+    assert.equal(statSync(sessionFile).mode & 0o777, 0o600);
+    assert.equal((await f.expect('/api/me', { bearer: installed.token })).data.user.id, next.user.id);
+    await f.expect('/api/me', { bearer: original.token }, 401, 'UNAUTHENTICATED');
+    assert.equal((await bind(first, body)).data.error.code, 'HOST_BRIDGE_BINDING_CHANGED');
+    await f.expect('/api/me', { cookie: first.cookie });
+  } finally { await f.close(); }
+});
+
+test('device replacement refuses busy Bridge runs and can revoke only the authenticated device', async () => {
+  const f = await fixture({ hostBridge: true });
+  try {
+    const admin = await f.account();
+    const task = (await f.expect('/api/tasks', { method: 'POST', bearer: admin.token, body: { jiraKey: 'BUSY-1', title: 'Busy bridge task' } }, 201)).data.task;
+    await f.expect('/api/local-devices/host-bridge', { method: 'POST', cookie: admin.cookie, origin: true, body: { projectIds: ['default'] } }, 201);
+    const active = JSON.parse(readFileSync(join(f.hostBridgeStateDir, 'session.json'), 'utf8'));
+    const at = new Date().toISOString();
+    const db = f.app.db;
+    db.prepare(`INSERT INTO local_ai_runs
+      (id,task_id,project_id,actor_id,mode,engine,tool,status,started_at,updated_at,runner,device_id,phase)
+      VALUES (?,?,?,?,'read','codex','codex-cli','RUNNING',?,?,'bridge',?,'QUEUED')`)
+      .run('busy-run', task.id, 'default', admin.user.id, at, at, active.deviceId);
+    const logout = '/api/logout?reason=replace-device';
+    const method = 'POST';
+    await f.expect(logout, { method, cookie: admin.cookie, origin: true }, 403, 'BRIDGE_DEVICE_REQUIRED');
+    assert.equal((await f.expect('/api/me', { bearer: active.token })).data.authorization.hasActiveBridgeRuns, true);
+    await f.expect(logout, { method, bearer: active.token }, 409, 'BRIDGE_DEVICE_BUSY');
+    const host = (await f.expect('/api/local-devices/host-bridge', { cookie: admin.cookie })).data;
+    await f.expect('/api/local-devices/host-bridge', {
+      method, cookie: admin.cookie, origin: true, body: { projectIds: ['default'], replaceBindingRevision: host.bindingRevision },
+    }, 409, 'BRIDGE_DEVICE_BUSY');
+    db.prepare("UPDATE local_ai_runs SET runner='workbench',device_id=NULL WHERE id='busy-run'").run();
+    await f.expect('/api/local-devices/host-bridge', {
+      method, cookie: admin.cookie, origin: true, body: { projectIds: ['default'], replaceBindingRevision: host.bindingRevision },
+    }, 409, 'BRIDGE_DEVICE_BUSY');
+    db.prepare("UPDATE local_ai_runs SET status='SUCCEEDED' WHERE id='busy-run'").run();
+    assert.equal((await f.expect('/api/me', { bearer: active.token })).data.authorization.hasActiveBridgeRuns, false);
+    await f.expect(logout, { method, bearer: active.token }, 204);
+    await f.expect('/api/me', { bearer: active.token }, 401, 'UNAUTHENTICATED');
+    await f.expect('/api/me', { cookie: admin.cookie });
   } finally { await f.close(); }
 });

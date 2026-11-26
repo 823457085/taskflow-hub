@@ -26,9 +26,9 @@ interface LocalDevice {
   scope: 'LOCAL_BRIDGE';
   teamDispatch?: boolean;
 }
-interface PairingPreview { userCode: string; request: PairingRequest; suggestedProjectIds?: string[]; handoff?: boolean }
+interface PairingPreview { userCode: string; request: PairingRequest; suggestedProjectIds?: string[]; handoff?: boolean; replacesExisting?: true }
 
-const DeviceApproval: React.FC<{ preview: PairingPreview; projects: Project[]; loadingProjects: boolean; pending: boolean; expired: boolean; onDecision: (decision: 'APPROVE' | 'DENY', projectIds: string[]) => void }> = ({ preview, projects, loadingProjects, pending, expired, onDecision }) => {
+const DeviceApproval: React.FC<{ preview: PairingPreview; username: string; projects: Project[]; loadingProjects: boolean; pending: boolean; expired: boolean; onDecision: (decision: 'APPROVE' | 'DENY', projectIds: string[]) => void }> = ({ preview, username, projects, loadingProjects, pending, expired, onDecision }) => {
   const [form] = Form.useForm<{ projectIds: string[] }>();
   const pendingRequest = preview.request.status === 'PENDING';
   const initializedScope = useRef(false);
@@ -45,17 +45,17 @@ const DeviceApproval: React.FC<{ preview: PairingPreview; projects: Project[]; l
       { key: 'status', label: '申请状态', children: <Tag>{pairingStatusLabel(preview.request.status)}</Tag> },
       { key: 'expires', label: '授权截止时间', children: timeText(preview.request.expiresAt) },
     ]} />
-    <Typography.Paragraph type="secondary">设备名称和客户端标记由本地 CLI 声明。请核对设备信息及允许访问的项目，再批准接入。</Typography.Paragraph>
+    <Typography.Paragraph type="secondary">{preview.replacesExisting ? `检测到这台电脑已有绑定。确认后将连接当前账号 ${username}，新连接验证成功后会解除旧绑定。` : '请核对设备和允许访问的项目，再批准接入。'}</Typography.Paragraph>
     {pendingRequest && !expired ? <Form form={form} layout="vertical" disabled={pending} initialValues={{ projectIds: [] }} onFinish={values => onDecision('APPROVE', values.projectIds)}>
       <Form.Item name="projectIds" label="允许访问的项目" rules={[{ type: 'array', required: true, min: 1, message: '请明确选择至少一个可访问项目。' }]} extra="仅允许所选项目内的任务读取、认领、进度、心跳和报告提交，不授予成员管理、平台配置、业务审批或发布权限。">
         <Select mode="multiple" placeholder="选择允许访问的项目" disabled={loadingProjects || pending} loading={loadingProjects} showSearch={{ optionFilterProp: 'label' }} options={projects.map(project => ({ value: project.id, label: `${project.key} · ${project.name}` }))} />
       </Form.Item>
-      <Space size={8} wrap><Button type="primary" htmlType="submit" icon={<ShieldCheck size={16} />} loading={pending} disabled={loadingProjects || !projects.length}>批准设备接入</Button><Button danger disabled={pending} onClick={() => onDecision('DENY', [])}>拒绝申请</Button></Space>
+      <Space size={8} wrap><Button type="primary" htmlType="submit" icon={<ShieldCheck size={16} />} loading={pending} disabled={loadingProjects || !projects.length}>{preview.replacesExisting ? '确认切换绑定' : '批准设备接入'}</Button><Button danger disabled={pending} onClick={() => onDecision('DENY', [])}>拒绝申请</Button></Space>
     </Form> : <Typography.Paragraph type="secondary">{expired ? '配对申请已过期，请在终端重新发起。' : preview.request.status === 'APPROVED' ? '已批准，正在等待本地终端完成配对。' : preview.request.status === 'DENIED' ? '此配对申请已拒绝。' : '此配对申请已完成，可在“我的设备”查看授权。'}</Typography.Paragraph>}
   </Flex>;
 };
 
-export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onApproved?: () => void; handoffPort?: number; onHandoffComplete?: () => void }> = ({ onUnauthorized, onApproved, handoffPort, onHandoffComplete }) => {
+export const LocalDevicePairing: React.FC<{ username: string; onUnauthorized?: () => void; onApproved?: (status: 'APPROVED' | 'CONSUMED') => void; handoffPort?: number; onHandoffComplete?: () => void }> = ({ username, onUnauthorized, onApproved, handoffPort, onHandoffComplete }) => {
   const { message } = App.useApp();
   const [codeForm] = Form.useForm<{ userCode: string }>();
   const [preview, setPreview] = useState<PairingPreview | null>(null);
@@ -113,10 +113,10 @@ export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onAppro
       const data = await api<{ request: PairingRequest }>('device-authorizations/inspect', { userCode: code });
       if (!alive.current || sequence !== inspectSequence.current || currentCode.current !== code || !routeCurrent()) return;
       if (handoff) assertLocalBridgeRequest(handoff, data.request);
-      setPreview({ userCode: code, request: data.request, suggestedProjectIds: handoff?.suggestedProjectIds, handoff: !!handoff });
+      setPreview({ userCode: code, request: data.request, suggestedProjectIds: handoff?.suggestedProjectIds, handoff: !!handoff, replacesExisting: handoff?.replacesExisting });
       if (data.request.status === 'CONSUMED') {
         if (handoff) callbacks.current.onHandoffComplete?.();
-        callbacks.current.onApproved?.();
+        callbacks.current.onApproved?.('CONSUMED');
       }
     } catch (error) { if (sequence === inspectSequence.current) showError(error); }
     finally { if (alive.current && sequence === inspectSequence.current) setInspecting(false); }
@@ -144,7 +144,7 @@ export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onAppro
         setPreview(current => current && current.userCode === code ? { ...current, request: data.request } : current);
         if (data.request.status === 'CONSUMED') {
           if (isHandoff) callbacks.current.onHandoffComplete?.();
-          callbacks.current.onApproved?.();
+          callbacks.current.onApproved?.('CONSUMED');
         }
         else if (data.request.status === 'APPROVED' && Date.now() < until) timer = window.setTimeout(update, 3000);
       } catch (error) { if (!stopped && sequence === inspectSequence.current) { setPreview(null); showError(error); } }
@@ -167,7 +167,7 @@ export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onAppro
       if (!alive.current || sequence !== inspectSequence.current || currentCode.current !== code || !routeCurrent()) return;
       setPreview(current => current && current.userCode === code ? { ...current, request: { ...current.request, status: data.status } } : null);
       void message.success(data.status === 'APPROVED' ? '已批准该设备接入。' : '已拒绝该设备配对申请。');
-      if (data.status === 'APPROVED') callbacks.current.onApproved?.();
+      if (data.status === 'APPROVED') callbacks.current.onApproved?.('APPROVED');
     } catch (error) {
       if (alive.current && sequence === inspectSequence.current && currentCode.current === code && routeCurrent()) {
         showError(error);
@@ -190,14 +190,14 @@ export const LocalDevicePairing: React.FC<{ onUnauthorized?: () => void; onAppro
   const expires = preview ? Date.parse(preview.request.expiresAt) : 0;
   const expired = !!preview && (!Number.isFinite(expires) || expires <= now);
   return <Flex vertical gap={24}>
-    {handoffPort !== undefined && <Flex vertical gap={12}><Typography.Text type="secondary">{inspecting ? '正在读取本机接入申请…' : preview ? '已读取本机申请，请核对设备和项目范围。' : '本机申请尚未读取，可重试或使用手动配对。'}</Typography.Text><Space wrap><Button loading={inspecting} disabled={deciding} onClick={() => { void refreshProjects(); setManualMode(false); setHandoffReload(value => value + 1); }}>重新读取本机申请</Button><Button type="text" disabled={deciding} onClick={() => { inspectSequence.current += 1; setInspecting(false); setManualMode(true); }}>手动输入配对码</Button></Space></Flex>}
+    {handoffPort !== undefined && <Flex vertical gap={12}><Typography.Text type="secondary">{inspecting ? '正在读取本机接入申请…' : preview ? '已读取本机申请，请核对设备和项目范围。' : '本机申请尚未读取，可重试或使用手动配对。'}</Typography.Text><Space wrap><Button loading={inspecting} disabled={deciding} onClick={() => { void refreshProjects(); setManualMode(false); setHandoffReload(value => value + 1); }}>重新读取本机申请</Button>{!preview?.replacesExisting && <Button type="text" disabled={deciding || inspecting} onClick={() => { inspectSequence.current += 1; setInspecting(false); setManualMode(true); }}>手动输入配对码</Button>}</Space></Flex>}
     {(handoffPort === undefined || manualMode) && <Form form={codeForm} layout="vertical" disabled={deciding} onFinish={values => void inspect(values)} onValuesChange={values => {
       if ('userCode' in values) { currentCode.current = String(values.userCode || '').trim().toUpperCase(); inspectSequence.current += 1; setPreview(null); setInspecting(false); }
     }}>
       <Form.Item name="userCode" label="终端配对码" htmlFor="local-device-pair-code" normalize={value => typeof value === 'string' ? value.toUpperCase() : value} rules={[{ required: true, message: '请输入终端显示的配对码。' }, { pattern: /^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i, message: '请输入终端显示的8位配对码，例如 ABCD-EFGH。' }]}><Input id="local-device-pair-code" placeholder="ABCD-EFGH" autoComplete="off" autoCapitalize="characters" spellCheck={false} maxLength={9} className="tf-local-code-input" /></Form.Item>
       <Button type={preview ? 'default' : 'primary'} htmlType="submit" loading={inspecting} disabled={deciding || inspecting}>读取配对申请</Button>
     </Form>}
-    {preview && <DeviceApproval key={preview.userCode} preview={preview} projects={projects} loadingProjects={loadingProjects} pending={deciding} expired={expired} onDecision={(decision, ids) => void decide(decision, ids)} />}
+    {preview && <DeviceApproval key={preview.userCode} preview={preview} username={username} projects={projects} loadingProjects={loadingProjects} pending={deciding} expired={expired} onDecision={(decision, ids) => void decide(decision, ids)} />}
   </Flex>;
 };
 

@@ -48,7 +48,7 @@ function routeFilter<T extends string>(hash: string, view: WorkspaceSection, nam
 }
 export const reviewStageFromRoute = (hash = location.hash) => routeFilter(hash, 'reviews', 'stage', REVIEW_STAGE_VALUES);
 export const assetKindFromRoute = (hash = location.hash) => routeFilter(hash, 'assets', 'kind', ASSET_KIND_VALUES);
-type WorkspaceFilters = { stage?: Stage; kind?: MaterialCategory; requirementId?: string };
+type WorkspaceFilters = { stage?: Stage; kind?: MaterialCategory; requirementId?: string; bridgeProjectId?: string };
 
 export function requirementIdFromRoute(hash = location.hash): string | undefined {
   const route = new URLSearchParams(hash.replace(/^#/, ''));
@@ -72,6 +72,7 @@ function workspaceRoute(section: WorkspaceSection, filters: WorkspaceFilters) {
   if (section === 'reviews' && filters.stage && REVIEW_STAGE_VALUES.includes(filters.stage)) route.set('stage', filters.stage);
   if (section === 'assets' && filters.kind && ASSET_KIND_VALUES.includes(filters.kind)) route.set('kind', filters.kind);
   if (takesRequirement(section) && filters.requirementId) route.set('requirement', filters.requirementId);
+  if (section === 'local' && filters.bridgeProjectId) route.set('bridgeProject', filters.bridgeProjectId);
   return route.toString();
 }
 export function navigateWorkspace(section: WorkspaceSection, filters: WorkspaceFilters = {}) {

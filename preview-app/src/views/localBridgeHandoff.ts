@@ -11,6 +11,7 @@ export interface LocalBridgeHandoff {
   tool: string;
   expiresAt: string;
   suggestedProjectIds: string[];
+  replacesExisting?: true;
 }
 
 export function localBridgePortFromHash(hash: string): number | undefined {
@@ -41,12 +42,13 @@ export function isLocalBridgeRouteCurrent(hash: string, expectedPort?: number): 
 export function parseLocalBridgeHandoff(value: unknown, now = Date.now()): LocalBridgeHandoff {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid();
   const data = value as Record<string, unknown>;
-  const fields = ['schemaVersion', 'userCode', 'deviceName', 'tool', 'expiresAt', 'suggestedProjectIds'];
+  const fields = ['schemaVersion', 'userCode', 'deviceName', 'tool', 'expiresAt', 'suggestedProjectIds', 'replacesExisting'];
   if (Object.keys(data).some(key => !fields.includes(key)) || data.schemaVersion !== 1 || typeof data.userCode !== 'string' || !CODE.test(data.userCode) ||
       typeof data.deviceName !== 'string' || !data.deviceName.trim() || data.deviceName.length > 80 || /[\x00-\x1f\x7f]/.test(data.deviceName) ||
       typeof data.tool !== 'string' || !TOOLS.includes(data.tool) || typeof data.expiresAt !== 'string' || !Number.isFinite(Date.parse(data.expiresAt)) || Date.parse(data.expiresAt) <= now ||
-      !Array.isArray(data.suggestedProjectIds) || data.suggestedProjectIds.length > 100 || data.suggestedProjectIds.some(id => typeof id !== 'string' || !PROJECT_ID.test(id))) throw invalid();
-  return { schemaVersion: 1, userCode: data.userCode.toUpperCase(), deviceName: data.deviceName, tool: data.tool, expiresAt: data.expiresAt, suggestedProjectIds: [...new Set(data.suggestedProjectIds as string[])] };
+      !Array.isArray(data.suggestedProjectIds) || data.suggestedProjectIds.length > 100 || data.suggestedProjectIds.some(id => typeof id !== 'string' || !PROJECT_ID.test(id)) ||
+      (data.replacesExisting !== undefined && data.replacesExisting !== true)) throw invalid();
+  return { schemaVersion: 1, userCode: data.userCode.toUpperCase(), deviceName: data.deviceName, tool: data.tool, expiresAt: data.expiresAt, suggestedProjectIds: [...new Set(data.suggestedProjectIds as string[])], ...(data.replacesExisting === true ? { replacesExisting: true } : {}) };
 }
 
 export function assertLocalBridgeRequest(handoff: LocalBridgeHandoff, request: { deviceName: string; tool: string; expiresAt: string; status: string }) {

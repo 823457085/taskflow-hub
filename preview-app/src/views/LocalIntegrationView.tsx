@@ -3,6 +3,7 @@ import { App, Alert, Button, Card, Drawer, Flex, Form, Grid, Input, Segmented, S
 import { Activity, ArrowLeft, ArrowRight, Check, Copy, Cpu, ExternalLink, FolderGit2, FolderOpen, LayoutDashboard, MousePointer2, RefreshCw, ShieldCheck, Terminal, Trash2, Zap } from 'lucide-react';
 import { api, ApiError, HostBridgeStatus, hubApiUrl, LocalAutomationCapabilities, LocalGitRepo, openWorkbench, Project, ProjectWorkspace, timeText, User } from './workspaceApi';
 import { LocalDeviceList, LocalDevicePairing } from './LocalDevicePairing';
+import { LocalBridgeQuickConnect } from './LocalBridgeQuickConnect';
 import { TeamAgentsCard } from './TeamAgents';
 import { bridgeInstallCommand } from './bridgeInstall';
 import { CustomClientAdapters } from './CustomClientAdapters';
@@ -27,7 +28,7 @@ const shellQuote = (value: string) => "'" + value.replace(/'/g, "'\\''") + "'";
 const absoluteProjectPath = (value: string) => value.startsWith('/') && !/[\r\n\x00]/.test(value);
 
 export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () => void }> = ({ user, onUnauthorized }) => {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const screens = Grid.useBreakpoint();
   const [pathForm] = Form.useForm<{ projectPath: string; adapterPath: string }>();
   const [bridgeForm] = Form.useForm<{ deviceName: string; projectIds: string[] }>();
@@ -47,6 +48,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const [repositoryScan, setRepositoryScan] = useState<{ projectId?: string; items: LocalGitRepo[] }>({ items: [] });
   const [capabilities, setCapabilities] = useState<LocalAutomationCapabilities | null>(null);
   const [loadingBridge, setLoadingBridge] = useState(true);
+  const [priorBridgeIds, setPriorBridgeIds] = useState<string[] | null>(null);
   const [authorizingBridge, setAuthorizingBridge] = useState(false);
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [rescanningRepos, setRescanningRepos] = useState(false);
@@ -55,6 +57,8 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const selectedBridgeProjects = Form.useWatch('projectIds', bridgeForm);
   const workspaceProjectId = Form.useWatch('projectId', workspaceForm);
   const serverMode = capabilities?.deployment === 'server';
+  const waitingForBridge = priorBridgeIds !== null;
+  const requestedBridgeProject = new URLSearchParams(location.hash.slice(1)).get('bridgeProject') || undefined;
   const repositories = !serverMode || repositoryScan.projectId === workspaceProjectId ? repositoryScan.items : [];
   const seenHandoff = useRef('');
   const copySequence = useRef(0);
@@ -155,25 +159,76 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
     if (deviceRefresh > 0) void loadHostState(false);
   }, [deviceRefresh]);
 
-  const authorizeHostBridge = async (values: { deviceName: string; projectIds: string[] }) => {
+  useEffect(() => {
+    if (!priorBridgeIds) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    let attempts = 0;
+    const check = async () => {
+      try {
+        const next = await api<LocalAutomationCapabilities>('local-automation/capabilities');
+        if (cancelled) return;
+        setCapabilities(next);
+        if (next.devices?.some(device => device.online && !priorBridgeIds.includes(device.id))) {
+          setPriorBridgeIds(null);
+          setDeviceRefresh(value => value + 1);
+          return;
+        }
+      } catch (error) {
+        if (cancelled) return;
+        if (error instanceof ApiError && error.status === 401) {
+          setPriorBridgeIds(null);
+          onUnauthorized?.();
+          return;
+        }
+      }
+      if (++attempts >= 20) {
+        setPriorBridgeIds(null);
+        void message.warning('新绑定尚未上线，请查看本机终端的配对结果。');
+      } else timer = setTimeout(() => void check(), 2500);
+    };
+    void check();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [priorBridgeIds, user.id]);
+
+  const authorizeHostBridge = async (values: { deviceName: string; projectIds: string[] }, replaceBindingRevision?: string) => {
     setAuthorizingBridge(true);
     try {
-      await api('local-devices/host-bridge', {
+      const result = await api<{ replaced?: boolean }>('local-devices/host-bridge', {
         deviceName: (values.deviceName || '工作台与本地 AI').trim(),
         tool: 'custom',
         projectIds: values.projectIds,
+        ...(replaceBindingRevision ? { replaceBindingRevision } : {}),
       });
       if (!alive.current) return;
-      void message.success('本机 AI 已一键接通！工作台（新开或续聊）及本地 CLI 现可直接读取平台任务。');
+      void message.success(result.replaced ? '已切换本机工作台绑定。' : '本机 AI 已接通。');
       setDeviceRefresh(value => value + 1);
       await loadHostState(true);
     } catch (error) {
       if (!alive.current) return;
       if (error instanceof ApiError && error.status === 401) onUnauthorized?.();
-      else void message.error(error instanceof Error ? error.message : '一键授权失败。');
+      else {
+        void message.error(error instanceof Error ? error.message : '一键授权失败。');
+        if (error instanceof ApiError && error.status === 409) await loadHostState(false);
+      }
     } finally {
       if (alive.current) setAuthorizingBridge(false);
     }
+  };
+
+  const pairHostBridge = (values: { deviceName: string; projectIds: string[] }) => {
+    const revision = hostBridge?.bindingRevision;
+    if (!revision || (!hostBridge?.connected && hostBridge.status !== 'OTHER_USER')) {
+      void authorizeHostBridge(values);
+      return;
+    }
+    modal.confirm({
+      title: '切换本机工作台绑定',
+      content: `这台电脑已有绑定。确认后，工作台将连接当前账号 ${user.username} 和所选项目，旧设备授权随之解除。`,
+      okText: '确认切换',
+      cancelText: '保留原绑定',
+      onOk: () => authorizeHostBridge(values, revision),
+    });
   };
 
   const saveProjectWorkspace = async (values: { projectId: string; repoPath: string; defaultTarget: LocalTaskTarget }) => {
@@ -286,12 +341,13 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
   const bridgeStatusBadge = bridgeConnected
     ? <StatusBadge variant="green" pulse>已接通 · 有效期至 {timeText(hostBridge?.device?.expiresAt)}</StatusBadge>
     : bridgeOccupied
-      ? <StatusBadge variant="warn">已被其他账号占用</StatusBadge>
+      ? <StatusBadge variant="warn">已绑定其他账号</StatusBadge>
       : hostBridge?.status === 'EXPIRED' || hostBridge?.status === 'REVOKED'
         ? <StatusBadge variant="warn">授权已过期 · 待续期</StatusBadge>
         : <StatusBadge variant="neutral">{loadingBridge ? '正在读取授权状态' : '待授权'}</StatusBadge>;
 
   const authorizedCount = hostBridge?.device?.projectIds?.length || 0;
+  const Settings = serverMode ? 'details' : 'div';
 
   return <div className="tf-local-integration">
     {!serverMode && !!capabilities?.engines.length && (
@@ -310,7 +366,23 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
         </div>
       </Card>
     )}
-    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} teamDispatch={serverMode} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
+    {serverMode && <LocalBridgeQuickConnect
+      key={user.id}
+      devices={capabilities.devices || []}
+      projects={projects}
+      requestedProjectId={projects.some(project => project.id === requestedBridgeProject) ? requestedBridgeProject : undefined}
+      loading={loadingBridge}
+      waitingForBridge={waitingForBridge}
+      onUnauthorized={onUnauthorized}
+      onConnected={() => {
+        if (!alive.current) return;
+        setDeviceRefresh(value => value + 1);
+        void message.success('本机 AI 已连接。');
+      }}
+    />}
+    <Settings className={serverMode ? 'tf-local-advanced' : undefined} style={serverMode ? undefined : { display: 'contents' }}>
+    {serverMode && <summary>高级设置</summary>}
+    <div className="tf-local-integration" style={serverMode ? undefined : { display: 'contents' }}>
     {serverMode && (
       <Card
         className="tf-local-bridge-card"
@@ -355,14 +427,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       >
         <Flex vertical gap={16}>
           {bridgeConnected && <Typography.Text type="secondary">{hostBridge?.device?.deviceName} · 已授权 {authorizedCount} 个项目</Typography.Text>}
-          {bridgeOccupied && (
-            <Alert
-              type="warning"
-              showIcon
-              title="本机 Bridge 当前由其他账号的有效会话占用"
-              description="请先使用原授权账号登录并在「本地 AI 接入」中注销原设备会话，再回到当前账号点击「授权本机设备」以启用 5288 本地工作台会话同步。"
-            />
-          )}
+          {bridgeOccupied && <Typography.Text type="secondary">检测到本机工作台已有绑定。可以将这台电脑切换到当前登录账号。</Typography.Text>}
 
           <Form
             form={bridgeForm}
@@ -371,7 +436,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
             className="tf-local-bridge-form"
             disabled={authorizingBridge || loadingBridge}
             initialValues={{ deviceName: '工作台与本地 AI', projectIds: [] }}
-            onFinish={values => void authorizeHostBridge(values)}
+            onFinish={pairHostBridge}
           >
             <div className="tf-local-bridge-fields">
               <Form.Item name="deviceName" label="本机设备标识" rules={[{ required: true, max: 80, message: '请输入设备名称' }]}>
@@ -422,7 +487,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
             </div>
             <Space wrap size={8} className="tf-local-bridge-actions">
               <Button type="primary" htmlType="submit" icon={<ShieldCheck size={15} />} loading={authorizingBridge} disabled={!projects.length}>
-                {bridgeConnected ? '更新授权项目并续期' : '授权本机设备'}
+                {bridgeConnected || bridgeOccupied ? '切换绑定' : '一键配对'}
               </Button>
               <Button onClick={() => navigateWorkspace('tasks')}>前往任务中心</Button>
               <Button onClick={() => openWorkbench()} icon={<ExternalLink size={13} />}>打开工作台</Button>
@@ -439,6 +504,7 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       </Card>
     )}
 
+    <LocalDeviceList key={user.id} onUnauthorized={onUnauthorized} refreshKey={deviceRefresh} teamDispatch={serverMode} onAuthorize={() => { setHandoffPort(undefined); setStep(1); setCopied(''); clearPaths(); setGuideOpen(true); }} />
     <Card
       className="tf-local-doctor-card"
       title={
@@ -686,6 +752,8 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
       </div>
       <Typography.Paragraph type="secondary" style={{ margin: '12px 0 0' }}>设备只能访问已授权项目。审批、发布及项目配置仍由平台成员操作。可在「我的设备」撤销授权。</Typography.Paragraph>
     </Card>
+    </div>
+    </Settings>
 
     <Drawer
       title={handoffPort !== undefined ? '确认本地设备接入' : '接入本地编程工具'}
@@ -717,12 +785,18 @@ export const LocalIntegrationView: React.FC<{ user: User; onUnauthorized?: () =>
         {handoffPort === undefined && (customAdapter ? <div className="tf-local-custom-selection"><div><Typography.Text strong>{customAdapter.name}</Typography.Text><Typography.Text type="secondary">自定义 MCP 客户端 · {customAdapter.configPath}</Typography.Text></div><Button size="small" onClick={closeGuide}>更换客户端</Button></div> : <Segmented block aria-label="选择 AI 编程软件" value={client} options={CLIENTS.map(item => ({ label: item.name, value: item.key }))} onChange={value => selectClient(value)} />)}
         {handoffPort === undefined && <Steps size="small" responsive={false} titlePlacement={screens.sm ? 'horizontal' : 'vertical'} current={step} onChange={changeStep} items={[{ title: '准备连接' }, { title: '核对授权' }, { title: '安装配置' }]} />}
         {step === 0 && <div className="tf-local-guide-section">
-          <div className="tf-local-guide-lead"><Typography.Title level={3}>连接 {activeClient.name}</Typography.Title><Typography.Paragraph type="secondary">如果在同一台电脑上使用，直接用页面顶部的「一键授权接通本机 AI」即可；也可在包含 local-bridge 的平台根目录执行终端配对。</Typography.Paragraph></div>
+          <div className="tf-local-guide-lead"><Typography.Title level={3}>连接 {activeClient.name}</Typography.Title><Typography.Paragraph type="secondary">{serverMode ? '在网页发起 AI 评审时，使用页面顶部的「一键配对」。这里用于在指定项目目录安装独立的 MCP 配置。' : '在同一台电脑上使用时，可直接用页面顶部的「一键授权接通本机 AI」。'}</Typography.Paragraph></div>
           {customAdapter && <Alert type="info" showIcon title="自定义客户端需支持标准 MCP stdio 与 JSON 配置" description="请先导出此适配器到本机 JSON 文件，安装时会使用该文件；导入适配器本身不会安装软件或启动 AI。" />}
           <div className="tf-local-guide-card"><Typography.Text strong>1. 准备本地桥接依赖</Typography.Text>{commandBlock('install', 'npm --prefix local-bridge install --include=dev', '准备本地桥接')}</div>
-          <div className="tf-local-guide-card"><Typography.Text strong>2. 发起设备配对（备用路径）</Typography.Text><Typography.Text type="secondary">可将设备名称改为容易识别的名称。命令会自动打开日常 Chrome，在网页核对设备与项目并批准，无需抄写配对码。</Typography.Text>{commandBlock('pair', pairCommand, '发起设备授权')}</div>
+          <div className="tf-local-guide-card"><Typography.Text strong>2. 发起设备配对（备用路径）</Typography.Text><Typography.Text type="secondary">{serverMode ? '在下一步填写终端显示的配对码。' : '命令会自动打开日常 Chrome，在网页核对设备与项目后批准。'}</Typography.Text>{commandBlock('pair', pairCommand, '发起设备授权')}</div>
         </div>}
-        {step === 1 && <div className="tf-local-guide-section"><div className="tf-local-guide-lead"><Typography.Title level={3}>核对并授权设备</Typography.Title><Typography.Paragraph type="secondary">{handoffPort !== undefined ? '从本机读取申请后，核对设备与项目范围并批准。' : 'connect 会自动打开核对页面；也可在下方输入既有终端配对码。'}</Typography.Paragraph></div><LocalDevicePairing key={user.id + ':' + client + ':' + (handoffPort ?? 'manual')} handoffPort={handoffPort} onHandoffComplete={() => { if (handoffPort !== undefined) clearHandoffRoute(handoffPort); }} onUnauthorized={onUnauthorized} onApproved={() => setDeviceRefresh(value => value + 1)} /></div>}
+        {step === 1 && <div className="tf-local-guide-section"><div className="tf-local-guide-lead"><Typography.Title level={3}>核对并授权设备</Typography.Title><Typography.Paragraph type="secondary">{handoffPort !== undefined ? '核对设备和项目范围后，批准接入。' : '输入本机终端显示的配对码。'}</Typography.Paragraph></div><LocalDevicePairing key={user.id + ':' + client + ':' + (handoffPort ?? 'manual')} username={user.username} handoffPort={handoffPort} onHandoffComplete={() => { if (handoffPort !== undefined) clearHandoffRoute(handoffPort); }} onUnauthorized={onUnauthorized} onApproved={status => {
+          setDeviceRefresh(value => value + 1);
+          if (serverMode && handoffPort !== undefined) {
+            if (status === 'APPROVED') setPriorBridgeIds((capabilities?.devices || []).map(device => device.id));
+            closeGuide();
+          }
+        }} /></div>}
         {step === 2 && <div className="tf-local-guide-section">
           <div className="tf-local-guide-lead"><Typography.Title level={3}>安装 {activeClient.name} 配置</Typography.Title><Typography.Paragraph type="secondary">完成本机授权后，可为指定业务代码目录写入项目级 MCP 配置（<code>{activeClient.file}</code>）。</Typography.Paragraph></div>
           <Form form={pathForm} layout="vertical" clearOnDestroy initialValues={{ projectPath: '', adapterPath: '' }} onValuesChange={values => { if ('projectPath' in values) setProjectPath(values.projectPath || ''); if ('adapterPath' in values) setAdapterPath(values.adapterPath || ''); clearCopy(); }}>

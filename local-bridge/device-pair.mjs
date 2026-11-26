@@ -1,6 +1,7 @@
 import { lstat, rename, chmod } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { ensureNoSession, saveSession, loadSession, loadSessionWithPath, sessionPath, hostSessionPath, usesDefaultState, request, validateUrl } from './api-client.mjs';
+import { join, resolve } from 'node:path';
+import { ensureNoSession, saveSession, replaceSession, sameSessionFile, loadSession, loadSessionWithPath, stateDir, sessionPath, hostSessionPath, usesDefaultState, request, validateUrl } from './api-client.mjs';
 import { createBrowserHandoff, openDailyChrome } from './browser-handoff.mjs';
 
 export const DEFAULT_API_URL = 'http://127.0.0.1:5187';
@@ -8,11 +9,11 @@ export const DEFAULT_WEB_URL = 'http://127.0.0.1:5186';
 const milliseconds = value => typeof value === 'number' ? value : Date.parse(value);
 const validToken = value => typeof value === 'string' && value.length >= 16 && value.length <= 4096 && !/[\r\n\x00-\x1f]/.test(value);
 
-export async function pairDevice(options, { output = value => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, presentAuthorization } = {}) {
+export async function pairDevice(options, { output = value => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), now = Date.now, presentAuthorization, attachSession } = {}) {
   const url = validateUrl(options.url || DEFAULT_API_URL);
   const webUrl = validateUrl(options['web-url'] || (url === DEFAULT_API_URL ? DEFAULT_WEB_URL : url));
   const expiredMessage = `设备配对已过期，请重新运行 ${presentAuthorization ? 'connect' : 'pair'}。`;
-  await ensureNoSession();
+  if (!attachSession) await ensureNoSession();
   const authorization = await request(url, '/api/device-authorizations', { method: 'POST', body: { deviceName: options.name, tool: options.tool } });
   const expires = milliseconds(authorization?.expiresAt);
   if (!validToken(authorization?.deviceCode) || !/^[A-Za-z0-9-]{4,32}$/.test(authorization?.userCode || '') ||
@@ -34,7 +35,9 @@ export async function pairDevice(options, { output = value => process.stdout.wri
           !Array.isArray(result.projectIds) || result.projectIds.length > 1000 || result.projectIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(id)) ||
           !Number.isFinite(milliseconds(result.expiresAt)) || milliseconds(result.expiresAt) <= now()) throw new Error('平台返回的设备授权信息不正确。');
       try {
-        await saveSession({ url, token: result.token, deviceId: result.deviceId, projectIds: result.projectIds, expiresAt: result.expiresAt }, { exclusive: true });
+        const session = { url, token: result.token, deviceId: result.deviceId, projectIds: result.projectIds, expiresAt: result.expiresAt };
+        if (attachSession) await attachSession(session);
+        else await saveSession(session, { exclusive: true });
       } catch (error) {
         // A competing pair/login must never be overwritten. Revoke only this just-issued token.
         await request(url, '/api/logout', { token: result.token, method: 'POST' }).catch(() => {});
@@ -46,7 +49,53 @@ export async function pairDevice(options, { output = value => process.stdout.wri
   } finally { await cleanup?.(); }
 }
 
-export async function connectDevice(options, { output = value => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`), openBrowser = openDailyChrome, handoffFactory = createBrowserHandoff, ...pairOptions } = {}) {
+async function confirmReplaceableDevice(session) {
+  let me;
+  try { me = await request(session.url, '/api/me', { token: session.token }); }
+  catch (error) {
+    if (error.status === 401 && Array.isArray(session.projectIds) && Number.isFinite(milliseconds(session.expiresAt))) return false;
+    throw error;
+  }
+  if (me.authorization?.kind !== 'LOCAL_DEVICE' || me.authorization.deviceId !== session.deviceId) {
+    throw new Error('当前本地登录不是可换绑的设备会话，请在原平台确认连接。');
+  }
+  if (me.authorization.hasActiveBridgeRuns === true) throw new Error('旧设备仍有排队或执行中的任务，请完成后再换绑。');
+  if (me.authorization.hasActiveBridgeRuns !== false) throw new Error('旧平台版本暂不支持安全换绑，请先升级旧平台。');
+  return true;
+}
+
+async function revokeReplacedDevice(session) {
+  try {
+    await request(session.url, '/api/logout?reason=replace-device', { token: session.token, method: 'POST' });
+    return true;
+  } catch (error) {
+    if (error.status === 401) return true;
+    if (error.status) throw error;
+    // A disconnected response can arrive after the old server committed the revocation.
+    try { await request(session.url, '/api/me', { token: session.token }); }
+    catch (checkError) {
+      if (checkError.status === 401) return true;
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function restartInstalledWorker() {
+  if (process.platform !== 'darwin') return undefined;
+  const { installedRoot } = await import('./updater.mjs');
+  const root = installedRoot();
+  if (!root || resolve(stateDir) !== resolve(join(root, 'state'))) return undefined;
+  const { manageService } = await import('./service.mjs');
+  const status = await manageService('status');
+  if (status.status === 'NOT_INSTALLED') return undefined;
+  const { execFile } = await import('node:child_process');
+  const configuredState = await new Promise(resolveFile => execFile('/usr/bin/plutil', ['-extract', 'EnvironmentVariables.RD_HUB_STATE_DIR', 'raw', '-o', '-', status.plist], { timeout: 5000 }, (error, stdout) => resolveFile(error ? null : stdout.trim())));
+  if (!configuredState || resolve(configuredState) !== resolve(stateDir)) return undefined;
+  return (await manageService('restart')).status;
+}
+
+export async function connectDevice(options, { output = value => process.stdout.write(`${JSON.stringify(value, null, 2)}\n`), openBrowser = openDailyChrome, handoffFactory = createBrowserHandoff, restartWorker = restartInstalledWorker, ...pairOptions } = {}) {
   const url = validateUrl(options.url || DEFAULT_API_URL);
   let targetPath = sessionPath;
   let original;
@@ -66,22 +115,45 @@ export async function connectDevice(options, { output = value => process.stdout.
         latestFile.ino !== startingFile.ino || latestFile.dev !== startingFile.dev || latestFile.mtimeMs !== startingFile.mtimeMs || latestFile.size !== startingFile.size) throw new Error('登录文件已被其他程序更新，请重新运行 connect 核验。');
     return { status: '已连接并验证任务读取', taskCount: tasks.tasks.length, projectCount: me.authorization.projectIds?.length || 0 };
   };
+  let previousDevice;
+  let previousActive = false;
+  let replacement;
   if (original) {
     if (!original.isFile() || original.isSymbolicLink() || original.size > 16_384 || original.mode & 0o077 || process.getuid && original.uid !== process.getuid()) throw new Error('本地登录文件不安全，未修改已有文件。');
-    const session = await loadSession();
-    try { const result = await verify(session, targetPath); output(result); return result; }
-    catch (error) { if (error.status !== 401) throw error; }
-    const latest = await lstat(targetPath);
-    if (latest.ino !== original.ino || latest.dev !== original.dev || latest.mtimeMs !== original.mtimeMs || latest.size !== original.size) throw new Error('登录文件已被其他程序更新，未开始新的配对。');
-    const backup = `${targetPath}.expired-${randomUUID()}`;
-    await rename(targetPath, backup); await chmod(backup, 0o600);
-    output({ status: '原登录已失效，已保留私有备份，正在重新连接' });
+    const current = await loadSessionWithPath();
+    if (options.replace === 'yes') {
+      if (current.path !== sessionPath || targetPath !== sessionPath) throw new Error('检测到工作台管理的设备连接，请在该工作台的本机接入页面执行换绑。');
+      if (!sameSessionFile(await lstat(targetPath), original)) throw new Error('本地设备连接已更改，请重新发起换绑。');
+      previousDevice = current.session;
+      previousActive = await confirmReplaceableDevice(previousDevice);
+    } else {
+      try { const result = await verify(current.session, targetPath); output(result); return result; }
+      catch (error) { if (error.status !== 401) throw error; }
+      const latest = await lstat(targetPath);
+      if (!sameSessionFile(latest, original)) throw new Error('登录文件已被其他程序更新，未开始新的配对。');
+      const backup = `${targetPath}.expired-${randomUUID()}`;
+      await rename(targetPath, backup); await chmod(backup, 0o600);
+      output({ status: '原登录已失效，已保留私有备份，正在重新连接' });
+    }
   }
   await pairDevice(options, {
     ...pairOptions,
     output: value => { if (value.status === '设备配对成功') output({ status: '设备授权已保存，正在验证读取' }); },
+    ...(previousDevice ? { attachSession: async session => {
+      const me = await request(session.url, '/api/me', { token: session.token });
+      const tasks = await request(session.url, '/api/tasks', { token: session.token });
+      if (me.authorization?.kind !== 'LOCAL_DEVICE' || me.authorization.deviceId !== session.deviceId ||
+          !Array.isArray(me.authorization.projectIds) || me.authorization.projectIds.length !== session.projectIds.length ||
+          !session.projectIds.every(id => me.authorization.projectIds.includes(id)) ||
+          session.deviceId === previousDevice.deviceId || !Array.isArray(tasks?.tasks)) throw new Error('新设备授权校验失败，已保留原连接。');
+      const previousRevoked = await replaceSession(session, original, () => previousActive ? revokeReplacedDevice(previousDevice) : true);
+      replacement = {
+        status: '已换绑并验证任务读取', taskCount: tasks.tasks.length, projectCount: session.projectIds.length, previousRevoked,
+        ...(previousRevoked ? {} : { previousDeviceNotice: '无法确认旧设备已撤销，已保留私有恢复副本。请到旧平台的设备列表核对并撤销旧设备。' }),
+      };
+    } } : {}),
     presentAuthorization: async (authorization, webUrl) => {
-      const handoff = await handoffFactory({ webUrl, userCode: authorization.userCode, deviceName: options.name, tool: options.tool, expiresAt: authorization.expiresAt, suggestedProjectIds: options.projects || [] });
+      const handoff = await handoffFactory({ webUrl, userCode: authorization.userCode, deviceName: options.name, tool: options.tool, expiresAt: authorization.expiresAt, suggestedProjectIds: options.projects || [], ...(previousDevice ? { replacesExisting: true } : {}) });
       try {
         output({ status: '等待已登录网页确认设备和项目', verificationUrl: handoff.verificationUrl, expiresAt: authorization.expiresAt });
         await openBrowser(handoff.verificationUrl);
@@ -89,5 +161,13 @@ export async function connectDevice(options, { output = value => process.stdout.
       } catch (error) { await handoff.close(); throw error; }
     },
   });
+  if (replacement) {
+    try {
+      const bridgeService = await restartWorker();
+      if (bridgeService) replacement.bridgeService = bridgeService;
+    } catch { replacement.bridgeService = 'RESTART_FAILED'; }
+    output(replacement);
+    return replacement;
+  }
   const result = await verify(await loadSession(), sessionPath); output(result); return result;
 }

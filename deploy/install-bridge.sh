@@ -1,13 +1,15 @@
 #!/bin/sh
 # TaskFlow 本机 Bridge 一键安装（macOS / Linux）
-# 用法：sh install-bridge.sh https://服务器地址 [设备名称] [codex-cli|cursor]
+# 用法：sh install-bridge.sh https://服务器地址 [设备名称] [codex-cli|cursor] [项目ID,项目ID]
 # 安装到 ~/.taskflow：app/ 为客户端代码（可重复安装升级），state/ 为配对与配置（升级保留），bin/taskflow-bridge 为入口，
 # workbench/ 为本机工作台（代码按版本存放，.env 与 data/ 升级保留）。设置 TASKFLOW_SKIP_WORKBENCH=1 只装 Bridge。
 # macOS 上 Bridge 与工作台注册为登录自动运行，并每 6 小时检查服务器新版本：Bridge 空闲时自动替换重启，工作台新版本在下次重启时生效。
+# macOS 默认打开 Chrome 配对，也可设置 TASKFLOW_MANUAL_PAIRING=1 使用配对码。
+# 设置 TASKFLOW_REPLACE_BRIDGE=1 在 Chrome 确认后换绑现有设备。
 set -eu
 
 HUB=${1:-}
-[ -n "$HUB" ] || { echo "用法：sh install-bridge.sh https://服务器地址 [设备名称] [codex-cli|cursor]" >&2; exit 1; }
+[ -n "$HUB" ] || { echo "用法：sh install-bridge.sh https://服务器地址 [设备名称] [codex-cli|cursor] [项目ID,项目ID]" >&2; exit 1; }
 HUB=${HUB%/}
 case "$HUB" in
   https://*|http://127.0.0.1:*|http://localhost:*) ;;
@@ -15,7 +17,14 @@ case "$HUB" in
 esac
 NAME=${2:-$(scutil --get ComputerName 2>/dev/null || hostname)}
 TOOL=${3:-codex-cli}
+PROJECTS=${4:-}
 ROOT=${TASKFLOW_HOME:-$HOME/.taskflow}
+PLATFORM=$(uname)
+REPLACE=${TASKFLOW_REPLACE_BRIDGE:-0}
+if [ "$REPLACE" = 1 ] && { [ "$PLATFORM" != Darwin ] || [ "${TASKFLOW_MANUAL_PAIRING:-}" = 1 ]; }; then
+  echo '换绑需要在 macOS 上通过 Chrome 确认。' >&2
+  exit 1
+fi
 
 command -v node >/dev/null 2>&1 || { echo "未找到 Node.js，请先安装 Node.js 24 或更高版本" >&2; exit 1; }
 [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 24 ] || { echo "需要 Node.js 24+，当前为 $(node -v)" >&2; exit 1; }
@@ -24,32 +33,58 @@ NODE_BIN=$(command -v node)
 mkdir -p "$ROOT/bin" "$ROOT/state"
 chmod 700 "$ROOT" "$ROOT/state"
 CA="$ROOT/taskflow-ca.pem"
-TLS_OPT=""
-
-if [ "${HUB#https://}" != "$HUB" ] && ! curl -fsS "$HUB/health" >/dev/null 2>&1; then
-  # 服务器使用自签名证书：先取回证书，由用户核对指纹后再用它校验后续下载。
-  curl -fsSk "$HUB/taskflow-ca.pem" -o "$CA.tmp"
-  FP=$(openssl x509 -in "$CA.tmp" -noout -fingerprint -sha256 | cut -d= -f2)
-  if [ -n "${TASKFLOW_CA_SHA256:-}" ]; then
-    [ "$FP" = "$TASKFLOW_CA_SHA256" ] || { rm -f "$CA.tmp"; echo "证书指纹与 TASKFLOW_CA_SHA256 不一致，已停止" >&2; exit 1; }
-  else
-    echo "服务器证书 SHA-256 指纹：$FP"
-    printf "与管理员公布的指纹一致吗？[y/N] "
-    read -r ANSWER </dev/tty
-    case "$ANSWER" in y|Y|yes|YES) ;; *) rm -f "$CA.tmp"; echo "已取消安装"; exit 1 ;; esac
-  fi
-  mv "$CA.tmp" "$CA"
-  chmod 644 "$CA"
-  TLS_OPT="--cacert $CA"
-fi
-
+TLS_CA=""
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-# shellcheck disable=SC2086
-curl -fsS $TLS_OPT "$HUB/taskflow-bridge.tgz" -o "$TMP/bridge.tgz"
+
+if [ "${HUB#https://}" != "$HUB" ] && ! curl -fsS "$HUB/health" >/dev/null 2>&1; then
+  if [ -f "$CA" ] && curl -fsS --cacert "$CA" "$HUB/health" >/dev/null 2>&1; then
+    TLS_CA="$CA"
+  else
+    # 服务器使用自签名证书：直到通过校验与换绑确认，旧工作台继续使用原证书。
+    TLS_CA="$TMP/taskflow-ca.pem"
+    curl -fsSk "$HUB/taskflow-ca.pem" -o "$TLS_CA"
+    FP=$(openssl x509 -in "$TLS_CA" -noout -fingerprint -sha256 | cut -d= -f2)
+    if [ -n "${TASKFLOW_CA_SHA256:-}" ]; then
+      [ "$FP" = "$TASKFLOW_CA_SHA256" ] || { echo "证书指纹与 TASKFLOW_CA_SHA256 不一致，已停止" >&2; exit 1; }
+    else
+      echo "服务器证书 SHA-256 指纹：$FP"
+      printf "与管理员公布的指纹一致吗？[y/N] "
+      read -r ANSWER </dev/tty
+      case "$ANSWER" in y|Y|yes|YES) ;; *) echo "已取消安装"; exit 1 ;; esac
+    fi
+  fi
+fi
+
+if [ -n "$TLS_CA" ]; then
+  curl -fsS --cacert "$TLS_CA" "$HUB/taskflow-bridge.tgz" -o "$TMP/bridge.tgz"
+else
+  curl -fsS "$HUB/taskflow-bridge.tgz" -o "$TMP/bridge.tgz"
+fi
 mkdir "$TMP/app"
 tar xzf "$TMP/bridge.tgz" -C "$TMP/app"
 [ -f "$TMP/app/local-bridge/rd.mjs" ] || { echo "下载的客户端包不完整" >&2; exit 1; }
+REBOUND=0
+if [ "$REPLACE" = 1 ] && [ -f "$ROOT/state/session.json" ]; then
+  echo '正在检测本机旧连接，请在 Chrome 核对新账号和授权项目。'
+  set -- connect --url "$HUB" --web-url "$HUB" --name "$NAME" --tool "$TOOL" --replace yes
+  [ -z "$PROJECTS" ] || set -- "$@" --projects "$PROJECTS"
+  PAIR_CA=${TLS_CA:-$CA}
+  if [ "$TLS_CA" = "$TMP/taskflow-ca.pem" ] && [ -f "$CA" ]; then
+    PAIR_CA="$TMP/pair-ca.pem"
+    cat "$CA" "$TLS_CA" > "$PAIR_CA"
+  fi
+  if [ -f "$PAIR_CA" ]; then
+    RD_HUB_STATE_DIR="$ROOT/state" NODE_EXTRA_CA_CERTS="$PAIR_CA" "$NODE_BIN" "$TMP/app/local-bridge/rd.mjs" "$@"
+  else
+    RD_HUB_STATE_DIR="$ROOT/state" "$NODE_BIN" "$TMP/app/local-bridge/rd.mjs" "$@"
+  fi
+  REBOUND=1
+fi
+if [ "$TLS_CA" = "$TMP/taskflow-ca.pem" ]; then
+  mv "$TLS_CA" "$CA"
+  chmod 644 "$CA"
+fi
 rm -rf "$ROOT/app.old"
 [ -d "$ROOT/app" ] && mv "$ROOT/app" "$ROOT/app.old"
 mv "$TMP/app" "$ROOT/app"
@@ -67,7 +102,14 @@ fi
 chmod 755 "$ROOT/bin/taskflow-bridge"
 BRIDGE="$ROOT/bin/taskflow-bridge"
 
-if [ -f "$ROOT/state/session.json" ]; then
+if [ "$REBOUND" = 1 ]; then
+  echo '本机设备授权已完成切换。'
+elif [ "$PLATFORM" = "Darwin" ] && [ "${TASKFLOW_MANUAL_PAIRING:-}" != 1 ]; then
+  echo "正在检查本机连接。需要配对时会打开 Chrome，请在网页确认项目授权。"
+  set -- connect --url "$HUB" --web-url "$HUB" --name "$NAME" --tool "$TOOL"
+  [ -z "$PROJECTS" ] || set -- "$@" --projects "$PROJECTS"
+  "$BRIDGE" "$@"
+elif [ -f "$ROOT/state/session.json" ]; then
   echo "已存在设备配对，跳过配对（如需重新配对：$BRIDGE logout 后重新运行本脚本）"
 else
   echo "开始配对：终端会显示配对码，请在网页「本机接入」中确认并勾选项目。"
@@ -76,7 +118,9 @@ fi
 [ -f "$ROOT/state/worker.json" ] || "$BRIDGE" worker-init --preset member >/dev/null
 
 WORKBENCH_NOTE="已跳过工作台（TASKFLOW_SKIP_WORKBENCH=1）"
-if [ -z "${TASKFLOW_SKIP_WORKBENCH:-}" ]; then
+if [ "$REBOUND" = 1 ]; then
+  WORKBENCH_NOTE="已保留本机工作台安装与配置"
+elif [ -z "${TASKFLOW_SKIP_WORKBENCH:-}" ]; then
   if "$BRIDGE" workbench --action install; then
     WORKBENCH_NOTE="本机工作台：http://127.0.0.1:5288 ；网页工作台：在任务中心点「我的工作台」"
   else
@@ -84,7 +128,12 @@ if [ -z "${TASKFLOW_SKIP_WORKBENCH:-}" ]; then
   fi
 fi
 
-if [ "$(uname)" = "Darwin" ]; then
+if [ "$REBOUND" = 1 ]; then
+  SERVICE_ACTION=restart
+  SERVICE_STATUS=$("$BRIDGE" service --action status) || SERVICE_STATUS=''
+  case "$SERVICE_STATUS" in *'"status": "NOT_INSTALLED"'*) SERVICE_ACTION=install ;; esac
+  if "$BRIDGE" service --action "$SERVICE_ACTION" >/dev/null; then SERVICE_NOTE="Bridge 已以新设备授权启动"; else SERVICE_NOTE="请重启 Bridge 以启用新连接：$BRIDGE service --action $SERVICE_ACTION"; fi
+elif [ "$PLATFORM" = "Darwin" ]; then
   if "$BRIDGE" service --action install >/dev/null; then SERVICE_NOTE="Bridge 已设为登录自动运行"; else SERVICE_NOTE="Bridge 后台服务未能注册，请检查 $ROOT/state/worker.json 后运行：$BRIDGE service --action install"; fi
 else
   SERVICE_NOTE="非 macOS：请用 systemd 或 pm2 常驻运行 $BRIDGE worker 与 $BRIDGE workbench --action run"

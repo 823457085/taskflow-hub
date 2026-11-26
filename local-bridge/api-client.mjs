@@ -1,4 +1,4 @@
-import { constants } from 'node:fs';
+import { constants, lstatSync, renameSync, unlinkSync } from 'node:fs';
 import { open, lstat, mkdir, chmod, writeFile, rename, unlink, link } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -20,7 +20,11 @@ export async function ensureNoSession() {
   throw new Error('已有本地登录文件，请先运行 logout；配对不会覆盖现有登录。');
 }
 
-export async function saveSession(session, { exclusive = false } = {}) {
+const sessionChanged = () => Object.assign(new Error('本地设备连接已更改，请重新发起换绑。'), { code: 'SESSION_CHANGED' });
+
+export const sameSessionFile = (a, b) => !!a && !!b && a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs;
+
+export async function saveSession(session, { exclusive = false, expectedFile } = {}) {
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   const directory = await lstat(stateDir);
   if (!directory.isDirectory() || directory.isSymbolicLink() || (process.getuid && directory.uid !== process.getuid())) throw new Error('本地会话目录不安全。');
@@ -28,13 +32,74 @@ export async function saveSession(session, { exclusive = false } = {}) {
   const temporary = join(stateDir, `.session-${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, JSON.stringify(session), { mode: 0o600, flag: 'wx' });
+    await chmod(temporary, 0o600);
     if (exclusive) { await link(temporary, sessionPath); await unlink(temporary); }
-    else await rename(temporary, sessionPath);
-    await chmod(sessionPath, 0o600);
+    else if (expectedFile) {
+      // Both paths reside on the same filesystem. Avoid yielding between the check and rename.
+      if (!sameSessionFile(lstatSync(sessionPath, { throwIfNoEntry: false }), expectedFile)) throw sessionChanged();
+      renameSync(temporary, sessionPath);
+    } else await rename(temporary, sessionPath);
   } catch (error) {
     await unlink(temporary).catch(() => {});
+    if (error.code === 'SESSION_CHANGED') throw error;
     if (error.code === 'EEXIST') throw new Error('已有本地登录文件，请先运行 logout；配对不会覆盖现有登录。');
     throw new Error('无法安全保存本地会话，请检查目录权限。');
+  }
+}
+
+async function acquireReplacementLock() {
+  const lockPath = join(stateDir, '.session-replace.lock');
+  const claim = join(stateDir, `.session-replace-${randomUUID()}.tmp`);
+  const busy = () => new Error('本机已有换绑操作正在处理，请稍后再试。');
+  try {
+    await writeFile(claim, String(process.pid), { mode: 0o600, flag: 'wx' });
+    try { await link(claim, lockPath); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      let existing;
+      try {
+        existing = await open(lockPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        const info = await existing.stat();
+        if (!info.isFile() || info.size > 16 || info.mode & 0o077 || (process.getuid && info.uid !== process.getuid())) throw busy();
+        const owner = await existing.readFile('utf8');
+        if (!/^[1-9]\d{0,9}$/.test(owner)) throw busy();
+        try { process.kill(Number(owner), 0); throw busy(); }
+        catch (processError) { if (processError.code !== 'ESRCH') throw busy(); }
+        if (!sameSessionFile(lstatSync(lockPath, { throwIfNoEntry: false }), info)) throw busy();
+        unlinkSync(lockPath);
+      } finally { await existing?.close(); }
+      try { await link(claim, lockPath); }
+      catch (race) { if (race.code === 'EEXIST') throw busy(); throw race; }
+    }
+  } finally {
+    await unlink(claim).catch(() => {});
+  }
+  return () => unlink(lockPath).catch(() => {});
+}
+
+export async function replaceSession(session, expectedFile, revokePrevious) {
+  const backup = join(stateDir, `.session-before-${randomUUID()}.tmp`);
+  const release = await acquireReplacementLock();
+  let retained = false;
+  try {
+    await link(sessionPath, backup);
+    const previous = await lstat(backup);
+    if (!sameSessionFile(previous, expectedFile)) throw sessionChanged();
+    await saveSession(session, { expectedFile: previous });
+    const current = await lstat(sessionPath);
+    try {
+      const revoked = await revokePrevious();
+      retained = !revoked;
+      return revoked;
+    }
+    catch (error) {
+      if (!sameSessionFile(lstatSync(sessionPath, { throwIfNoEntry: false }), current)) throw sessionChanged();
+      renameSync(backup, sessionPath);
+      throw error;
+    }
+  } finally {
+    if (!retained) await unlink(backup).catch(() => {});
+    await release();
   }
 }
 
