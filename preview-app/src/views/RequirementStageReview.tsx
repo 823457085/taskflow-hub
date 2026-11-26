@@ -23,6 +23,7 @@ interface RequirementStageReviewProps {
   available?: boolean;
   executor: RequirementReviewExecutor;
   onAuthorizeDevice?: () => void;
+  pairingDevice?: boolean;
   onConfigure: () => void;
   onChanged?: () => Promise<void> | void;
   onUnauthorized: () => void;
@@ -47,7 +48,7 @@ function webUrl(value?: string | null): string | undefined {
 }
 
 export function RequirementStageReview({
-  task, stage, user, role, bundle, relatedTasks, available, executor, onAuthorizeDevice, onConfigure, onChanged, onUnauthorized, onForbidden,
+  task, stage, user, role, bundle, relatedTasks, available, executor, onAuthorizeDevice, pairingDevice, onConfigure, onChanged, onUnauthorized, onForbidden,
 }: RequirementStageReviewProps) {
   const { message } = App.useApp();
   const kind = REQUIREMENT_REVIEW_KINDS[stage];
@@ -307,7 +308,7 @@ export function RequirementStageReview({
           <Button icon={<Paperclip size={14} />} onClick={() => fileInput.current?.click()} disabled={starting || isRunning}>上传 XLSX</Button>
         </>}
         {available === false
-          ? <Button onClick={onAuthorizeDevice || onConfigure}>{onAuthorizeDevice ? '授权本机设备' : '配置 AI'}</Button>
+          ? <Button onClick={onAuthorizeDevice || onConfigure} loading={pairingDevice}>{onAuthorizeDevice ? '一键配对' : '配置 AI'}</Button>
           : <Button type="primary" icon={<Sparkles size={14} />} loading={starting} disabled={isRunning || isLoadingRun || missingMr} onClick={() => void launch()}>开始 AI 评审</Button>}
       </Flex>}
       {isCodeReview && scanNote && <Space wrap size={4}>

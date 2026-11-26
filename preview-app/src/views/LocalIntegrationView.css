@@ -17,6 +17,27 @@
 .tf-local-integration > .ant-card > .ant-card-head .ant-card-head-title { min-width: 0; white-space: normal; }
 .tf-local-integration > .ant-card > .ant-card-head .ant-card-extra { max-width: 100%; }
 
+.tf-local-quick-connect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.tf-local-quick-connect .ant-select {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.tf-local-advanced > summary {
+  width: fit-content;
+  cursor: pointer;
+  padding: 8px 0;
+  color: var(--tf-muted);
+}
+
+.tf-local-advanced[open] > summary { margin-bottom: 8px; }
+
 .tf-local-card-title-row {
   display: inline-flex;
   align-items: center;

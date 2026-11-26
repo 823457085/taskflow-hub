@@ -51,6 +51,8 @@ test('connect validates suggested IDs without changing manual pair arguments', (
   assert.throws(() => parseArgs(['connect', '--name', 'Mac', '--tool', 'custom', '--projects', 'one,']), /projects/);
   assert.throws(() => parseArgs(['connect', '--name', 'Mac', '--tool', 'custom', '--projects', Array.from({ length: 101 }, (_, i) => 'p' + i).join(',')]), /projects/);
   assert.throws(() => parseArgs(['pair', '--name', 'Mac', '--tool', 'custom', '--projects', 'default']), /参数/);
+  assert.equal(parseArgs(['connect', '--name', 'Mac', '--tool', 'custom', '--replace', 'yes']).options.replace, 'yes');
+  assert.throws(() => parseArgs(['connect', '--name', 'Mac', '--tool', 'custom', '--replace', 'maybe']), /replace/);
 });
 
 test('loopback handoff exposes only bounded confirmation metadata to its exact web origin and host', async t => {
@@ -77,7 +79,7 @@ test('loopback handoff exposes only bounded confirmation metadata to its exact w
 });
 
 test('handoff refuses malformed inputs and closes at expiry', async () => {
-  for (const value of [{ ...payload(), userCode: 'bad' }, { ...payload(), suggestedProjectIds: ['../escape'] }, { ...payload(), expiresAt: new Date(0).toISOString() }]) await assert.rejects(createBrowserHandoff(value), /确认信息/);
+  for (const value of [{ ...payload(), userCode: 'bad' }, { ...payload(), suggestedProjectIds: ['../escape'] }, { ...payload(), expiresAt: new Date(0).toISOString() }, { ...payload(), replacesExisting: 'yes' }]) await assert.rejects(createBrowserHandoff(value), /确认信息/);
   const handoff = await createBrowserHandoff({ ...payload(), expiresAt: new Date(Date.now() + 200).toISOString() });
   await new Promise(resolve => setTimeout(resolve, 300));
   await assert.rejects(fetch(`http://127.0.0.1:${handoff.port}/taskflow-pairing`, { headers: { Origin: origin } }));
@@ -136,6 +138,66 @@ test('connect closes handoff on opener failure, denial, expiry and poll errors w
     assert.ok(!(await readdir(state)).includes('session.json'));
     const port = new URLSearchParams(new URL(opened).hash.slice(1)).get('localBridgePort'); await assert.rejects(fetch(`http://127.0.0.1:${port}/taskflow-pairing`, { headers: { Origin: origin } }));
   }
+});
+
+test('explicit replacement verifies the new browser account and preserves the old device if work arrives during approval', async t => {
+  const app = createPlatform({ dbPath: ':memory:', connectorProfiles: {}, logger: { error() {} } });
+  app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening'); t.after(() => app.close());
+  const state = await directory(t); const url = `http://127.0.0.1:${app.server.address().port}`;
+  const file = join(state, 'session.json');
+  const password = randomBytes(32).toString('base64url');
+  const post = (path, body, headers = {}) => fetch(url + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const bearer = token => ({ Authorization: `Bearer ${token}` });
+  const me = token => fetch(url + '/api/me', { headers: bearer(token) });
+  assert.equal((await post('/api/setup', { username: 'original-browser', password })).status, 201);
+  const originalLogin = await post('/api/login', { username: 'original-browser', password });
+  const originalCookie = originalLogin.headers.get('set-cookie').split(';')[0];
+  const originalAccount = await originalLogin.json();
+  assert.equal((await post('/api/users', { username: 'replacement-browser', password, role: 'DEV' }, bearer(originalAccount.token))).status, 201);
+  const replacementLogin = await post('/api/login', { username: 'replacement-browser', password });
+  const replacementCookie = replacementLogin.headers.get('set-cookie').split(';')[0];
+  const task = (await (await post('/api/tasks', { jiraKey: 'REPLACE-1', title: 'Bridge replacement' }, bearer(originalAccount.token))).json()).task;
+  const options = { url, 'web-url': url, name: 'Replacement device', tool: 'custom', projects: ['default'] };
+  const approve = async (value, cookie, replace = false) => {
+    const port = new URLSearchParams(new URL(value).hash.slice(1)).get('localBridgePort');
+    const data = await (await fetch(`http://127.0.0.1:${port}/taskflow-pairing`, { headers: { Origin: url } })).json();
+    assert.equal(data.replacesExisting === true, replace);
+    assert.deepEqual(data.suggestedProjectIds, ['default']);
+    assert.equal((await post('/api/device-authorizations/decision', { userCode: data.userCode, decision: 'APPROVE', projectIds: ['default'] }, { Cookie: cookie, Origin: url })).status, 200);
+  };
+  assert.equal((await connect(options, state, { onOpen: value => approve(value, originalCookie) })).code, 0);
+  const oldRaw = await readFile(file, 'utf8'); const old = JSON.parse(oldRaw);
+  const attempt = async (value, busy) => {
+    assert.equal(await readFile(file, 'utf8'), oldRaw);
+    assert.equal((await me(old.token)).status, 200);
+    await approve(value, replacementCookie, true);
+    if (!busy) return;
+    const at = new Date().toISOString();
+    app.db.prepare(`INSERT INTO local_ai_runs
+      (id,task_id,project_id,actor_id,mode,engine,tool,status,started_at,updated_at,runner,device_id,phase)
+      VALUES (?,?,?,?,'read','codex','codex-cli','RUNNING',?,?,'bridge',?,'QUEUED')`)
+      .run('replacement-busy', task.id, 'default', originalAccount.user.id, at, at, old.deviceId);
+  };
+  const busy = await connect({ ...options, replace: 'yes' }, state, { onOpen: value => attempt(value, true) });
+  assert.equal(busy.code, 1); assert.match(busy.stderr, /排队或运行/);
+  assert.equal(await readFile(file, 'utf8'), oldRaw);
+  assert.equal((await me(old.token)).status, 200);
+  assert.equal(app.db.prepare('SELECT count(*) AS n FROM local_device_sessions WHERE revoked_at IS NULL').get().n, 1);
+  app.db.prepare("UPDATE local_ai_runs SET status='SUCCEEDED' WHERE id='replacement-busy'").run();
+
+  const stoppedOwner = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await once(stoppedOwner, 'exit');
+  await writeFile(join(state, '.session-replace.lock'), String(stoppedOwner.pid), { mode: 0o600 });
+
+  const result = await connect({ ...options, replace: 'yes' }, state, { onOpen: value => attempt(value, false) });
+  assert.equal(result.code, 0, result.stderr); assert.match(result.stdout, /已换绑并验证任务读取/);
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  assert.notEqual(saved.deviceId, old.deviceId);
+  assert.equal((await me(old.token)).status, 401);
+  assert.equal((await (await me(saved.token)).json()).user.username, 'replacement-browser');
+  assert.equal((await fetch(url + '/api/me', { headers: { Cookie: originalCookie } })).status, 200);
+  assert.deepEqual(await readdir(state), ['session.json']);
+  for (const secret of [saved.token, old.token, password]) assert.ok(!`${busy.stdout}${busy.stderr}${result.stdout}${result.stderr}`.includes(secret));
 });
 
 test('connect archives only confirmed HTTP 401, preserves corrupt/forbidden/network failures and detects concurrently replaced logins', async t => {

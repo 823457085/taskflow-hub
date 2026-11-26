@@ -118,7 +118,7 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
   if (!['local', 'server'].includes(deployment)) throw new Error('deployment must be local or server');
   const serverMode = deployment === 'server';
   // Behind a reverse proxy every socket is loopback, so loopback-gated local features must not exist in server mode.
-  if (serverMode) hostBridgeStateDir = null;
+  if (serverMode || trustProxy) hostBridgeStateDir = null;
   const clientIp = req => {
     const socketIp = req.socket.remoteAddress || 'unknown';
     if (!trustProxy || !LOOPBACK.includes(socketIp)) return socketIp;
@@ -298,8 +298,35 @@ export function createPlatform({ dbPath = resolve(import.meta.dirname, '.data/pl
       if (await apiSpecRoutes({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       if (await connectors({ method, path, url, user, body: requestBody, send, reauthorize: () => auth(req) })) return;
       user = auth(req);
-      if (method === 'GET' && path === '/api/me') return send(200, { user: publicUser(user), permissions: globalPermissions(user), workbench: { enabled: Boolean(workbenchGateway && !user.localDevice), mode: workbenchGateway && !user.localDevice ? workbenchMode : null }, ...(user.localDevice ? { authorization: { kind: 'LOCAL_DEVICE', deviceId: user.localDevice.id, projectIds: JSON.parse(user.localDevice.project_ids), expiresAt: new Date(user.localDevice.expires_at).toISOString() } } : {}) });
-      if (method === 'POST' && path === '/api/logout') { transaction(() => { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(user.token_hash); localDevices.logout(user); audit(user.id, 'LOGOUT', user.id); }); return send(204, undefined, { 'Set-Cookie': `taskflow_session=; ${cookieFlags}; Max-Age=0` }); }
+      if (method === 'GET' && path === '/api/me') {
+        const device = user.localDevice;
+        if (device) bridgeDispatch?.sweep();
+        return send(200, {
+          user: publicUser(user),
+          permissions: globalPermissions(user),
+          workbench: { enabled: Boolean(workbenchGateway && !device), mode: workbenchGateway && !device ? workbenchMode : null },
+          ...(device ? { authorization: {
+            kind: 'LOCAL_DEVICE', deviceId: device.id, projectIds: JSON.parse(device.project_ids),
+            expiresAt: new Date(device.expires_at).toISOString(), hasActiveBridgeRuns: localDevices.hasActiveBridgeRuns(device.id),
+          } } : {}),
+        });
+      }
+      if (method === 'POST' && path === '/api/logout') {
+        const replacingDevice = url.searchParams.get('reason') === 'replace-device';
+        if (replacingDevice && (!user.localDevice || user.authTransport !== 'BEARER')) {
+          fail(403, 'BRIDGE_DEVICE_REQUIRED', '仅本机 Bridge 可解除自己的旧配对');
+        }
+        transaction(() => {
+          if (replacingDevice) {
+            bridgeDispatch?.sweep();
+            localDevices.requireBridgeIdle(user.localDevice.id);
+          }
+          db.prepare('DELETE FROM sessions WHERE token_hash=?').run(user.token_hash);
+          localDevices.logout(user);
+          audit(user.id, 'LOGOUT', user.id);
+        });
+        return send(204, undefined, { 'Set-Cookie': `taskflow_session=; ${cookieFlags}; Max-Age=0` });
+      }
       if (path === '/api/users') {
         if (!globalPermissions(user).manageUsers) fail(403, 'FORBIDDEN', '当前角色无权管理用户');
         if (method === 'GET') return send(200, { users: db.prepare('SELECT id,username,role FROM users ORDER BY username').all() });

@@ -13,15 +13,15 @@ export async function openDailyChrome(url) {
   catch { throw new Error('无法打开日常 Chrome，请确认已安装 Chrome，或运行 pair 使用手动配对。'); }
 }
 
-export async function createBrowserHandoff({ webUrl, userCode, deviceName, tool, expiresAt, suggestedProjectIds = [] }) {
+export async function createBrowserHandoff({ webUrl, userCode, deviceName, tool, expiresAt, suggestedProjectIds = [], replacesExisting = false }) {
   const origin = validateUrl(webUrl);
   const expires = typeof expiresAt === 'number' ? expiresAt : Date.parse(expiresAt);
   if (!/^[A-HJ-NP-Z2-9]{4}-?[A-HJ-NP-Z2-9]{4}$/i.test(userCode || '') ||
       typeof deviceName !== 'string' || !deviceName.trim() || deviceName.length > 80 || /[\x00-\x1f\x7f]/.test(deviceName) ||
       !['codex', 'codex-cli', 'claude-code', 'cursor', 'custom'].includes(tool) ||
       !Number.isFinite(expires) || expires <= Date.now() || !Array.isArray(suggestedProjectIds) ||
-      suggestedProjectIds.length > 100 || suggestedProjectIds.some(id => !projectId(id))) throw new Error('本机配对确认信息不正确。');
-  const payload = JSON.stringify({ schemaVersion: 1, userCode, deviceName, tool, expiresAt, suggestedProjectIds: [...new Set(suggestedProjectIds)] });
+      suggestedProjectIds.length > 100 || suggestedProjectIds.some(id => !projectId(id)) || typeof replacesExisting !== 'boolean') throw new Error('本机配对确认信息不正确。');
+  const payload = JSON.stringify({ schemaVersion: 1, userCode, deviceName, tool, expiresAt, suggestedProjectIds: [...new Set(suggestedProjectIds)], ...(replacesExisting ? { replacesExisting } : {}) });
   let host;
   const server = createServer((req, res) => {
     res.setHeader('Cache-Control', 'no-store');

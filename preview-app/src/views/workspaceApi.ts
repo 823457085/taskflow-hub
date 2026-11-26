@@ -93,6 +93,7 @@ export interface HostBridgeStatus {
   supported: boolean; connected: boolean;
   status: 'ACTIVE' | 'EXPIRED' | 'REVOKED' | 'DISCONNECTED' | 'UNSUPPORTED' | 'INVALID' | 'OTHER_USER';
   device: HostBridgeDevice | null; suggestedProjectIds: string[];
+  bindingRevision?: string;
 }
 export type LocalAiRunner = 'local' | 'workbench' | 'bridge';
 export type LocalAiEngineId = 'codex' | 'antigravity' | 'cursor' | 'claude';

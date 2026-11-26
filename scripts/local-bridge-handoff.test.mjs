@@ -19,6 +19,9 @@ test('only one canonical unprivileged numeric port on the local route becomes a 
 
 test('handoff payload validation rejects unexpected credential fields, invalid identities, scopes and expired requests without echoing data', () => {
   const valid = fixture(); assert.deepEqual(parseLocalBridgeHandoff(valid).suggestedProjectIds, ['p1', 'p2']);
+  assert.equal(parseLocalBridgeHandoff(valid).replacesExisting, undefined);
+  assert.equal(parseLocalBridgeHandoff({ ...valid, replacesExisting: true }).replacesExisting, true);
+  for (const replacesExisting of [false, 'true', { token: 'private-value' }]) assert.throws(() => parseLocalBridgeHandoff({ ...valid, replacesExisting }));
   for (const patch of [{ schemaVersion: 2 }, { userCode: 'private-value' }, { deviceCode: 'private-value' }, { token: 'private-value' }, { deviceName: '\nprivate-value' }, { tool: 'unknown' }, { expiresAt: new Date(Date.now() - 1).toISOString() }, { suggestedProjectIds: ['../private-value'] }, { suggestedProjectIds: Array(101).fill('p1') }]) assert.throws(() => parseLocalBridgeHandoff({ ...valid, ...patch }), error => !error.message.includes('private-value'));
   for (const value of [null, [], 1, 'private-value']) assert.throws(() => parseLocalBridgeHandoff(value));
   assert.deepEqual(suggestedLocalProjects(['p1', 'p2', 'p1', 'other-project'], [{ id: 'p2' }, { id: 'p3' }]), ['p2']);
